@@ -26,6 +26,18 @@ const XAI_OAUTH_SCOPE: &str =
 const XAI_OAUTH_DISCOVERY_URL: &str = "https://auth.x.ai/.well-known/openid-configuration";
 const XAI_DEVICE_GRANT_TYPE: &str = "urn:ietf:params:oauth:grant-type:device_code";
 
+/// One incremental chunk of a streaming completion.
+///
+/// Reasoning-capable providers (DeepSeek `deepseek-flash`, Anthropic extended thinking, …)
+/// stream a private chain of thought *before* the visible answer. Dropping those chunks
+/// makes the UI look frozen while the model thinks, so they are surfaced separately and
+/// rendered as a "Thinking" block instead of being merged into the answer text.
+#[derive(Debug, Clone)]
+pub enum StreamChunk {
+    Text(String),
+    Thinking(String),
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderModelInfo {
@@ -2437,11 +2449,18 @@ impl ProviderManager {
         cwd: &str,
         history: &[(String, String)],
         model_override: Option<&str>,
-        mut on_delta: F,
+        mut on_chunk: F,
     ) -> Option<(String, String, String)>
     where
-        F: FnMut(&str),
+        F: FnMut(StreamChunk),
     {
+        // Adapter for the text-only SSE readers below.
+        macro_rules! on_delta {
+            () => {};
+            ($text:expr) => {
+                on_chunk(StreamChunk::Text(($text).to_string()))
+            };
+        }
         use std::io::{BufRead, BufReader};
 
         let resolved_model = self.resolve_connected_model(model_override);
@@ -2489,8 +2508,12 @@ impl ProviderManager {
             )
         };
 
+        // NOTE: a total request timeout used to cut long answers (and DeepSeek thinking
+        // turns) off mid-stream, which then fell through to the canned fallback reply.
+        // Bound the connect phase and keep a generous outer cap instead.
         let http = reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(60))
+            .connect_timeout(std::time::Duration::from_secs(15))
+            .timeout(std::time::Duration::from_secs(300))
             .build()
             .ok()?;
 
@@ -2513,7 +2536,7 @@ impl ProviderManager {
                     &sys_prompt,
                     history,
                     prompt,
-                    &mut on_delta,
+                    &mut |t: &str| on_chunk(StreamChunk::Text(t.to_string())),
                 ) {
                     Ok(reply) if !reply.trim().is_empty() => {
                         return Some((reply, provider_name, model_id));
@@ -2534,7 +2557,7 @@ impl ProviderManager {
                                         &sys_prompt,
                                         history,
                                         prompt,
-                                        &mut on_delta,
+                                        &mut |t: &str| on_chunk(StreamChunk::Text(t.to_string())),
                                     ) {
                                         if !reply.trim().is_empty() {
                                             return Some((reply, provider_name, model_id));
@@ -2588,7 +2611,7 @@ impl ProviderManager {
                                 &sys_prompt,
                                 history,
                                 prompt,
-                                &mut on_delta,
+                                &mut |t: &str| on_chunk(StreamChunk::Text(t.to_string())),
                             ) {
                                 if !reply.trim().is_empty() {
                                     return Some((reply, provider_name, model_id));
@@ -2640,8 +2663,33 @@ impl ProviderManager {
                     "messages": msgs,
                     "stream": true
                 }))
-                .send()
-                .ok()?;
+                .send();
+
+            let resp = match resp {
+                Ok(resp) => resp,
+                Err(err) => {
+                    let msg = format!(
+                        "⚠️ {} request to `{}` failed before any data arrived: {}",
+                        provider_name, url, err
+                    );
+                    tracing::warn!("{msg}");
+                    return Some((msg, provider_name, model_id));
+                }
+            };
+
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().unwrap_or_default();
+                let msg = format!(
+                    "⚠️ {} returned HTTP {} for model `{}`: {}",
+                    provider_name,
+                    status.as_u16(),
+                    model_id,
+                    body.chars().take(400).collect::<String>()
+                );
+                tracing::warn!("{msg}");
+                return Some((msg, provider_name, model_id));
+            }
 
             if resp.status().is_success() {
                 let mut acc = String::new();
@@ -2657,19 +2705,26 @@ impl ProviderManager {
                             if ev.get("type").and_then(|v| v.as_str())
                                 == Some("content_block_delta")
                             {
+                                if let Some(th) = ev
+                                    .pointer("/delta/thinking")
+                                    .and_then(|v| v.as_str())
+                                    .filter(|s| !s.is_empty())
+                                {
+                                    on_chunk(StreamChunk::Thinking(th.to_string()));
+                                }
                                 if let Some(d) = ev
                                     .pointer("/delta/text")
                                     .and_then(|v| v.as_str())
                                     .filter(|s| !s.is_empty())
                                 {
                                     acc.push_str(d);
-                                    on_delta(d);
+                                    on_delta!(d);
                                 }
                             } else if let Some(text) =
                                 ev.pointer("/content/0/text").and_then(|v| v.as_str())
                             {
                                 acc.push_str(text);
-                                on_delta(text);
+                                on_delta!(text);
                             }
                         }
                     } else if trimmed.starts_with('{') {
@@ -2678,7 +2733,7 @@ impl ProviderManager {
                                 body.pointer("/content/0/text").and_then(|t| t.as_str())
                             {
                                 acc.push_str(text);
-                                on_delta(text);
+                                on_delta!(text);
                             }
                         }
                     }
@@ -2722,16 +2777,44 @@ impl ProviderManager {
             {
                 msgs.push(json!({ "role": "user", "content": prompt }));
             }
-            if let Ok(resp) = req
+            let sent = req
                 .json(&json!({
                     "model": model_id,
                     "messages": msgs,
                     "stream": true
                 }))
-                .send()
+                .send();
+
+            let resp = match sent {
+                Ok(resp) => resp,
+                Err(err) => {
+                    let msg = format!(
+                        "⚠️ {} request to `{}` failed before any data arrived: {}",
+                        provider_name, url, err
+                    );
+                    tracing::warn!("{msg}");
+                    return Some((msg, provider_name, model_id));
+                }
+            };
+
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().unwrap_or_default();
+                let msg = format!(
+                    "⚠️ {} returned HTTP {} for model `{}`: {}",
+                    provider_name,
+                    status.as_u16(),
+                    model_id,
+                    body.chars().take(400).collect::<String>()
+                );
+                tracing::warn!("{msg}");
+                return Some((msg, provider_name, model_id));
+            }
+
             {
-                if resp.status().is_success() {
+                {
                     let mut acc = String::new();
+                    let mut reasoning_acc = String::new();
                     let reader = BufReader::new(resp);
                     for line in reader.lines().map_while(Result::ok) {
                         let trimmed = line.trim();
@@ -2741,20 +2824,32 @@ impl ProviderManager {
                                 continue;
                             }
                             if let Ok(ev) = serde_json::from_str::<Value>(data_str) {
+                                // Reasoning models (DeepSeek deepseek-flash, o-series, …) stream
+                                // their chain of thought before the answer. Forward it as a
+                                // thinking chunk so the UI can show progress instead of freezing.
+                                let thinking_delta = ev
+                                    .pointer("/choices/0/delta/reasoning_content")
+                                    .or_else(|| ev.pointer("/choices/0/delta/reasoning"))
+                                    .and_then(|v| v.as_str())
+                                    .filter(|s| !s.is_empty());
+                                if let Some(th) = thinking_delta {
+                                    reasoning_acc.push_str(th);
+                                    on_chunk(StreamChunk::Thinking(th.to_string()));
+                                }
                                 if let Some(d) = ev
                                     .pointer("/choices/0/delta/content")
                                     .and_then(|v| v.as_str())
                                     .filter(|s| !s.is_empty())
                                 {
                                     acc.push_str(d);
-                                    on_delta(d);
+                                    on_delta!(d);
                                 } else if let Some(t) = ev
                                     .pointer("/choices/0/message/content")
                                     .and_then(|v| v.as_str())
                                     .filter(|s| !s.is_empty())
                                 {
                                     acc.push_str(t);
-                                    on_delta(t);
+                                    on_delta!(t);
                                 }
                             }
                         } else if trimmed.starts_with('{') {
@@ -2765,13 +2860,18 @@ impl ProviderManager {
                                     .filter(|s| !s.is_empty())
                                 {
                                     acc.push_str(t);
-                                    on_delta(t);
+                                    on_delta!(t);
                                 }
                             }
                         }
                     }
                     if !acc.trim().is_empty() {
                         return Some((acc, provider_name, model_id));
+                    }
+                    if !reasoning_acc.trim().is_empty() {
+                        // Only reasoning came back (e.g. the stream ended right after thinking):
+                        // surface it instead of silently falling back to the canned reply.
+                        return Some((reasoning_acc, provider_name, model_id));
                     }
                 }
             }
@@ -2850,5 +2950,143 @@ mod legacy_model_migration_tests {
         // Current ids stay untouched.
         assert!(ProviderManager::migrate_legacy_model_id("deepseek", "deepseek-flash").is_none());
         assert!(ProviderManager::migrate_legacy_model_id("deepseek", "deepseek-v4-pro").is_none());
+    }
+}
+
+#[cfg(test)]
+mod streaming_chunk_tests {
+    use super::{ProviderManager, StreamChunk};
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+    use std::path::PathBuf;
+
+    /// Spins up a fake OpenAI-compatible SSE endpoint that answers every request with `body`.
+    fn fake_provider(body: &'static str) -> (String, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            if let Ok((stream, _)) = listener.accept() {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                // Consume the request headers so the client is not blocked writing the body.
+                while reader.read_line(&mut line).map(|n| n > 0).unwrap_or(false) {
+                    if line == "\r\n" {
+                        break;
+                    }
+                    line.clear();
+                }
+                let mut stream = stream;
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{}",
+                    body
+                );
+                let _ = stream.flush();
+            }
+        });
+        (format!("http://127.0.0.1:{}/v1", port), handle)
+    }
+
+    fn manager_pointing_at(base_url: &str) -> (ProviderManager, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("quixi-stream-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let state = serde_json::json!({
+            "onboardingCompleted": true,
+            "activeProvider": "custom",
+            "activeModel": "stream-test-model",
+            "providers": [{
+                "id": "custom",
+                "name": "Custom Endpoint",
+                "configured": true,
+                "baseUrl": base_url,
+                "apiFormat": "openai",
+                "authMode": "api_key",
+                "selectedModel": "stream-test-model",
+                "apiKeyRaw": "test-key"
+            }]
+        });
+        std::fs::write(
+            dir.join("providers.json"),
+            serde_json::to_vec_pretty(&state).unwrap(),
+        )
+        .unwrap();
+        (ProviderManager::new(&dir), dir)
+    }
+
+    /// Reasoning deltas must reach the UI as thinking chunks, and the visible answer must
+    /// still be assembled — dropping the reasoning was what made the window look frozen
+    /// while DeepSeek's `deepseek-flash` (thinking on by default) was thinking.
+    #[test]
+    fn reasoning_deltas_are_streamed_as_thinking_chunks() {
+        let (base_url, server) = fake_provider(concat!(
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"thinking...\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Hallo \"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Welt\"}}]}\n\n",
+            "data: [DONE]\n\n"
+        ));
+        let (mgr, dir) = manager_pointing_at(&base_url);
+
+        let mut thinking = String::new();
+        let mut text = String::new();
+        let out = mgr.try_live_completion_streaming(
+            "hi",
+            &dir.to_string_lossy(),
+            &[],
+            Some("stream-test-model"),
+            |chunk| match chunk {
+                StreamChunk::Thinking(t) => thinking.push_str(&t),
+                StreamChunk::Text(t) => text.push_str(&t),
+            },
+        );
+        server.join().ok();
+        let (reply, _, _) = out.expect("live completion should return");
+
+        assert_eq!(thinking, "thinking...");
+        assert_eq!(text, "Hallo Welt");
+        assert_eq!(reply, "Hallo Welt");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A provider error must be surfaced to the user, not swallowed into the canned
+    /// "Hello from QuixiDesk" fallback reply.
+    #[test]
+    fn provider_http_errors_are_surfaced() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            if let Ok((stream, _)) = listener.accept() {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                while reader.read_line(&mut line).map(|n| n > 0).unwrap_or(false) {
+                    if line == "\r\n" {
+                        break;
+                    }
+                    line.clear();
+                }
+                let body = "{\"error\":{\"message\":\"Insufficient Balance\"}}";
+                let mut stream = stream;
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 402 Payment Required\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.flush();
+            }
+        });
+        let (mgr, dir) = manager_pointing_at(&format!("http://127.0.0.1:{}/v1", port));
+
+        let out = mgr.try_live_completion_streaming(
+            "hi",
+            &dir.to_string_lossy(),
+            &[],
+            Some("stream-test-model"),
+            |_| {},
+        );
+        server.join().ok();
+        let (reply, _, _) = out.expect("error must be reported, not silently dropped");
+        assert!(reply.contains("402"), "reply was: {reply}");
+        assert!(reply.contains("Insufficient Balance"), "reply was: {reply}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

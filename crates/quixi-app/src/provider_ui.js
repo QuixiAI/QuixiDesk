@@ -32,22 +32,34 @@
     };
   } catch (_) {}
 
-  // Ensure Web Animations API (Element.prototype.animate) finite transitions never stall at
-  // currentTime: 0 / opacity: 0 inside WKWebView (e.g. file preview drawer, right sidebar transitions).
+  // Web Animations API watchdog.
+  //
+  // Some WAAPI transitions never start inside WKWebView when the view was occluded (file
+  // preview drawer, right sidebar). The fix must NOT force-finish healthy animations: the
+  // renderer's animation-driven components re-trigger on `finish`, which turns into an
+  // endless create -> finish -> create loop that pins the WebContent process at 100% CPU
+  // and freezes the whole UI (observed via `sample`: WebCore::processIterableKeyframes).
+  //
+  // So: only nudge animations that never started, and only finish ones that are genuinely
+  // stuck at currentTime 0 after a grace period.
   try {
     if (typeof Element !== 'undefined' && Element.prototype && typeof Element.prototype.animate === 'function' && !Element.prototype.animate.__quixi_waapi_fix__) {
       var origAnimate = Element.prototype.animate;
       var patchedAnimate = function(keyframes, options) {
         var anim = origAnimate.apply(this, arguments);
         try {
-          var iters = (options && typeof options === 'object' && typeof options.iterations === 'number') ? options.iterations : 1;
-          if (iters !== Infinity && anim && typeof anim.finish === 'function') {
-            Promise.resolve().then(function() {
-              try { anim.finish(); } catch (_) {}
-            });
+          if (!anim) return anim;
+          if (anim.playState === 'idle') {
+            try { anim.play(); } catch (_) {}
+          } else {
             window.setTimeout(function() {
-              try { anim.finish(); } catch (_) {}
-            }, 20);
+              try {
+                var atZero = (typeof anim.currentTime === 'number' ? anim.currentTime : 0) === 0;
+                if (atZero && (anim.playState === 'running' || anim.playState === 'paused') && typeof anim.finish === 'function') {
+                  anim.finish();
+                }
+              } catch (_) {}
+            }, 400);
           }
         } catch (_) {}
         return anim;

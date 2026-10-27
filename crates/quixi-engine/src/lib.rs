@@ -2,7 +2,7 @@ pub mod providers;
 
 use chrono::Utc;
 use parking_lot::RwLock;
-use providers::ProviderManager;
+use providers::{ProviderManager, StreamChunk};
 use quixi_mcp::McpHost;
 use quixi_netstack::NetstackPolicy;
 use quixi_proto::{
@@ -2439,7 +2439,7 @@ impl QuixiEngine {
         mut on_delta: F,
     ) -> (String, String)
     where
-        F: FnMut(&str),
+        F: FnMut(StreamChunk),
     {
         let resolved_default = self.provider_manager.resolve_connected_model(model_override);
         let browser_context = self.maybe_run_browser_for_prompt(prompt);
@@ -2498,7 +2498,7 @@ impl QuixiEngine {
                             if let Some(text) =
                                 val.pointer("/content/0/text").and_then(|t| t.as_str())
                             {
-                                on_delta(text);
+                                on_delta(StreamChunk::Text(text.to_string()));
                                 return (text.to_string(), resolved_default);
                             }
                         }
@@ -2562,7 +2562,7 @@ impl QuixiEngine {
         };
 
         for line in fallback_reply.split_inclusive('\n') {
-            on_delta(line);
+            on_delta(StreamChunk::Text(line.to_string()));
         }
 
         let final_model = active_provider_info
@@ -2926,7 +2926,13 @@ impl QuixiEngine {
                 &cwd,
                 &history,
                 Some(&session_model),
-                |delta_chunk| {
+                |chunk| {
+                    let (delta_type, delta_key, delta_text) = match chunk {
+                        StreamChunk::Text(text) => ("text_delta", "text", text),
+                        StreamChunk::Thinking(thinking) => {
+                            ("thinking_delta", "thinking", thinking)
+                        }
+                    };
                     eng.emit_eipc(
                         "claude.web",
                         "LocalAgentModeSessions",
@@ -2943,8 +2949,8 @@ impl QuixiEngine {
                                     "type": "content_block_delta",
                                     "index": 0,
                                     "delta": {
-                                        "type": "text_delta",
-                                        "text": delta_chunk
+                                        "type": delta_type,
+                                        delta_key: delta_text
                                     }
                                 }
                             }
@@ -3368,7 +3374,13 @@ impl QuixiEngine {
                 &cwd,
                 &history,
                 Some(&session_model),
-                |delta_chunk| {
+                |chunk| {
+                    let (delta_type, delta_key, delta_text) = match chunk {
+                        StreamChunk::Text(text) => ("text_delta", "text", text),
+                        StreamChunk::Thinking(thinking) => {
+                            ("thinking_delta", "thinking", thinking)
+                        }
+                    };
                     eng.emit_eipc(
                         "claude.web",
                         "LocalSessions",
@@ -3384,8 +3396,8 @@ impl QuixiEngine {
                                     "type": "content_block_delta",
                                     "index": 0,
                                     "delta": {
-                                        "type": "text_delta",
-                                        "text": delta_chunk
+                                        "type": delta_type,
+                                        delta_key: delta_text
                                     }
                                 }
                             }
