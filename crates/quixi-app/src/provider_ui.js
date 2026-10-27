@@ -255,12 +255,8 @@
   function startLogoGuard() {
     function scrubBrandingAndMascots() {
       try {
-        var pillEl = document.getElementById('quixi-provider-pill');
-        if (pillEl) {
-          var targetRight = (location.pathname.indexOf('/cowork/') === 0) ? '380px' : '136px';
-          if (pillEl.style.right !== targetRight) {
-            pillEl.style.right = targetRight;
-          }
+        if (typeof dockHeaderPills === 'function') {
+          dockHeaderPills();
         }
 
         // Redirect legacy /code or /epitaxy routes to the unified /new workspace
@@ -608,32 +604,6 @@
       '[data-cds="SegmentedControl"][aria-label="Surface"], [data-cds="SegmentedControl"]:has([data-surface-segment]), div.contents:has(> [data-cds="SegmentedControl"][aria-label="Surface"]), a[aria-label*="Learn more about Cowork"] {',
       '  display: none !important;',
       '}',
-      'div[data-chorus-tray-open] {',
-      '  position: relative !important;',
-      '  z-index: 20 !important;',
-      '  margin-top: -52.5px !important;',
-      '  margin-bottom: 10.5px !important;',
-      '  height: 42px !important;',
-      '  pointer-events: none !important;',
-      '}',
-      'div[data-chorus-tray-open] > div {',
-      '  height: 42px !important;',
-      '  pointer-events: none !important;',
-      '}',
-      'div[data-chorus-tray-open] > div > div {',
-      '  background: transparent !important;',
-      '  box-shadow: none !important;',
-      '  border: none !important;',
-      '  height: 42px !important;',
-      '  padding-top: 0 !important;',
-      '  padding-bottom: 0 !important;',
-      '  padding-left: 48px !important;',
-      '  padding-right: 170px !important;',
-      '  pointer-events: none !important;',
-      '}',
-      'div[data-chorus-tray-open] button, div[data-chorus-tray-open] [role="button"] {',
-      '  pointer-events: auto !important;',
-      '}',
       '.dframe-sidebar [data-row] {',
       '  border-radius: 9px !important;',
       '  color: #CBD5E1 !important;',
@@ -964,8 +934,15 @@
       '  letter-spacing: 0.12em; padding: 8px 14px; border-radius: 8px; background: #FFFFFF;',
       '  border: 1px dashed #4F46E5; color: #4338CA; display: inline-block; margin: 8px 0; user-select: text;',
       '}',
+      '#dframe-header-actions-slot { margin-right: 12px !important; }',
+      '.animate-incognito-header-in { display: none !important; }',
+      '.text-bg-000, button[aria-label="Exit incognito"] { color: #F8FAFC !important; }',
+      '[data-testid="incognito-frame"] {',
+      '  border: 1.5px dashed rgba(45, 212, 191, 0.55) !important;',
+      '  box-shadow: 0 0 0 100px #0B1120 !important;',
+      '}',
       '#quixi-provider-pill {',
-      '  position: fixed; top: 7px; right: 136px; z-index: 99990;',
+      '  position: fixed; top: 7px; right: 160px; z-index: 99990;',
       '  display: inline-flex; align-items: center; gap: 7px;',
       '  padding: 4px 12px; border-radius: 8px; font-size: 11.5px; font-weight: 600;',
       '  background: #0F172A; color: #F8FAFC; border: 1px solid rgba(20, 184, 166, 0.45);',
@@ -974,7 +951,7 @@
       '}',
       '#quixi-provider-pill:hover { border-color: #2DD4BF; background: #1E293B; }',
       '#quixi-browser-pill {',
-      '  position: fixed; top: 7px; right: 44px; z-index: 99990;',
+      '  position: fixed; top: 7px; right: 52px; z-index: 99990;',
       '  display: inline-flex; align-items: center; gap: 6px;',
       '  padding: 4px 10px; border-radius: 8px; font-size: 11.5px; font-weight: 600;',
       '  background: #0F172A; color: #F8FAFC; border: 1px solid rgba(79, 70, 229, 0.55);',
@@ -1077,6 +1054,43 @@
     return state.providers[0] || null;
   }
 
+  function dockHeaderPills() {
+    var pPill = document.getElementById('quixi-provider-pill');
+    var bPill = document.getElementById('quixi-browser-pill');
+    if (!pPill || !bPill) return;
+    var slot = document.getElementById('dframe-header-actions-slot');
+    var isOpen = !!(browserState && browserState.paneOpen);
+    if (slot && slot.parentElement && !isOpen) {
+      if (pPill.parentElement !== slot.parentElement || pPill.nextElementSibling !== bPill) {
+        slot.parentElement.insertBefore(pPill, slot);
+      }
+      if (bPill.parentElement !== slot.parentElement || bPill.nextElementSibling !== slot) {
+        slot.parentElement.insertBefore(bPill, slot);
+      }
+      pPill.style.position = 'static';
+      pPill.style.marginRight = '6px';
+      pPill.style.flexShrink = '0';
+      bPill.style.position = 'static';
+      bPill.style.marginRight = '6px';
+      bPill.style.flexShrink = '0';
+    } else {
+      if (pPill.parentElement !== document.body) {
+        document.body.appendChild(pPill);
+      }
+      if (bPill.parentElement !== document.body) {
+        document.body.appendChild(bPill);
+      }
+      pPill.style.position = 'fixed';
+      pPill.style.top = '7px';
+      pPill.style.marginRight = '0';
+      pPill.style.right = isOpen ? '592px' : '160px';
+      bPill.style.position = 'fixed';
+      bPill.style.top = '7px';
+      bPill.style.marginRight = '0';
+      bPill.style.right = isOpen ? '484px' : '52px';
+    }
+  }
+
   function renderPill() {
     injectStyles();
     var existing = document.getElementById('quixi-provider-pill');
@@ -1097,7 +1111,6 @@
       document.body.appendChild(existing);
     }
     existing.style.display = 'inline-flex';
-    existing.style.right = (location.pathname.indexOf('/cowork/') === 0) ? '380px' : '136px';
     var hasCfg = state && state.hasConfiguredProvider;
     var activeProv = state ? state.activeProvider : 'openrouter';
     var activeMod = state ? state.activeModel : '';
@@ -1146,11 +1159,7 @@
     btn.innerHTML =
       '<span class="qp-dot"></span>' +
       '<span>🌐 Browser</span>';
-    var pPill = document.getElementById('quixi-provider-pill');
-    if (pPill) {
-      pPill.style.right = isOpen ? '592px' : ((location.pathname.indexOf('/cowork/') === 0) ? '380px' : '128px');
-    }
-    btn.style.right = isOpen ? '484px' : ((location.pathname.indexOf('/cowork/') === 0) ? '272px' : '20px');
+    dockHeaderPills();
   }
 
   function browserAction(payload) {

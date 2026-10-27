@@ -365,7 +365,7 @@
     "status": "supported"
   },
   "desktopHome": {
-    "status": "unavailable"
+    "status": "supported"
   },
   "chatCodeExecution": {
     "status": "supported"

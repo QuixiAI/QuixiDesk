@@ -6,13 +6,89 @@
     if (window.location && window.location.protocol === "about:") return;
     window.__QUIXI_PRELOAD_INSTALLED__ = true;
 
-    const DESKTOP_FEATURES = {"launch":{"status":"supported"},"coworkBrowser":{"status":"supported"},"artifactsPane":{"status":"supported"},"nativeQuickEntry":{"status":"supported"},"quickEntryDictation":{"status":"unavailable"},"quickEntryGlobalShortcut":{"status":"supported"},"trayIcon":{"status":"supported"},"customQuickEntryDictationShortcut":{"status":"supported"},"ultrareviewErrorCategories":{"status":"supported"},"spawnTaskPendingPop":{"status":"supported"},"spawnTaskInFlightIds":{"status":"supported"},"folderWorktrees":{"status":"supported"},"folderWorktreesRemote":{"status":"supported"},"folderWorktreesListedDiscard":{"status":"supported"},"sableOtter":{"status":"unavailable"},"telescopeBridge":{"status":"unavailable"},"mcpFinishInApp":{"status":"unavailable"},"copperLarkA":{"status":"supported"},"copperLarkB":{"status":"supported"},"copperLarkC":{"status":"unavailable"},"copperLarkD":{"status":"supported"},"copperLarkH":{"status":"supported"},"quietPenguin":{"status":"unavailable"},"rubberDuck":{"status":"supported"},"chillingSlothFeat":{"status":"supported"},"chillingSlothSshShell":{"status":"supported"},"terminalShellReported":{"status":"supported"},"sshBrowserPane":{"status":"unavailable"},"chillingSlothSshWorktreeLocation":{"status":"supported"},"chillingSlothSshPuttyKeyConversion":{"status":"unavailable"},"chillingSlothRemoteFilePreview":{"status":"supported"},"chillingSlothEnterprise":{"status":"supported"},"chillingSlothLocal":{"status":"supported"},"yukonSilver":{"status":"supported"},"yukonSilverGems":{"status":"supported"},"yukonSilverGemsCache":{"status":"supported"},"wakeScheduler":{"status":"supported"},"keepAwake":{"status":"supported"},"codeSessionKeepAwake":{"status":"supported"},"ccdPromptSuggestionsSetting":{"status":"supported"},"ccdLandingTools":{"status":"supported"},"ccdMcpVerbsMidTurn":{"status":"supported"},"ccdMcpTurnOnSshHost":{"status":"supported"},"ccdRestartRemoteClaudeCode":{"status":"supported"},"ccdSshStartsWithoutBlockedPlugins":{"status":"supported"},"openWithConsentAnyLanding":{"status":"supported"},"desktopTopBar":{"status":"supported"},"ccdPlugins":{"status":"supported"},"ccdPluginSourceRouting":{"status":"supported"},"computerUse":{"status":"supported"},"computerUseRollout":{"status":"supported"},"computerUseComplianceGate":{"status":"supported"},"computerUseAppScoped":{"status":"supported"},"computerUsePerAppAccess":{"status":"supported"},"coworkWatchRecord":{"status":"unavailable"},"coworkCopperHeron":{"status":"unavailable"},"coworkWatchers":{"status":"unavailable"},"coworkKappa":{"status":"unavailable"},"coworkArtifacts":{"status":"supported"},"trustedFolderSettingsConsent":{"status":"unavailable"},"coworkAutoModeAlwaysAllowOverride":{"status":"unavailable"},"framebufferPreview":{"status":"supported"},"iosSimulator":{"status":"supported"},"androidEmulator":{"status":"unavailable"},"androidEmulatorCreate":{"status":"unavailable"},"iosSimulatorH264":{"status":"supported"},"iosSimulatorAccessibilityReader":{"status":"supported"},"iosSimulatorDuo":{"status":"unavailable"},"simulatorScreenshotEditor":{"status":"unavailable"},"simulatorMiniView":{"status":"unavailable"},"grandPrix":{"status":"unavailable"},"chromeExtensionInstall":{"status":"supported"},"ccdGitEngine":{"status":"unavailable"},"sessionPrOwnership":{"status":"unavailable"},"sessionFolderFileAccess":{"status":"supported"},"conversationFolderGrants":{"status":"supported"},"localSessionsWithoutGit":{"status":"supported"},"tearOffHalo":{"status":"supported"},"coworkArtifactPopout":{"status":"supported"},"sidePanePopoutNativeViews":{"status":"supported"},"simulatorNativeViewPopout":{"status":"supported"},"simulatorPopoutShortcuts":{"status":"supported"},"simulatorNativeViewPerPane":{"status":"supported"},"popoutZoom":{"status":"supported"},"popoutTitleBarOverlay":{"status":"unsupported","reason":"Pop-out title bar overlay requires Windows or Linux","unsupportedCode":"unsupported_platform"},"filePreviewNativeViewRouting":{"status":"supported"},"claudeDesignWindow":{"status":"supported"},"coworkRemoteSessionSpaces":{"status":"supported"},"spaceMemoryBridge":{"status":"supported"},"multiAccount":{"status":"unavailable"},"grandPrixRequest":{"status":"unavailable"},"bootPlaceholder":{"status":"supported"},"coworkBranchSession":{"status":"supported"},"coworkScheduledTaskProjects":{"status":"supported"},"coworkLocalSessionProjects":{"status":"supported"},"coworkScheduledTaskRepoint":{"status":"supported"},"sshAttachmentTransport":{"status":"supported"},"coworkSeededSummon":{"status":"supported"},"seededKind":{"status":"supported"},"coworkTextNotTyped":{"status":"unavailable"},"sendNowEscalation":{"status":"supported"},"steerDetachField":{"status":"supported"},"sessionMentions":{"status":"supported"},"inlinePastes":{"status":"supported"},"turnDiscardedEvent":{"status":"supported"},"turnBoxAtReplies":{"status":"supported"},"wslForkSession":{"status":"unavailable"},"wslTerminal":{"status":"unavailable"},"wslMcp":{"status":"unavailable"},"wslPreview":{"status":"unavailable"},"wslLocalFiles":{"status":"unavailable"},"wslRoutines":{"status":"unavailable"},"humbleSky":{"status":"unavailable"},"violinBow":{"status":"unavailable"},"violinBowHomeSettings":{"status":"unavailable"},"coworkThinkingInSend":{"status":"supported"},"bootstrapConfig":{"status":"supported"},"chatIn3p":{"status":"supported"},"chatTab":{"status":"supported"},"selfHostedSessions":{"status":"supported"},"selfHostedCowork":{"status":"supported"},"desktopHome":{"status":"unavailable"},"chatCodeExecution":{"status":"supported"},"mcpPersistentAlwaysAllow":{"status":"supported"},"mcpScheduledTaskAlwaysAllow":{"status":"supported"},"mcpScheduledTaskApprovalLifetime":{"status":"supported"},"epitaxyMcpApps":{"status":"supported"},"sideSessionProposalPicks":{"status":"supported"},"sideSessionProposalWorktreePick":{"status":"supported"},"sideSessionOfferCloudStart":{"status":"supported"},"sideSessions":{"status":"supported"},"btwChildSessions":{"status":"unavailable"},"nestedArchiveKeepsFamily":{"status":"unavailable"},"epitaxyMcpAppPane":{"status":"unavailable"},"ccdConnectorTools":{"status":"unavailable"},"ccdTeleportSnapshot":{"status":"unavailable"}};
+    const DESKTOP_FEATURES = {"launch":{"status":"supported"},"coworkBrowser":{"status":"supported"},"artifactsPane":{"status":"supported"},"nativeQuickEntry":{"status":"supported"},"quickEntryDictation":{"status":"unavailable"},"quickEntryGlobalShortcut":{"status":"supported"},"trayIcon":{"status":"supported"},"customQuickEntryDictationShortcut":{"status":"supported"},"ultrareviewErrorCategories":{"status":"supported"},"spawnTaskPendingPop":{"status":"supported"},"spawnTaskInFlightIds":{"status":"supported"},"folderWorktrees":{"status":"supported"},"folderWorktreesRemote":{"status":"supported"},"folderWorktreesListedDiscard":{"status":"supported"},"sableOtter":{"status":"unavailable"},"telescopeBridge":{"status":"unavailable"},"mcpFinishInApp":{"status":"unavailable"},"copperLarkA":{"status":"supported"},"copperLarkB":{"status":"supported"},"copperLarkC":{"status":"unavailable"},"copperLarkD":{"status":"supported"},"copperLarkH":{"status":"supported"},"quietPenguin":{"status":"unavailable"},"rubberDuck":{"status":"supported"},"chillingSlothFeat":{"status":"supported"},"chillingSlothSshShell":{"status":"supported"},"terminalShellReported":{"status":"supported"},"sshBrowserPane":{"status":"unavailable"},"chillingSlothSshWorktreeLocation":{"status":"supported"},"chillingSlothSshPuttyKeyConversion":{"status":"unavailable"},"chillingSlothRemoteFilePreview":{"status":"supported"},"chillingSlothEnterprise":{"status":"supported"},"chillingSlothLocal":{"status":"supported"},"yukonSilver":{"status":"supported"},"yukonSilverGems":{"status":"supported"},"yukonSilverGemsCache":{"status":"supported"},"wakeScheduler":{"status":"supported"},"keepAwake":{"status":"supported"},"codeSessionKeepAwake":{"status":"supported"},"ccdPromptSuggestionsSetting":{"status":"supported"},"ccdLandingTools":{"status":"supported"},"ccdMcpVerbsMidTurn":{"status":"supported"},"ccdMcpTurnOnSshHost":{"status":"supported"},"ccdRestartRemoteClaudeCode":{"status":"supported"},"ccdSshStartsWithoutBlockedPlugins":{"status":"supported"},"openWithConsentAnyLanding":{"status":"supported"},"desktopTopBar":{"status":"supported"},"ccdPlugins":{"status":"supported"},"ccdPluginSourceRouting":{"status":"supported"},"computerUse":{"status":"supported"},"computerUseRollout":{"status":"supported"},"computerUseComplianceGate":{"status":"supported"},"computerUseAppScoped":{"status":"supported"},"computerUsePerAppAccess":{"status":"supported"},"coworkWatchRecord":{"status":"unavailable"},"coworkCopperHeron":{"status":"unavailable"},"coworkWatchers":{"status":"unavailable"},"coworkKappa":{"status":"unavailable"},"coworkArtifacts":{"status":"supported"},"trustedFolderSettingsConsent":{"status":"unavailable"},"coworkAutoModeAlwaysAllowOverride":{"status":"unavailable"},"framebufferPreview":{"status":"supported"},"iosSimulator":{"status":"supported"},"androidEmulator":{"status":"unavailable"},"androidEmulatorCreate":{"status":"unavailable"},"iosSimulatorH264":{"status":"supported"},"iosSimulatorAccessibilityReader":{"status":"supported"},"iosSimulatorDuo":{"status":"unavailable"},"simulatorScreenshotEditor":{"status":"unavailable"},"simulatorMiniView":{"status":"unavailable"},"grandPrix":{"status":"unavailable"},"chromeExtensionInstall":{"status":"supported"},"ccdGitEngine":{"status":"unavailable"},"sessionPrOwnership":{"status":"unavailable"},"sessionFolderFileAccess":{"status":"supported"},"conversationFolderGrants":{"status":"supported"},"localSessionsWithoutGit":{"status":"supported"},"tearOffHalo":{"status":"supported"},"coworkArtifactPopout":{"status":"supported"},"sidePanePopoutNativeViews":{"status":"supported"},"simulatorNativeViewPopout":{"status":"supported"},"simulatorPopoutShortcuts":{"status":"supported"},"simulatorNativeViewPerPane":{"status":"supported"},"popoutZoom":{"status":"supported"},"popoutTitleBarOverlay":{"status":"unsupported","reason":"Pop-out title bar overlay requires Windows or Linux","unsupportedCode":"unsupported_platform"},"filePreviewNativeViewRouting":{"status":"supported"},"claudeDesignWindow":{"status":"supported"},"coworkRemoteSessionSpaces":{"status":"supported"},"spaceMemoryBridge":{"status":"supported"},"multiAccount":{"status":"unavailable"},"grandPrixRequest":{"status":"unavailable"},"bootPlaceholder":{"status":"supported"},"coworkBranchSession":{"status":"supported"},"coworkScheduledTaskProjects":{"status":"supported"},"coworkLocalSessionProjects":{"status":"supported"},"coworkScheduledTaskRepoint":{"status":"supported"},"sshAttachmentTransport":{"status":"supported"},"coworkSeededSummon":{"status":"supported"},"seededKind":{"status":"supported"},"coworkTextNotTyped":{"status":"unavailable"},"sendNowEscalation":{"status":"supported"},"steerDetachField":{"status":"supported"},"sessionMentions":{"status":"supported"},"inlinePastes":{"status":"supported"},"turnDiscardedEvent":{"status":"supported"},"turnBoxAtReplies":{"status":"supported"},"wslForkSession":{"status":"unavailable"},"wslTerminal":{"status":"unavailable"},"wslMcp":{"status":"unavailable"},"wslPreview":{"status":"unavailable"},"wslLocalFiles":{"status":"unavailable"},"wslRoutines":{"status":"unavailable"},"humbleSky":{"status":"unavailable"},"violinBow":{"status":"unavailable"},"violinBowHomeSettings":{"status":"unavailable"},"coworkThinkingInSend":{"status":"supported"},"bootstrapConfig":{"status":"supported"},"chatIn3p":{"status":"supported"},"chatTab":{"status":"supported"},"selfHostedSessions":{"status":"supported"},"selfHostedCowork":{"status":"supported"},"desktopHome":{"status":"supported"},"chatCodeExecution":{"status":"supported"},"mcpPersistentAlwaysAllow":{"status":"supported"},"mcpScheduledTaskAlwaysAllow":{"status":"supported"},"mcpScheduledTaskApprovalLifetime":{"status":"supported"},"epitaxyMcpApps":{"status":"supported"},"sideSessionProposalPicks":{"status":"supported"},"sideSessionProposalWorktreePick":{"status":"supported"},"sideSessionOfferCloudStart":{"status":"supported"},"sideSessions":{"status":"supported"},"btwChildSessions":{"status":"unavailable"},"nestedArchiveKeepsFamily":{"status":"unavailable"},"epitaxyMcpAppPane":{"status":"unavailable"},"ccdConnectorTools":{"status":"unavailable"},"ccdTeleportSnapshot":{"status":"unavailable"}};
     const DESKTOP_MANAGED_CONFIG = {"deploymentMode":"3p","appVersion":"3.6556.2","cookielessOrigin":true,"deploymentDisplayName":"QuixiDesk","disableEssentialTelemetry":true,"disableNonessentialTelemetry":true,"preferredSystemLanguages":["en-US"]};
     const BOOT_PLACEHOLDER = { enabled: true, shellZoomFactor: 1 };
     const INITIAL_STORES = {"Custom3pSetup_$_bootstrapState":{"configured":true,"origin":"local","health":"ok"},"Custom3pSetup_$_hybridTransition":{"state":"none"},"SupportBundle_$_supportBundleState":{"stage":"closed","canSend":false,"showSendUi":false},"Simulator_$_attachment":[],"Simulator_$_debugAttaching":[],"OfficeAddinFiles_$_connectedFilesState":{"files":[],"isFeatureEnabled":false},"WindowState_$_hostPower":{"recentSleeps":[],"recentStalls":[]},"WindowState_$_deviceLink":{"appStartedMs":1793010537692,"connected":true,"recentGaps":[]},"WindowState_$_compositing":{"software":false},"AutoUpdater_$_updaterState":{"status":"idle"},"BrowserNavigation_$_navigationState":{"canGoBack":false,"canGoForward":false},"ManagedConfig_$_managedRendererConfig":{"forceLoginOrgUUIDs":null,"loginSsoOrgDomain":null,"disableEssentialTelemetry":true,"disableNonessentialTelemetry":true,"disableMobileSimulatorTools":false,"banner":null,"deploymentDisplayName":"QuixiDesk","deploymentDisplaySubtitle":null,"dictationAvailable":false,"userPluginMarketplacesEnabled":true,"userPluginUploadsEnabled":true,"noSessionRunsOnThisDevice":false,"configDeprecations":[],"configDeprecationNoticesSuppressed":true,"configOrgDelivered":false,"userContentFrameAllowed":true},"CliSessionImport_$_cliImport":{"seq":0,"stage":"closed"},"ComputerUseLivePreview_$_computerUsePreview":{"active":false},"ComputerUseLivePreview_$_browserPreview":{"active":false},"LocalAgentModeSessions_$_sessionsBridgeStatus":{"conflict":false,"dispatchAgentName":null},"LocalAgentModeSessions_$_interactiveAuth":{"needsAuth":false},"GrandPrix_$_grandPrixStatus":{"paired":{},"installed":{},"displayNames":{},"iconDataUris":{}},"Launch_$_activeServers":[],"RemoteControlServing_$_remoteControlServeStatus":{"available":false,"reason":"pending","permitted":false,"intent":"unprompted","machineName":"QuixiDesk-Mac","homePath":"/Users/eric","folders":[],"atLimit":false,"activeSessions":0,"capacity":5,"stayReachable":{"requested":false,"mode":"off","onBattery":false}},"ViolinFret_$_violinFretStatus":{"available":false,"choice":"unset","gatesHosting":true},"ClaudeVM_$_apiReachability":{"reachability":"reachable","willTryRecover":false},"ClaudeVM_$_hostIPv6Notice":"none","FindInPage_$_density":"comfortable"};
 
+    try {
+      if (window.localStorage) {
+        const defaultLatches = {
+          "composer-card-latch": "marlin",
+          "spa:fizzy-lake": "color icons panels type",
+          "spa:cai_curious_tower": "1",
+          "spa:cai_splendid_nest": "1",
+          "desktop-nav-arrows-gate-latch": "00000000-0000-4000-8000-000000000001:1",
+          "cowork-browser-available-latch:00000000-0000-4000-8000-000000000001": "1",
+          "claudeai.lastChatHost.v1": "hub",
+          "claudeai.lastChatLook.v1": "hub",
+        };
+        for (const [k, v] of Object.entries(defaultLatches)) {
+          if (window.localStorage.getItem(k) !== v) {
+            window.localStorage.setItem(k, v);
+          }
+        }
+        window.localStorage.removeItem("spa:cai_fluttering_mountain");
+      }
+    } catch (_) {}
+
     window.__QUIXI_STORES__ = Object.assign({}, INITIAL_STORES, window.__QUIXI_STORES__ || {});
     const listeners = (window.__QUIXI_LISTENERS__ = window.__QUIXI_LISTENERS__ || new Map());
+
+    let navIndex = 0;
+    let navMaxIndex = 0;
+    function emitNavState() {
+      const state = {
+        canGoBack: navIndex > 0,
+        canGoForward: navIndex < navMaxIndex,
+      };
+      window.__QUIXI_STORES__["BrowserNavigation_$_navigationState"] = state;
+      if (typeof window.__quixi_eipc_emit__ === "function") {
+        window.__quixi_eipc_emit__(
+          "$eipc_message$_5de9b164-2257-4603-a1e1-e00cdb72056c_$_claude.web_$_BrowserNavigation_$_navigationState_$store$_update",
+          state
+        );
+      }
+    }
+    try {
+      if (window.history && typeof window.history.pushState === "function") {
+        const origPushState = window.history.pushState.bind(window.history);
+        const origReplaceState = window.history.replaceState.bind(window.history);
+        try {
+          const initSt =
+            window.history.state && typeof window.history.state === "object"
+              ? Object.assign({}, window.history.state, { __quixiNavIdx: 0 })
+              : { __quixiNavIdx: 0 };
+          origReplaceState(initSt, "");
+        } catch (_) {}
+        window.history.pushState = function (state, unused, url) {
+          navIndex += 1;
+          navMaxIndex = navIndex;
+          const nextState =
+            state && typeof state === "object"
+              ? Object.assign({}, state, { __quixiNavIdx: navIndex })
+              : { __quixiNavIdx: navIndex };
+          const res = origPushState(nextState, unused, url);
+          emitNavState();
+          return res;
+        };
+        window.history.replaceState = function (state, unused, url) {
+          const nextState =
+            state && typeof state === "object"
+              ? Object.assign({}, state, { __quixiNavIdx: navIndex })
+              : { __quixiNavIdx: navIndex };
+          const res = origReplaceState(nextState, unused, url);
+          emitNavState();
+          return res;
+        };
+        window.addEventListener("popstate", function (ev) {
+          if (ev && ev.state && typeof ev.state.__quixiNavIdx === "number") {
+            navIndex = ev.state.__quixiNavIdx;
+          }
+          emitNavState();
+        });
+      }
+    } catch (_) {}
 
     function extractStoreKey(channel) {
       if (typeof channel !== "string") return null;
@@ -91,6 +167,23 @@
 
     const ipcRenderer = {
       invoke: async function (channel, ...args) {
+        if (typeof channel === "string") {
+          if (channel.endsWith("BrowserNavigation_$_goBack")) {
+            if (navIndex > 0) {
+              window.history.back();
+            }
+            return null;
+          }
+          if (channel.endsWith("BrowserNavigation_$_goForward")) {
+            if (navIndex < navMaxIndex) {
+              window.history.forward();
+            }
+            return null;
+          }
+          if (channel.endsWith("BrowserNavigation_$_navigationState_$store$_getState")) {
+            return window.__QUIXI_STORES__["BrowserNavigation_$_navigationState"];
+          }
+        }
         if (channel === "connect-to-mcp-server") {
           const serverName = args[0] || "quixi-workspace";
           try {
