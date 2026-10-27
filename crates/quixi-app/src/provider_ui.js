@@ -359,8 +359,8 @@
           }
         }
 
-        // 1. Replace any remaining 96x96 Clawd pixel mascot SVG in Settings -> Extensions with the Quixi `q.` icon
-        var clawdPaths = document.querySelectorAll('svg path[d^="M14.3477"]');
+        // 1. Replace any remaining 96x96 Clawd pixel mascot SVG or Spark spinner image with the static Quixi `q.` icon
+        var clawdPaths = document.querySelectorAll('svg path[d^="M14.3477"], svg[data-cds="Spark"] image');
         for (var i = 0; i < clawdPaths.length; i++) {
           var svg = clawdPaths[i].closest('svg');
           if (svg && !svg.getAttribute('data-quixi-logo')) {
@@ -368,7 +368,7 @@
             svg.setAttribute('viewBox', '0 0 100 100');
             svg.innerHTML =
               '<rect width="100" height="100" rx="22" fill="#0B0D13"/>' +
-              '<rect x="1.5" y="1.5" width="97" height="97" rx="20.5" stroke="#262B38" stroke-width="2"/>' +
+              '<rect x="1.5" y="1.5" width="97" height="97" rx="20.5" stroke="#262B38" stroke-width="2" fill="none"/>' +
               QUIXI_MARK_INNER_PATHS;
           }
         }
@@ -592,14 +592,18 @@
       '  border: 1px solid rgba(99, 102, 241, 0.32) !important;',
       '}',
       '/* ========================================================================== */',
-      '/* CUSTOM ANIMATED GIF SPINNER (/assets/quixi-spinner.gif)                    */',
+      '/* CUSTOM ANIMATED GIF SPINNER (/assets/quixi-spinner.gif) ONLY WHEN ACTIVE   */',
       '/* ========================================================================== */',
-      '[data-cds="Spinner"], [data-testid="chat-footer-spark"] > span[data-activity] {',
+      '[data-cds="Spinner"], [data-testid="chat-footer-spark"] > span[data-activity]:not([data-activity="idle"]) {',
       '  background: url("/assets/quixi-spinner.gif") center / contain no-repeat !important;',
       '  border: none !important;',
       '  box-shadow: none !important;',
       '  min-width: 20px !important;',
       '  min-height: 20px !important;',
+      '}',
+      '[data-testid="chat-footer-spark"] > span[data-activity="idle"] {',
+      '  display: none !important;',
+      '  background: none !important;',
       '}',
       '[data-cds="Spinner"] > span, [data-cds="Spinner"] > svg, [data-testid="chat-footer-spark"] > span > * {',
       '  display: none !important;',
@@ -610,15 +614,20 @@
       '  opacity: 1 !important;',
       '  transform: none !important;',
       '}',
-      '/* Stacked Home Hero with Prominent Animated Orbital Gyroscope GIF Spinner */',
+      '/* Stacked Home Hero with Static Quixi q. App Icon */',
       '[data-new-page-greeting-spark] {',
       '  position: static !important;',
       '  display: block !important;',
-      '  width: 64px !important;',
-      '  height: 64px !important;',
-      '  margin: 0 auto 8px auto !important;',
+      '  width: 56px !important;',
+      '  height: 56px !important;',
+      '  margin: 0 auto 10px auto !important;',
       '  transform: none !important;',
-      '  filter: drop-shadow(0 8px 22px rgba(20, 184, 166, 0.32)) !important;',
+      '  filter: drop-shadow(0 8px 22px rgba(20, 184, 166, 0.28)) !important;',
+      '}',
+      '[data-new-page-greeting-spark] svg {',
+      '  transform: none !important;',
+      '  width: 100% !important;',
+      '  height: 100% !important;',
       '}',
       '*:has(> [data-new-page-greeting-spark]) {',
       '  display: flex !important;',
