@@ -1107,14 +1107,16 @@ fn main() -> anyhow::Result<()> {
       var els = collectInteractiveElements();
       var targetEl = null;
 
-      if (typeof payload.element_index === 'number' && payload.element_index > 0) {
-        targetEl = document.querySelector('[data-quixi-ax-idx="' + payload.element_index + '"]');
+      var elIdx = typeof payload.element_index === 'number' ? payload.element_index : (typeof payload.index === 'number' ? payload.index : 0);
+      if (elIdx > 0) {
+        targetEl = document.querySelector('[data-quixi-ax-idx="' + elIdx + '"]');
       }
       if (!targetEl && payload.selector) {
         try { targetEl = document.querySelector(payload.selector); } catch (_) {}
       }
-      if (!targetEl && payload.query) {
-        var q = String(payload.query).toLowerCase();
+      var queryStr = payload.query || (act !== 'type' && act !== 'key' ? payload.text : null);
+      if (!targetEl && queryStr) {
+        var q = String(queryStr).toLowerCase();
         for (var i = 0; i < els.length; i++) {
           if ((els[i].text || '').toLowerCase().indexOf(q) !== -1) {
             targetEl = document.querySelector('[data-quixi-ax-idx="' + els[i].index + '"]');
@@ -1130,7 +1132,7 @@ fn main() -> anyhow::Result<()> {
         return { ok: true, action: 'navigate', path: location.pathname };
       }
 
-      if (act === 'eval') {
+      if (act === 'eval' || act === 'evaluate') {
         try {
           var codeStr = String(payload.script || payload.expression || payload.code || 'document.title');
           var evalRes = (0, eval)(codeStr);
@@ -1159,8 +1161,11 @@ fn main() -> anyhow::Result<()> {
             if (typeof clickable.focus === 'function') clickable.focus();
             clickable.dispatchEvent(new PointerEvent('pointerup', evOpts));
             clickable.dispatchEvent(new MouseEvent('mouseup', evOpts));
-            clickable.dispatchEvent(new MouseEvent('click', evOpts));
-            if (typeof clickable.click === 'function') clickable.click();
+            if (typeof clickable.click === 'function') {
+              clickable.click();
+            } else {
+              clickable.dispatchEvent(new MouseEvent('click', evOpts));
+            }
           } catch (_) {
             try { if (typeof clickable.click === 'function') clickable.click(); } catch (_) {}
           }
@@ -1191,8 +1196,15 @@ fn main() -> anyhow::Result<()> {
         if (targetEl) {
           if (typeof targetEl.focus === 'function') targetEl.focus();
           if (targetEl.getAttribute && targetEl.getAttribute('contenteditable') === 'true') {
-            targetEl.textContent = txt;
-            targetEl.dispatchEvent(new InputEvent('input', { bubbles: true, data: txt, inputType: 'insertText' }));
+            var inserted = false;
+            try {
+              document.execCommand('selectAll', false, null);
+              inserted = document.execCommand('insertText', false, txt);
+            } catch (_) {}
+            if (!inserted) {
+              targetEl.textContent = txt;
+              targetEl.dispatchEvent(new InputEvent('input', { bubbles: true, data: txt, inputType: 'insertText' }));
+            }
           } else if (targetEl.tagName === 'TEXTAREA') {
             var taSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value');
             if (taSetter && taSetter.set) taSetter.set.call(targetEl, txt);

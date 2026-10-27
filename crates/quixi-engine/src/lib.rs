@@ -255,6 +255,60 @@ impl QuixiEngine {
                                 sess.user_selected_folders.retain(|d| d != "/Users/eric");
                                 changed = true;
                             }
+                            // Deduplicate Read tool_use blocks by file basename across buffered_messages
+                            {
+                                let mut seen_basenames = std::collections::HashSet::new();
+                                let mut removed_tool_ids = std::collections::HashSet::new();
+                                for m in &mut sess.buffered_messages {
+                                    if let Some(arr) = m
+                                        .pointer_mut("/message/content")
+                                        .and_then(|c| c.as_array_mut())
+                                    {
+                                        let before_len = arr.len();
+                                        arr.retain(|b| {
+                                            if b.get("type").and_then(|t| t.as_str())
+                                                == Some("tool_use")
+                                                && b.get("name").and_then(|n| n.as_str())
+                                                    == Some("Read")
+                                            {
+                                                let fp = b
+                                                    .pointer("/input/file_path")
+                                                    .and_then(|v| v.as_str())
+                                                    .unwrap_or("");
+                                                let base = Path::new(fp)
+                                                    .file_name()
+                                                    .and_then(|s| s.to_str())
+                                                    .unwrap_or(fp)
+                                                    .to_lowercase();
+                                                if !base.is_empty() && !seen_basenames.insert(base)
+                                                {
+                                                    if let Some(tid) =
+                                                        b.get("id").and_then(|v| v.as_str())
+                                                    {
+                                                        removed_tool_ids.insert(tid.to_string());
+                                                    }
+                                                    return false;
+                                                }
+                                            }
+                                            if b.get("type").and_then(|t| t.as_str())
+                                                == Some("tool_result")
+                                            {
+                                                if let Some(tid) =
+                                                    b.get("tool_use_id").and_then(|v| v.as_str())
+                                                {
+                                                    if removed_tool_ids.contains(tid) {
+                                                        return false;
+                                                    }
+                                                }
+                                            }
+                                            true
+                                        });
+                                        if arr.len() != before_len {
+                                            changed = true;
+                                        }
+                                    }
+                                }
+                            }
                             let has_skill_msg = sess.buffered_messages.iter().any(|m| {
                                 m.pointer("/message/content")
                                     .and_then(|c| c.as_array())
@@ -397,6 +451,36 @@ impl QuixiEngine {
                 }
             }
         }
+
+        let tasks_dir = self.data_dir.join("scheduled_tasks");
+        if let Ok(entries) = fs::read_dir(&tasks_dir) {
+            let mut task_map = self.scheduled_tasks.write();
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.extension().and_then(|s| s.to_str()) == Some("json") {
+                    if let Ok(raw) = fs::read_to_string(&p) {
+                        if let Ok(val) = serde_json::from_str::<Value>(&raw) {
+                            let id = val.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                            let prompt = val.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
+                            if !id.is_empty() && !prompt.is_empty() && !id.starts_with("task_") {
+                                task_map.insert(id.to_string(), val);
+                            } else {
+                                let _ = fs::remove_file(&p);
+                                if !id.is_empty() {
+                                    let _ = fs::remove_file(tasks_dir.join(format!("{}.md", id)));
+                                }
+                            }
+                        }
+                    }
+                } else if p.extension().and_then(|s| s.to_str()) == Some("md") {
+                    if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
+                        if stem.starts_with("task_") {
+                            let _ = fs::remove_file(&p);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     pub fn build_live_bootstrap(&self) -> Value {
@@ -419,6 +503,9 @@ impl QuixiEngine {
         }
         if let Some(gm) = boot.get_mut("gated_messages").and_then(|g| g.as_object_mut()) {
             gm.insert("locale".to_string(), json!(current_locale));
+            if let Some(msgs) = gm.get_mut("messages").and_then(|m| m.as_object_mut()) {
+                msgs.insert("secret:oxbo0n".to_string(), json!("QuixiDesk files"));
+            }
         }
         if let Some(gb_feat) = boot.pointer_mut("/growthbook/features/2973881027/defaultValue") {
             if let Some(f_obj) = gb_feat.as_object_mut() {
@@ -652,45 +739,231 @@ impl QuixiEngine {
     }
 
     pub fn create_or_update_scheduled_task(&self, opts: &Value) -> Value {
-        let id = opts
-            .get("id")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| format!("task_{}", Uuid::new_v4()));
-        let name = opts
-            .get("name")
+        let display_name = opts
+            .get("displayName")
+            .or_else(|| opts.get("name"))
             .or_else(|| opts.get("title"))
             .and_then(|v| v.as_str())
-            .unwrap_or("Scheduled Task");
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or("Scheduled Task")
+            .trim()
+            .to_string();
+        let slug_default = {
+            let s: String = display_name
+                .to_lowercase()
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+                .collect();
+            let trimmed = s.trim_matches('-').to_string();
+            if trimmed.is_empty() {
+                format!("scheduled-task-{}", &Uuid::new_v4().to_string()[..8])
+            } else {
+                trimmed
+            }
+        };
+        let id = opts
+            .get("id")
+            .or_else(|| opts.get("scheduledTaskId"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.trim().to_string())
+            .unwrap_or(slug_default);
+
+        let existing = self.scheduled_tasks.read().get(&id).cloned();
+        let is_update = existing.is_some();
+
+        let description = opts
+            .get("description")
+            .and_then(|v| v.as_str())
+            .or_else(|| existing.as_ref().and_then(|e| e.get("description")).and_then(|v| v.as_str()))
+            .unwrap_or("")
+            .to_string();
+        let prompt = opts
+            .get("prompt")
+            .or_else(|| opts.get("content"))
+            .and_then(|v| v.as_str())
+            .or_else(|| existing.as_ref().and_then(|e| e.get("prompt")).and_then(|v| v.as_str()))
+            .unwrap_or("Summarize recent project activity.")
+            .to_string();
         let cron = opts
-            .get("cron")
+            .get("cronExpression")
+            .or_else(|| opts.get("cron"))
             .or_else(|| opts.get("schedule"))
             .and_then(|v| v.as_str())
-            .unwrap_or("0 9 * * *");
-        let enabled = opts.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
-        let now_ms = Utc::now().timestamp_millis() as u64;
-        let file_path = self
-            .data_dir
-            .join("scheduled_tasks")
-            .join(format!("{}.md", id));
-        let content = opts
-            .get("content")
-            .or_else(|| opts.get("prompt"))
+            .or_else(|| existing.as_ref().and_then(|e| e.get("cronExpression")).and_then(|v| v.as_str()))
+            .unwrap_or("0 9 * * *")
+            .to_string();
+        let enabled = opts
+            .get("enabled")
+            .and_then(|v| v.as_bool())
+            .or_else(|| existing.as_ref().and_then(|e| e.get("enabled")).and_then(|v| v.as_bool()))
+            .unwrap_or(true);
+        let cwd = opts
+            .get("cwd")
+            .or_else(|| opts.get("folderPath"))
             .and_then(|v| v.as_str())
-            .unwrap_or("# Scheduled Task\n");
-        let _ = fs::write(&file_path, content);
+            .or_else(|| existing.as_ref().and_then(|e| e.get("cwd")).and_then(|v| v.as_str()))
+            .unwrap_or("/Users/eric/quixi-desk")
+            .to_string();
+        let model = opts
+            .get("model")
+            .and_then(|v| v.as_str())
+            .or_else(|| existing.as_ref().and_then(|e| e.get("model")).and_then(|v| v.as_str()))
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| self.provider_manager.resolve_connected_model(None));
+        let permission_mode = opts
+            .get("permissionMode")
+            .and_then(|v| v.as_str())
+            .or_else(|| existing.as_ref().and_then(|e| e.get("permissionMode")).and_then(|v| v.as_str()))
+            .unwrap_or("default")
+            .to_string();
+
+        let now_ms = Utc::now().timestamp_millis() as u64;
+        let created_at = existing
+            .as_ref()
+            .and_then(|e| e.get("createdAt"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(now_ms);
+
+        let tasks_dir = self.data_dir.join("scheduled_tasks");
+        let _ = fs::create_dir_all(&tasks_dir);
+        let file_path = tasks_dir.join(format!("{}.md", id));
+        let json_path = tasks_dir.join(format!("{}.json", id));
+
+        let md_body = format!(
+            "---\nname: \"{}\"\ndescription: \"{}\"\nmodel: \"{}\"\n---\n\n{}\n",
+            display_name.replace('"', "\\\""),
+            description.replace('"', "\\\""),
+            model,
+            prompt
+        );
+        let _ = fs::write(&file_path, &md_body);
+
         let task = json!({
             "id": id,
-            "name": name,
+            "name": display_name,
+            "displayName": display_name,
+            "description": description,
+            "prompt": prompt,
             "cron": cron,
+            "cronExpression": cron,
             "enabled": enabled,
+            "status": if enabled { "enabled" } else { "disabled" },
+            "source": "local",
+            "cwd": cwd,
+            "userSelectedFolders": [cwd],
+            "model": model,
+            "permissionMode": permission_mode,
             "filePath": file_path.to_string_lossy(),
-            "createdAt": now_ms,
+            "createdAt": created_at,
             "updatedAt": now_ms,
         });
+        if let Ok(raw_json) = serde_json::to_string_pretty(&task) {
+            let _ = fs::write(&json_path, raw_json);
+        }
         self.scheduled_tasks.write().insert(id, task.clone());
+
+        let ev_type = if is_update {
+            "scheduled_task_updated"
+        } else {
+            "scheduled_task_created"
+        };
+        let ev_payload = json!({
+            "type": ev_type,
+            "scheduledTask": task
+        });
+        self.emit_eipc(
+            "claude.web",
+            "CoworkScheduledTasks",
+            "onScheduledTaskEvent",
+            ev_payload.clone(),
+        );
+        self.emit_eipc(
+            "claude.web",
+            "CCDScheduledTasks",
+            "onScheduledTaskEvent",
+            ev_payload,
+        );
         task
+    }
+
+    pub fn update_scheduled_task_status(&self, id: &str, status: &str) -> bool {
+        let tasks_dir = self.data_dir.join("scheduled_tasks");
+        if status == "deleted" {
+            self.scheduled_tasks.write().remove(id);
+            let _ = fs::remove_file(tasks_dir.join(format!("{}.md", id)));
+            let _ = fs::remove_file(tasks_dir.join(format!("{}.json", id)));
+            let ev_payload = json!({
+                "type": "scheduled_task_deleted",
+                "scheduledTask": { "id": id }
+            });
+            self.emit_eipc(
+                "claude.web",
+                "CoworkScheduledTasks",
+                "onScheduledTaskEvent",
+                ev_payload.clone(),
+            );
+            self.emit_eipc(
+                "claude.web",
+                "CCDScheduledTasks",
+                "onScheduledTaskEvent",
+                ev_payload,
+            );
+            return true;
+        }
+        let enabled = status == "enabled";
+        let updated = {
+            let mut map = self.scheduled_tasks.write();
+            if let Some(task) = map.get_mut(id) {
+                if let Some(obj) = task.as_object_mut() {
+                    obj.insert("enabled".to_string(), json!(enabled));
+                    obj.insert("status".to_string(), json!(if enabled { "enabled" } else { "disabled" }));
+                    obj.insert("updatedAt".to_string(), json!(Utc::now().timestamp_millis() as u64));
+                }
+                if let Ok(raw_json) = serde_json::to_string_pretty(task) {
+                    let _ = fs::write(tasks_dir.join(format!("{}.json", id)), raw_json);
+                }
+                Some(task.clone())
+            } else {
+                None
+            }
+        };
+        if let Some(task) = updated {
+            let ev_payload = json!({
+                "type": "scheduled_task_updated",
+                "scheduledTask": task
+            });
+            self.emit_eipc(
+                "claude.web",
+                "CoworkScheduledTasks",
+                "onScheduledTaskEvent",
+                ev_payload.clone(),
+            );
+            self.emit_eipc(
+                "claude.web",
+                "CCDScheduledTasks",
+                "onScheduledTaskEvent",
+                ev_payload,
+            );
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn get_scheduled_task_file_content(&self, id: &str) -> String {
+        let md_path = self.data_dir.join("scheduled_tasks").join(format!("{}.md", id));
+        if let Ok(raw) = fs::read_to_string(&md_path) {
+            if !raw.trim().is_empty() {
+                return raw;
+            }
+        }
+        if let Some(task) = self.scheduled_tasks.read().get(id) {
+            if let Some(p) = task.get("prompt").and_then(|v| v.as_str()) {
+                return p.to_string();
+            }
+        }
+        String::new()
     }
 
     pub fn get_cowork_storage_usage(&self) -> Value {
@@ -1190,6 +1463,12 @@ impl QuixiEngine {
                     .collect::<String>()
             };
             return Self::json_resp(200, &json!({ "title": title }));
+        }
+        if clean_path.contains("/library_submissions") {
+            if clean_path.ends_with("/host_capabilities") {
+                return Self::json_resp(200, &json!({}));
+            }
+            return Self::json_resp(200, &json!([]));
         }
         if clean_path.starts_with("/dust") || clean_path.contains("/telemetry") {
             return (204, "text/plain", Vec::new());
@@ -1823,11 +2102,20 @@ impl QuixiEngine {
             }
             let fname_lower = f.name.to_lowercase();
             let rel_lower = f.relative_path.to_lowercase();
-            if !fname_lower.is_empty()
-                && (lower.contains(&fname_lower) || lower.contains(&rel_lower))
-                && !candidate_rel_paths.contains(&f.relative_path)
-            {
-                candidate_rel_paths.push(f.relative_path.clone());
+            let explicit_rel = lower.contains(&rel_lower);
+            let matches_name = !fname_lower.is_empty() && lower.contains(&fname_lower);
+            if explicit_rel || matches_name {
+                let same_basename_exists = !explicit_rel
+                    && candidate_rel_paths.iter().any(|existing| {
+                        Path::new(existing)
+                            .file_name()
+                            .and_then(|s| s.to_str())
+                            .map(|s| s.eq_ignore_ascii_case(&f.name))
+                            .unwrap_or(false)
+                    });
+                if !same_basename_exists && !candidate_rel_paths.contains(&f.relative_path) {
+                    candidate_rel_paths.push(f.relative_path.clone());
+                }
             }
         }
 
@@ -1887,27 +2175,35 @@ impl QuixiEngine {
             ));
         }
 
-        let wants_workspace_tools = lower.contains("review")
-            || lower.contains("project")
-            || lower.contains("repo")
-            || lower.contains("workspace")
-            || lower.contains("code")
-            || lower.contains("file")
-            || lower.contains("read")
-            || lower.contains("inspect")
-            || lower.contains("analy")
-            || lower.contains("arch")
-            || lower.contains("audit")
-            || lower.contains("explain")
-            || lower.contains("check")
-            || lower.contains("status")
-            || lower.contains("git")
-            || lower.contains("crate")
-            || lower.contains("build")
-            || lower.contains("bug")
-            || lower.contains("fix")
-            || lower.contains("list")
-            || lower.contains("dir");
+        let is_starter_prompt = lower.starts_with("i want to make an artifact")
+            || lower.starts_with("help me set up a ")
+            || lower.starts_with("set up a scheduled task")
+            || lower.starts_with("i want to set up a scheduled task");
+
+        let wants_workspace_tools = !is_starter_prompt
+            && (lower.contains("review")
+                || lower.contains("project")
+                || lower.contains("repo")
+                || lower.contains("workspace")
+                || lower.contains("code")
+                || lower.contains("file")
+                || lower.contains("cargo")
+                || lower.contains("read ")
+                || lower.contains(" read")
+                || lower.contains("inspect")
+                || lower.contains("analy")
+                || lower.contains("arch")
+                || lower.contains("audit")
+                || lower.contains("explain")
+                || lower.contains("check")
+                || lower.contains("status")
+                || lower.contains("git")
+                || lower.contains("crate")
+                || lower.contains("build")
+                || lower.contains("bug")
+                || lower.contains("fix")
+                || lower.contains("list")
+                || lower.contains("dir"));
 
         if !wants_workspace_tools || session_id.is_empty() {
             return (ctx, Vec::new(), Vec::new());
@@ -2416,6 +2712,7 @@ impl QuixiEngine {
             "uuid": user_msg_uuid,
             "session_id": session_id,
             "parent_tool_use_id": null,
+            "isReplay": true,
             "timestamp": now_iso,
             "message": {
                 "role": "user",
@@ -2485,7 +2782,7 @@ impl QuixiEngine {
 
         std::thread::spawn(move || {
             let turn_start_ms = Utc::now().timestamp_millis();
-            std::thread::sleep(std::time::Duration::from_millis(20));
+            std::thread::sleep(std::time::Duration::from_millis(120));
 
             eng.emit_eipc(
                 "claude.web",
@@ -2923,6 +3220,7 @@ impl QuixiEngine {
             "uuid": user_msg_uuid,
             "session_id": session_id,
             "parent_tool_use_id": null,
+            "isReplay": true,
             "timestamp": now_iso,
             "message": {
                 "role": "user",
@@ -2960,7 +3258,7 @@ impl QuixiEngine {
 
         std::thread::spawn(move || {
             let turn_start_ms = Utc::now().timestamp_millis();
-            std::thread::sleep(std::time::Duration::from_millis(20));
+            std::thread::sleep(std::time::Duration::from_millis(120));
 
             eng.emit_eipc(
                 "claude.web",

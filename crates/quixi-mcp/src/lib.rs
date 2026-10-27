@@ -1381,8 +1381,8 @@ impl McpHost {
             .collect()
     }
 
-    /// Returns the combined list of internal MCP servers (`isInternal: true`)
-    /// and user-configured MCP servers (`serverSource: "user_config"`) for `getLocalMcpServers()`.
+    /// Returns the combined list of user-configured MCP servers (`serverSource: "user_config"`)
+    /// and internal MCP servers (`isInternal: true`) for `getLocalMcpServers()`.
     pub fn list_local_mcp_servers(&self) -> Vec<Value> {
         let mut list = self.list_internal_servers();
         for srv in self.list_server_statuses() {
@@ -1425,10 +1425,11 @@ impl McpHost {
                 "url": "",
                 "transport": "stdio",
                 "builtin": entry.command == "quixi-mcp-builtin",
+                "isInternal": false,
                 "serverSource": "user_config",
                 "isConnected": true,
                 "hasAuth": false,
-                "runsOnSessionHost": true,
+                "runsOnSessionHost": false,
                 "wireKey": name,
                 "toolsEnumerated": true,
                 "status": "connected",

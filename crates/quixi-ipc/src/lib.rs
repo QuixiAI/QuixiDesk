@@ -771,9 +771,7 @@ impl EipcRouter {
             | ("LocalSessions", "getLocalMcpServers") => {
                 json!(self.engine.mcp_host.list_local_mcp_servers())
             }
-            ("LocalAgentModeSessions", "getDirectMcpServerStatuses") => {
-                json!(self.engine.mcp_host.list_server_statuses())
-            }
+            ("LocalAgentModeSessions", "getDirectMcpServerStatuses") => json!([]),
             ("LocalSessions", "getSessionCliMcpServers") => json!([]),
             ("LocalAgentModeSessions", "mcpCallTool")
             | ("LocalSessions", "mcpCallTool") => {
@@ -2154,13 +2152,44 @@ impl EipcRouter {
             ("CoworkScheduledTasks", "deleteScheduledTask")
             | ("CCDScheduledTasks", "deleteScheduledTask") => {
                 let id = args.first().and_then(|v| v.as_str()).unwrap_or("");
-                self.engine.scheduled_tasks.write().remove(id);
-                let _ = fs::remove_file(
-                    self.engine
-                        .data_dir
-                        .join("scheduled_tasks")
-                        .join(format!("{}.md", id)),
-                );
+                json!(self.engine.update_scheduled_task_status(id, "deleted"))
+            }
+            ("CoworkScheduledTasks", "updateScheduledTaskStatus")
+            | ("CCDScheduledTasks", "updateScheduledTaskStatus") => {
+                let id = args.first().and_then(|v| v.as_str()).unwrap_or("");
+                let status = args.get(1).and_then(|v| v.as_str()).unwrap_or("enabled");
+                json!(self.engine.update_scheduled_task_status(id, status))
+            }
+            ("CoworkScheduledTasks", "getScheduledTaskFileContent")
+            | ("CCDScheduledTasks", "getScheduledTaskFileContent") => {
+                let id = args.first().and_then(|v| v.as_str()).unwrap_or("");
+                json!(self.engine.get_scheduled_task_file_content(id))
+            }
+            ("CoworkScheduledTasks", "getWatcherHistory")
+            | ("CCDScheduledTasks", "getWatcherHistory") => json!([]),
+            ("CoworkScheduledTasks", "markListenerReady")
+            | ("CCDScheduledTasks", "markListenerReady")
+            | ("CoworkScheduledTasks", "setEventAckSupported")
+            | ("CCDScheduledTasks", "setEventAckSupported")
+            | ("CoworkScheduledTasks", "ackEvent")
+            | ("CCDScheduledTasks", "ackEvent")
+            | ("CoworkScheduledTasks", "releaseDispatchClaim")
+            | ("CCDScheduledTasks", "releaseDispatchClaim") => json!(true),
+
+            // --- CoworkUserFiles ---
+            ("CoworkUserFiles", "getInfo") => {
+                let root = self.engine.data_dir.to_string_lossy().to_string();
+                json!({
+                    "currentRoot": root,
+                    "managedRoot": Value::Null,
+                    "homeRoot": root,
+                    "isLegacyDocumentsRoot": false
+                })
+            }
+            ("CoworkUserFiles", "reveal") => {
+                let _ = std::process::Command::new("open")
+                    .arg(&self.engine.data_dir)
+                    .spawn();
                 json!(true)
             }
 
@@ -2997,7 +3026,17 @@ mod tests {
         // Even though caller requested claude-sonnet-4-6, session model resolved to connected gpt-6.1-sol!
         assert_eq!(start_res["model"], "gpt-6.1-sol");
 
-        std::thread::sleep(std::time::Duration::from_millis(220));
+        for _ in 0..50 {
+            std::thread::sleep(std::time::Duration::from_millis(40));
+            let has_stop = events.lock().unwrap().iter().any(|ev| {
+                ev.get("sessionId").and_then(|v| v.as_str()) == Some(&sid)
+                    && ev.pointer("/message/event/type").and_then(|v| v.as_str())
+                        == Some("message_stop")
+            });
+            if has_stop {
+                break;
+            }
+        }
 
         let recorded = events.lock().unwrap().clone();
         let mut saw_message_start = false;

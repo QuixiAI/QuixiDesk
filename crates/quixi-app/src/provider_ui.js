@@ -2,23 +2,26 @@
   if (window.__quixi_provider_ui_installed__) return;
   window.__quixi_provider_ui_installed__ = true;
 
+  // Ensure WKWebView always reports visible and cai_hub_preview_optout is enabled so
+  // scheduled task starter templates / 'Create with QuixiDesk' never hang on 'Starting…'.
+  try {
+    window.localStorage.setItem('cai_hub_preview_optout', '1');
+    Object.defineProperty(document, 'visibilityState', { get: function() { return 'visible'; }, configurable: true });
+    Object.defineProperty(document, 'hidden', { get: function() { return false; }, configurable: true });
+  } catch (_) {}
+
   // Ensure requestAnimationFrame still fires within 16ms if WKWebView is occluded/backgrounded
   // so Radix Dialog/AlertDialog presence transitions never stall when automated or backgrounded.
   try {
     var origRAF = window.requestAnimationFrame.bind(window);
     window.requestAnimationFrame = function(cb) {
-      if (document.hidden) {
-        return window.setTimeout(function() {
-          cb(performance.now());
-        }, 16);
-      }
       var fired = false;
       var fallbackTimer = window.setTimeout(function() {
         if (!fired) {
           fired = true;
           cb(performance.now());
         }
-      }, 50);
+      }, 32);
       return origRAF(function(ts) {
         if (!fired) {
           fired = true;
@@ -285,11 +288,17 @@
         }
 
         // Finish any stalled finite WAAPI animations (file preview drawer, right sidebar transitions)
+        // and cancel width-locking morph animations inside [data-cds="TurnStatus"]
         if (typeof document.getAnimations === 'function') {
           var anims = document.getAnimations();
           for (var aIdx = 0; aIdx < anims.length; aIdx++) {
             try {
               var a = anims[aIdx];
+              var target = a && a.effect && a.effect.target;
+              if (target && target.closest && target.closest('[data-cds="TurnStatus"]')) {
+                if (typeof a.cancel === 'function') a.cancel();
+                continue;
+              }
               var timing = a && a.effect && typeof a.effect.getTiming === 'function' ? a.effect.getTiming() : null;
               if (!timing || timing.iterations !== Infinity) {
                 if (a && typeof a.finish === 'function' && a.playState === 'running') {
@@ -297,6 +306,32 @@
                 }
               }
             } catch (_) {}
+          }
+        }
+
+        // Hide empty unlocalized Settings nav rows (reflect/time-limits) and legacy QuixiDesk Code row
+        var settingsNavBtns = document.querySelectorAll('[role="dialog"] nav button.hit-row');
+        for (var nbIdx = 0; nbIdx < settingsNavBtns.length; nbIdx++) {
+          var nb = settingsNavBtns[nbIdx];
+          var labelSpan = nb.querySelector('span.truncate');
+          var lblTxt = labelSpan ? (labelSpan.textContent || '').trim() : (nb.textContent || '').trim();
+          var li = nb.closest('li') || nb;
+          if (!lblTxt || lblTxt === 'QuixiDesk Code') {
+            li.style.display = 'none';
+          }
+        }
+
+        // Hide Code filter pill and New Code session option in Search (⌘K) command palette
+        var cmdPaletteInput = document.getElementById('command-palette-input');
+        var cmdPalette = document.getElementById('command-palette') || (cmdPaletteInput && cmdPaletteInput.closest('[role="dialog"]'));
+        if (cmdPalette) {
+          var cpEls = cmdPalette.querySelectorAll('button, [role="option"]');
+          for (var cpIdx = 0; cpIdx < cpEls.length; cpIdx++) {
+            var cpEl = cpEls[cpIdx];
+            var cpTxt = (cpEl.textContent || '').trim();
+            if (cpTxt === 'Code' || cpTxt.indexOf('New Code session') !== -1) {
+              cpEl.style.display = 'none';
+            }
           }
         }
 
@@ -347,6 +382,7 @@
             !val ||
             (val.indexOf('Anthropic') === -1 &&
              val.indexOf('Claude in Chrome') === -1 &&
+             val.indexOf('Claude Browser') === -1 &&
              val.indexOf('Claude Light') === -1 &&
              val.indexOf('Claude Dark') === -1 &&
              val.indexOf('You\u2019re here!') === -1 &&
@@ -359,6 +395,7 @@
             .replace(/Anthropic[\u2019']s guidelines/g, 'workspace guidelines')
             .replace(/Anthropic Serif/g, 'Quixi Sans')
             .replace(/Claude in Chrome/g, 'Quixi in Chrome')
+            .replace(/Claude Browser/g, 'Quixi Browser')
             .replace(/Claude Light/g, 'Quixi Cyber-Slate Light')
             .replace(/Claude Dark/g, 'Quixi Obsidian Dark')
             .replace(/Anthropic/g, 'Quixi');
@@ -370,8 +407,13 @@
     }
 
     scrubBrandingAndMascots();
+    var scrubTimer = null;
     var obs = new MutationObserver(function() {
-      scrubBrandingAndMascots();
+      if (scrubTimer) return;
+      scrubTimer = window.setTimeout(function() {
+        scrubTimer = null;
+        scrubBrandingAndMascots();
+      }, 25);
     });
     if (document.documentElement) {
       obs.observe(document.documentElement, { childList: true, subtree: true });
@@ -639,11 +681,15 @@
       '  box-shadow: 8px 0 30px rgba(6, 10, 18, 0.16) !important;',
       '}',
       '/* Hide Mode Toggles (Home/Code & Chat/Cowork) and expose features directly inline */',
-      '.dframe-sidebar .df-pills, .dframe-sidebar [data-chorus-callout="pills"], .dframe-sidebar [data-compact-mode-switcher], [data-chorus-callout="pills"], [data-compact-mode-switcher], [data-cds="SegmentedControl"][aria-label="Mode"] {',
+      '.dframe-sidebar .df-pills, .dframe-sidebar [data-chorus-callout="pills"], .dframe-sidebar [data-compact-mode-switcher], [data-chorus-callout="pills"], [data-compact-mode-switcher], [data-cds="SegmentedControl"][aria-label="Mode"], [data-cds="SegmentedControl"][aria-label="Composer mode"] {',
       '  display: none !important;',
       '}',
       '[data-cds="SegmentedControl"][aria-label="Surface"], [data-cds="SegmentedControl"]:has([data-surface-segment]), div.contents:has(> [data-cds="SegmentedControl"][aria-label="Surface"]), a[aria-label*="Learn more about Cowork"] {',
       '  display: none !important;',
+      '}',
+      '/* Prevent TurnStatus summary labels from clipping via WAAPI morph width or row-cut masks */',
+      '[data-cds="TurnStatus"] [id$="-label"], [data-cds="TurnStatus"] [data-morph-key], [data-cds="TurnStatus"] [data-cds-row-cut] {',
+      '  width: auto !important; max-width: 100% !important; mask-image: none !important; -webkit-mask-image: none !important;',
       '}',
       '.dframe-sidebar [data-row] {',
       '  border-radius: 9px !important;',
@@ -1002,7 +1048,7 @@
       '#quixi-browser-pill:hover, #quixi-browser-pill.active {',
       '  border-color: #2DD4BF; background: linear-gradient(135deg, #0D9488 0%, #4F46E5 100%); color: #FFFFFF;',
       '}',
-      'body.quixi-browser-open .dframe-pane-scroller, body.quixi-browser-open [data-cds="Page"] {',
+      'body.quixi-browser-open .dframe-pane-scroller, body.quixi-browser-open [data-cds="Page"], body.quixi-browser-open .dframe-main {',
       '  padding-right: 470px !important; box-sizing: border-box !important; transition: padding-right 0.14s ease;',
       '}',
       '#quixi-browser-pane {',
@@ -1117,6 +1163,13 @@
     var hdr = document.querySelector('.dframe-header');
     var hdrRect = hdr ? hdr.getBoundingClientRect() : { left: 240, right: winW, width: winW - 240 };
     var minRightControlLeft = hdrRect.right > 200 ? hdrRect.right - 16 : winW - 54;
+    var exitIncogBtn = document.querySelector('button[aria-label="Exit incognito"]');
+    if (exitIncogBtn) {
+      var eir = exitIncogBtn.getBoundingClientRect();
+      if (eir.width > 0 && eir.left > winW - 140 && eir.left < minRightControlLeft) {
+        minRightControlLeft = eir.left;
+      }
+    }
     var titleRight = hdrRect.left + 20;
     var hasNativeBrowserBtn = false;
 
@@ -1356,7 +1409,7 @@
         '<div class="qb-inspector">' +
           '<div class="qb-inspector-hdr">' +
             '<span>Accessibility DOM Refs (<span id="qb-ref-count">0</span> interactive)</span>' +
-            '<span>Claude Browser MCP Active</span>' +
+            '<span>Quixi Browser MCP Active</span>' +
           '</div>' +
           '<div class="qb-ref-list" id="qb-ref-list"></div>' +
         '</div>';
