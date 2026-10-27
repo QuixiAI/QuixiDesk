@@ -115,6 +115,27 @@ impl EipcRouter {
         EipcReplyPayload::ok(res)
     }
 
+    fn percent_decode(s: &str) -> String {
+        let bytes = s.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'%' && i + 2 < bytes.len() {
+                if let (Some(h), Some(l)) = (
+                    (bytes[i + 1] as char).to_digit(16),
+                    (bytes[i + 2] as char).to_digit(16),
+                ) {
+                    out.push(((h << 4) | l) as u8);
+                    i += 3;
+                    continue;
+                }
+            }
+            out.push(bytes[i]);
+            i += 1;
+        }
+        String::from_utf8(out).unwrap_or_else(|_| s.to_string())
+    }
+
     fn merge_with_exact_schema(actual: Value, schema: &Value) -> Value {
         if actual.is_null() {
             return schema.clone();
@@ -2328,28 +2349,93 @@ impl EipcRouter {
                 };
                 json!(resolved.to_string_lossy().to_string())
             }
-            ("FileSystem", "listDirectory") | ("FileSystem", "listFilesInFolder") => {
-                let dir_str = args
-                    .first()
+            ("FileSystem", "listDirectory") => {
+                let raw_dir = args
+                    .get(1)
                     .and_then(|v| v.as_str())
+                    .or_else(|| args.first().and_then(|v| v.as_str()))
                     .unwrap_or("/Users/eric/quixi-desk");
+                let dir_str = Self::percent_decode(raw_dir);
                 let entries =
-                    quixi_workspace::FileIndexEngine::list_directory_children(Path::new(dir_str));
+                    quixi_workspace::FileIndexEngine::list_directory_children(Path::new(&dir_str));
+                let dirs: Vec<String> = entries
+                    .iter()
+                    .filter(|e| e.is_dir)
+                    .map(|e| e.name.clone())
+                    .collect();
+                json!({ "directories": dirs, "entries": entries })
+            }
+            ("FileSystem", "listFilesInFolder") => {
+                let raw_dir = args
+                    .get(1)
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.trim().is_empty())
+                    .or_else(|| {
+                        args.first()
+                            .and_then(|v| v.as_str())
+                            .filter(|s| !s.starts_with("local_"))
+                    })
+                    .unwrap_or("/Users/eric/quixi-desk");
+                let dir_str = Self::percent_decode(raw_dir);
+                let entries =
+                    quixi_workspace::FileIndexEngine::list_directory_children(Path::new(&dir_str));
                 json!(entries)
             }
             ("FileSystem", "openLocalFile") | ("FileSystem", "showInFolder") => json!(true),
             ("FileSystem", "readLocalFile") => {
-                let p = args.first().and_then(|v| v.as_str()).unwrap_or("");
-                let content = fs::read_to_string(p).unwrap_or_default();
-                let name = Path::new(p)
+                let raw_path = args
+                    .get(1)
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.trim().is_empty())
+                    .or_else(|| args.first().and_then(|v| v.as_str()))
+                    .unwrap_or("");
+                let decoded = Self::percent_decode(raw_path);
+                let path_buf = if Path::new(&decoded).is_absolute() {
+                    std::path::PathBuf::from(&decoded)
+                } else {
+                    let sid = args.first().and_then(|v| v.as_str()).unwrap_or("");
+                    let base = self
+                        .engine
+                        .agent_sessions
+                        .read()
+                        .get(sid)
+                        .map(|s| s.cwd.clone())
+                        .unwrap_or_else(|| "/Users/eric/quixi-desk".to_string());
+                    Path::new(&base).join(&decoded)
+                };
+                let content = fs::read_to_string(&path_buf).unwrap_or_default();
+                let name = path_buf
                     .file_name()
                     .and_then(|s| s.to_str())
                     .unwrap_or("file.txt");
                 json!({
                     "content": content,
+                    "encoding": "utf8",
                     "mimeType": "text/plain",
                     "fileName": name
                 })
+            }
+            ("FileSystem", "writeLocalFile") => {
+                let (raw_path, content) = if args.len() >= 3 {
+                    (
+                        args.get(1).and_then(|v| v.as_str()).unwrap_or(""),
+                        args.get(2).and_then(|v| v.as_str()).unwrap_or(""),
+                    )
+                } else {
+                    (
+                        args.first().and_then(|v| v.as_str()).unwrap_or(""),
+                        args.get(1).and_then(|v| v.as_str()).unwrap_or(""),
+                    )
+                };
+                let decoded = Self::percent_decode(raw_path);
+                if !decoded.trim().is_empty() {
+                    let p = Path::new(&decoded);
+                    if let Some(parent) = p.parent() {
+                        let _ = fs::create_dir_all(parent);
+                    }
+                    let _ = fs::write(p, content);
+                }
+                json!(true)
             }
             ("Resources", "findFiles") => {
                 let q = args.first().and_then(|v| v.as_str());

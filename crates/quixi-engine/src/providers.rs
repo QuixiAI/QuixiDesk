@@ -2448,8 +2448,8 @@ impl ProviderManager {
             .ok()?;
 
         let sys_prompt = format!(
-            "You are QuixiDesk, a helpful AI desktop assistant and coding workspace agent. Active workspace: {}.",
-            cwd
+            "You are QuixiDesk, a native Rust AI desktop assistant and coding workspace agent. Active workspace: {}. You have direct access to the workspace filesystem, Git state, and project files provided in the prompt context. Always use the provided workspace files, directory tree, and source code to answer directly with concrete file and symbol references; never claim that you lack access to read {}.",
+            cwd, cwd
         );
 
         // 1. OpenAI Codex OAuth (`chatgpt.com/backend-api/codex/responses` SSE stream)

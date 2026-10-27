@@ -29,6 +29,31 @@
     };
   } catch (_) {}
 
+  // Ensure Web Animations API (Element.prototype.animate) finite transitions never stall at
+  // currentTime: 0 / opacity: 0 inside WKWebView (e.g. file preview drawer, right sidebar transitions).
+  try {
+    if (typeof Element !== 'undefined' && Element.prototype && typeof Element.prototype.animate === 'function' && !Element.prototype.animate.__quixi_waapi_fix__) {
+      var origAnimate = Element.prototype.animate;
+      var patchedAnimate = function(keyframes, options) {
+        var anim = origAnimate.apply(this, arguments);
+        try {
+          var iters = (options && typeof options === 'object' && typeof options.iterations === 'number') ? options.iterations : 1;
+          if (iters !== Infinity && anim && typeof anim.finish === 'function') {
+            Promise.resolve().then(function() {
+              try { anim.finish(); } catch (_) {}
+            });
+            window.setTimeout(function() {
+              try { anim.finish(); } catch (_) {}
+            }, 20);
+          }
+        } catch (_) {}
+        return anim;
+      };
+      patchedAnimate.__quixi_waapi_fix__ = true;
+      Element.prototype.animate = patchedAnimate;
+    }
+  } catch (_) {}
+
   var state = null;
   var selectedProviderId = 'openrouter';
   var isOverlayOpen = false;
@@ -257,6 +282,22 @@
       try {
         if (typeof dockHeaderPills === 'function') {
           dockHeaderPills();
+        }
+
+        // Finish any stalled finite WAAPI animations (file preview drawer, right sidebar transitions)
+        if (typeof document.getAnimations === 'function') {
+          var anims = document.getAnimations();
+          for (var aIdx = 0; aIdx < anims.length; aIdx++) {
+            try {
+              var a = anims[aIdx];
+              var timing = a && a.effect && typeof a.effect.getTiming === 'function' ? a.effect.getTiming() : null;
+              if (!timing || timing.iterations !== Infinity) {
+                if (a && typeof a.finish === 'function' && a.playState === 'running') {
+                  a.finish();
+                }
+              }
+            } catch (_) {}
+          }
         }
 
         // Redirect legacy /code or /epitaxy routes to the unified /new workspace
@@ -494,8 +535,8 @@
       '  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, sans-serif !important;',
       '  letter-spacing: -0.011em;',
       '}',
-      '/* Inline code pills: Indigo-Slate instead of terracotta clay */',
-      'code:not(pre code) {',
+      '/* Inline code pills: Indigo-Slate instead of terracotta clay (excluding file viewer code lines) */',
+      'code:not(pre code):not(.font-mono-ui):not([class*="break-all"]) {',
       '  background: rgba(79, 70, 229, 0.09) !important;',
       '  color: #4338CA !important;',
       '  border: 1px solid rgba(79, 70, 229, 0.22) !important;',
@@ -503,7 +544,7 @@
       '  padding: 1.5px 6px !important;',
       '  font-weight: 550 !important;',
       '}',
-      '[data-mode="dark"] code:not(pre code) {',
+      '[data-mode="dark"] code:not(pre code):not(.font-mono-ui):not([class*="break-all"]) {',
       '  background: rgba(99, 102, 241, 0.16) !important;',
       '  color: #A5B4FC !important;',
       '  border: 1px solid rgba(99, 102, 241, 0.32) !important;',
@@ -1055,39 +1096,140 @@
   }
 
   function dockHeaderPills() {
+    if (isOverlayOpen) return;
     var pPill = document.getElementById('quixi-provider-pill');
     var bPill = document.getElementById('quixi-browser-pill');
+    if ((!pPill || !bPill) && state) {
+      renderPill();
+      pPill = document.getElementById('quixi-provider-pill');
+      bPill = document.getElementById('quixi-browser-pill');
+    }
     if (!pPill || !bPill) return;
-    var slot = document.getElementById('dframe-header-actions-slot');
+    if (pPill.parentElement !== document.body) {
+      document.body.appendChild(pPill);
+    }
+    if (bPill.parentElement !== document.body) {
+      document.body.appendChild(bPill);
+    }
+
     var isOpen = !!(browserState && browserState.paneOpen);
-    if (slot && slot.parentElement && !isOpen) {
-      if (pPill.parentElement !== slot.parentElement || pPill.nextElementSibling !== bPill) {
-        slot.parentElement.insertBefore(pPill, slot);
+    var winW = window.innerWidth || 1440;
+    var hdr = document.querySelector('.dframe-header');
+    var hdrRect = hdr ? hdr.getBoundingClientRect() : { left: 240, right: winW, width: winW - 240 };
+    var minRightControlLeft = hdrRect.right > 200 ? hdrRect.right - 16 : winW - 54;
+    var titleRight = hdrRect.left + 20;
+    var hasNativeBrowserBtn = false;
+
+    if (hdr) {
+      var slot = document.getElementById('dframe-header-actions-slot');
+      if (slot) {
+        var sr = slot.getBoundingClientRect();
+        if (sr.left > hdrRect.right - 150 && sr.left < minRightControlLeft) {
+          minRightControlLeft = sr.left;
+        }
       }
-      if (bPill.parentElement !== slot.parentElement || bPill.nextElementSibling !== slot) {
-        slot.parentElement.insertBefore(bPill, slot);
+      var hdrBtns = hdr.querySelectorAll('button');
+      for (var bi = 0; bi < hdrBtns.length; bi++) {
+        var hb = hdrBtns[bi];
+        if (hb.id === 'quixi-provider-pill' || hb.id === 'quixi-browser-pill') continue;
+        var br = hb.getBoundingClientRect();
+        if (br.width <= 0) continue;
+        var ariaLbl = (hb.getAttribute('aria-label') || '');
+        if (ariaLbl === 'Browser' || ariaLbl === 'Open in browser') {
+          hasNativeBrowserBtn = true;
+          if (!hb.__quixi_browser_hooked__) {
+            hb.__quixi_browser_hooked__ = true;
+            hb.addEventListener('click', function(ev) {
+              ev.preventDefault();
+              ev.stopPropagation();
+              var currentlyOpen = !!(browserState && browserState.paneOpen);
+              browserAction({ action: currentlyOpen ? 'close' : 'open' });
+            }, true);
+          }
+        }
+        if (br.left > hdrRect.right - 140) {
+          if (br.left < minRightControlLeft) {
+            minRightControlLeft = br.left;
+          }
+        } else {
+          if (br.right > titleRight) {
+            titleRight = br.right;
+          }
+        }
       }
-      pPill.style.position = 'static';
-      pPill.style.marginRight = '6px';
-      pPill.style.flexShrink = '0';
-      bPill.style.position = 'static';
-      bPill.style.marginRight = '6px';
-      bPill.style.flexShrink = '0';
-    } else {
-      if (pPill.parentElement !== document.body) {
-        document.body.appendChild(pPill);
+    }
+
+    var baseRight = isOpen ? Math.max(484, Math.round(winW - minRightControlLeft + 8)) : Math.max(16, Math.round(winW - minRightControlLeft + 8));
+    var availWidth = minRightControlLeft - titleRight - 14;
+
+    var hasCfg = state && state.hasConfiguredProvider;
+    var activeProv = state ? state.activeProvider : 'openrouter';
+    var activeMod = state ? state.activeModel : '';
+    var shortMod = activeMod ? activeMod.split('/').pop() : activeProv;
+    var provName = activeProv;
+    if (state && state.providers) {
+      for (var i = 0; i < state.providers.length; i++) {
+        if (state.providers[i].id === activeProv) {
+          provName = state.providers[i].name;
+          break;
+        }
       }
-      if (bPill.parentElement !== document.body) {
-        document.body.appendChild(bPill);
+    }
+
+    var desiredMode = 'full';
+    if (availWidth < 135) {
+      desiredMode = 'icon';
+    } else if (availWidth < 310) {
+      desiredMode = 'compact';
+    }
+
+    if (pPill.getAttribute('data-pill-mode') !== desiredMode) {
+      pPill.setAttribute('data-pill-mode', desiredMode);
+      if (desiredMode === 'icon') {
+        pPill.innerHTML =
+          QUIXI_MARK_SVG +
+          '<span class="qp-dot ' + (hasCfg ? '' : 'warn') + '"></span>';
+      } else if (desiredMode === 'compact') {
+        pPill.innerHTML =
+          QUIXI_MARK_SVG +
+          '<span class="qp-dot ' + (hasCfg ? '' : 'warn') + '"></span>' +
+          '<span>' + escapeHtml(shortMod) + '</span>';
+      } else {
+        pPill.innerHTML =
+          QUIXI_MARK_SVG +
+          '<span class="qp-dot ' + (hasCfg ? '' : 'warn') + '"></span>' +
+          '<span>Providers: ' + escapeHtml(provName) + (shortMod ? ' · ' + escapeHtml(shortMod) : '') + '</span>';
       }
+    }
+
+    if (hasNativeBrowserBtn) {
+      bPill.style.display = 'none';
       pPill.style.position = 'fixed';
       pPill.style.top = '7px';
       pPill.style.marginRight = '0';
-      pPill.style.right = isOpen ? '592px' : '160px';
+      pPill.style.right = baseRight + 'px';
+    } else {
+      bPill.style.display = 'inline-flex';
+      var bDesiredMode = (availWidth < 310) ? 'compact' : 'full';
+      if (bPill.getAttribute('data-pill-mode') !== bDesiredMode) {
+        bPill.setAttribute('data-pill-mode', bDesiredMode);
+        if (bDesiredMode === 'compact') {
+          bPill.innerHTML = '<span>🌐</span>';
+        } else {
+          bPill.innerHTML =
+            '<span class="qp-dot"></span>' +
+            '<span>🌐 Browser</span>';
+        }
+      }
       bPill.style.position = 'fixed';
       bPill.style.top = '7px';
       bPill.style.marginRight = '0';
-      bPill.style.right = isOpen ? '484px' : '52px';
+      bPill.style.right = baseRight + 'px';
+      var bWidth = bPill.offsetWidth || (bDesiredMode === 'compact' ? 36 : 100);
+      pPill.style.position = 'fixed';
+      pPill.style.top = '7px';
+      pPill.style.marginRight = '0';
+      pPill.style.right = (baseRight + bWidth + 6) + 'px';
     }
   }
 
@@ -1123,6 +1265,7 @@
         }
       }
     }
+    existing.removeAttribute('data-pill-mode');
     existing.innerHTML =
       QUIXI_MARK_SVG +
       '<span class="qp-dot ' + (hasCfg ? '' : 'warn') + '"></span>' +
@@ -1156,6 +1299,7 @@
     btn.style.display = 'inline-flex';
     var isOpen = !!(browserState && browserState.paneOpen);
     btn.className = 'draggable-none' + (isOpen ? ' active' : '');
+    btn.removeAttribute('data-pill-mode');
     btn.innerHTML =
       '<span class="qp-dot"></span>' +
       '<span>🌐 Browser</span>';

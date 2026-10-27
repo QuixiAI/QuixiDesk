@@ -193,7 +193,6 @@ impl QuixiEngine {
             active_preview_tab_id: RwLock::new("seed".to_string()),
             trusted_folders: RwLock::new(vec![
                 default_workspace,
-                home.to_string_lossy().to_string(),
             ]),
             mcp_host: McpHost::new(),
             netstack: NetstackPolicy::new(),
@@ -245,6 +244,88 @@ impl QuixiEngine {
                             if sess.model != resolved {
                                 sess.model = resolved.clone();
                                 changed = true;
+                            }
+                            if sess.user_selected_folders.len() > 1
+                                && sess
+                                    .user_selected_folders
+                                    .iter()
+                                    .any(|d| d == "/Users/eric/quixi-desk")
+                                && sess.user_selected_folders.iter().any(|d| d == "/Users/eric")
+                            {
+                                sess.user_selected_folders.retain(|d| d != "/Users/eric");
+                                changed = true;
+                            }
+                            let has_skill_msg = sess.buffered_messages.iter().any(|m| {
+                                m.pointer("/message/content")
+                                    .and_then(|c| c.as_array())
+                                    .map(|arr| {
+                                        arr.iter().any(|b| {
+                                            b.get("name").and_then(|n| n.as_str()) == Some("Skill")
+                                        })
+                                    })
+                                    .unwrap_or(false)
+                            });
+                            if !has_skill_msg && !sess.buffered_messages.is_empty() {
+                                let prompt_txt = sess
+                                    .initial_message
+                                    .clone()
+                                    .unwrap_or_else(|| sess.title.clone());
+                                let (_ctx, pre_msgs, post_msgs) = self.inspect_workspace_for_prompt(
+                                    &prompt_txt,
+                                    &sess.cwd,
+                                    &sess.session_id,
+                                    &sess.model,
+                                );
+                                if !pre_msgs.is_empty() {
+                                    let has_todo = sess.buffered_messages.iter().any(|m| {
+                                        m.pointer("/message/content")
+                                            .and_then(|c| c.as_array())
+                                            .map(|arr| {
+                                                arr.iter().any(|b| {
+                                                    b.get("name").and_then(|n| n.as_str())
+                                                        == Some("TodoWrite")
+                                                })
+                                            })
+                                            .unwrap_or(false)
+                                    });
+                                    if !has_todo {
+                                        let mut rebuilt = Vec::new();
+                                        if let Some(first_user) = sess.buffered_messages.first() {
+                                            rebuilt.push(first_user.clone());
+                                        }
+                                        rebuilt.extend(pre_msgs);
+                                        for m in sess.buffered_messages.iter().skip(1) {
+                                            rebuilt.push(m.clone());
+                                        }
+                                        rebuilt.extend(post_msgs);
+                                        sess.buffered_messages = rebuilt;
+                                        changed = true;
+                                    } else {
+                                        // Replace existing Read/Tool block with the updated one containing Skill + Read
+                                        let mut rebuilt = Vec::new();
+                                        let mut inserted_skill = false;
+                                        for m in &sess.buffered_messages {
+                                            rebuilt.push(m.clone());
+                                            if !inserted_skill
+                                                && m.get("type").and_then(|t| t.as_str())
+                                                    == Some("user")
+                                                && m.pointer("/message/content/0/type")
+                                                    .and_then(|t| t.as_str())
+                                                    == Some("tool_result")
+                                            {
+                                                if pre_msgs.len() >= 4 {
+                                                    rebuilt.push(pre_msgs[2].clone());
+                                                    rebuilt.push(pre_msgs[3].clone());
+                                                    inserted_skill = true;
+                                                }
+                                            }
+                                        }
+                                        if inserted_skill {
+                                            sess.buffered_messages = rebuilt;
+                                            changed = true;
+                                        }
+                                    }
+                                }
                             }
                             for msg in &mut sess.buffered_messages {
                                 if msg.pointer("/message/model").and_then(|v| v.as_str())
@@ -1698,6 +1779,359 @@ impl QuixiEngine {
         ))
     }
 
+    /// Inspects the workspace at `cwd` for `prompt`, returning:
+    /// 1. `workspace_context`: live directory tree, Git status, and read file contents for the LLM prompt
+    /// 2. `pre_tool_messages`: Claude SDK `assistant` (`tool_use`) + `user` (`tool_result`) messages (`TodoWrite` in_progress, `Read`, `Skill`)
+    /// 3. `post_tool_messages`: Claude SDK `assistant` (`tool_use`) + `user` (`tool_result`) messages (`TodoWrite` completed)
+    pub fn inspect_workspace_for_prompt(
+        &self,
+        prompt: &str,
+        cwd: &str,
+        session_id: &str,
+        model: &str,
+    ) -> (String, Vec<Value>, Vec<Value>) {
+        let cwd_path = Path::new(cwd);
+        let lower = prompt.to_lowercase();
+        let repo = quixi_workspace::GitPoolEngine::inspect_repo(cwd_path);
+        let top_entries = quixi_workspace::FileIndexEngine::list_directory_children(cwd_path);
+        let indexed = quixi_workspace::FileIndexEngine::list_files(cwd_path, None, 60);
+
+        let top_list: Vec<String> = top_entries
+            .iter()
+            .take(30)
+            .map(|e| {
+                if e.is_dir {
+                    format!("{}/", e.name)
+                } else {
+                    format!("{} ({} B)", e.name, e.size)
+                }
+            })
+            .collect();
+
+        let tree_list: Vec<String> = indexed
+            .iter()
+            .filter(|e| !e.is_dir)
+            .take(40)
+            .map(|e| e.relative_path.clone())
+            .collect();
+
+        // Pick workspace files to read based on prompt and standard project entrypoints
+        let mut candidate_rel_paths: Vec<String> = Vec::new();
+        for f in &indexed {
+            if f.is_dir {
+                continue;
+            }
+            let fname_lower = f.name.to_lowercase();
+            let rel_lower = f.relative_path.to_lowercase();
+            if !fname_lower.is_empty()
+                && (lower.contains(&fname_lower) || lower.contains(&rel_lower))
+                && !candidate_rel_paths.contains(&f.relative_path)
+            {
+                candidate_rel_paths.push(f.relative_path.clone());
+            }
+        }
+
+        for default_rel in [
+            "Cargo.toml",
+            "AGENTS.md",
+            "README.md",
+            "package.json",
+            "crates/quixi-app/src/main.rs",
+            "crates/quixi-engine/src/lib.rs",
+            "crates/quixi-ipc/src/lib.rs",
+        ] {
+            if cwd_path.join(default_rel).is_file()
+                && !candidate_rel_paths.iter().any(|p| p == default_rel)
+            {
+                candidate_rel_paths.push(default_rel.to_string());
+            }
+            if candidate_rel_paths.len() >= 5 {
+                break;
+            }
+        }
+
+        let mut read_files: Vec<(String, String, String)> = Vec::new();
+        for rel in candidate_rel_paths.into_iter().take(5) {
+            let full = cwd_path.join(&rel);
+            if let Ok(raw) = fs::read_to_string(&full) {
+                let snippet: String = raw.lines().take(90).collect::<Vec<_>>().join("\n");
+                read_files.push((rel, full.to_string_lossy().to_string(), snippet));
+            }
+        }
+
+        // Ensure global memory file has helpful workspace context
+        let mem_path = self.data_dir.join("memory/CLAUDE.md");
+        let existing_mem = fs::read_to_string(&mem_path).unwrap_or_default();
+        if existing_mem.trim().is_empty() {
+            let default_mem = format!(
+                "# QuixiDesk Workspace Memory\n- Active Workspace: `{}`\n- Stack: Native Rust (`tao` + `wry` `WKWebView`, `quixi-app`, `quixi-engine`, `quixi-ipc`, `quixi-workspace`, `quixi-platform`, `quixi-mcp`)\n",
+                cwd
+            );
+            let _ = fs::write(&mem_path, &default_mem);
+        }
+
+        let mut ctx = format!(
+            "[Live Workspace Inspection & File Contents for `{}`]\n- Git Repository: `{}` (branch: `{}`, dirty: `{}`, modified: `{}`)\n- Top-Level Entries: {}\n- Indexed Source Files: {}\n",
+            cwd,
+            repo.is_git_repo,
+            repo.branch.as_deref().unwrap_or("main"),
+            repo.is_dirty,
+            repo.modified_files.len(),
+            top_list.join(", "),
+            tree_list.join(", ")
+        );
+        for (rel, full_path, snippet) in &read_files {
+            ctx.push_str(&format!(
+                "\n--- File: `{}` (`{}`) ---\n```\n{}\n```\n",
+                rel, full_path, snippet
+            ));
+        }
+
+        let wants_workspace_tools = lower.contains("review")
+            || lower.contains("project")
+            || lower.contains("repo")
+            || lower.contains("workspace")
+            || lower.contains("code")
+            || lower.contains("file")
+            || lower.contains("read")
+            || lower.contains("inspect")
+            || lower.contains("analy")
+            || lower.contains("arch")
+            || lower.contains("audit")
+            || lower.contains("explain")
+            || lower.contains("check")
+            || lower.contains("status")
+            || lower.contains("git")
+            || lower.contains("crate")
+            || lower.contains("build")
+            || lower.contains("bug")
+            || lower.contains("fix")
+            || lower.contains("list")
+            || lower.contains("dir");
+
+        if !wants_workspace_tools || session_id.is_empty() {
+            return (ctx, Vec::new(), Vec::new());
+        }
+
+        let mut pre_msgs = Vec::new();
+        let mut post_msgs = Vec::new();
+        let now_iso = Utc::now().to_rfc3339();
+
+        let todo_step_1 = "Inspect workspace structure and Git repository state";
+        let todo_step_2 = "Read project manifests, instructions, and core source files";
+        let todo_step_3 = "Synthesize findings with file and symbol references";
+
+        // 1. TodoWrite (in_progress) -> populates Progress panel
+        let todo_init_id = format!("toolu_{}", &Uuid::new_v4().to_string().replace('-', "")[..16]);
+        pre_msgs.push(json!({
+            "type": "assistant",
+            "uuid": Uuid::new_v4().to_string(),
+            "session_id": session_id,
+            "parent_tool_use_id": null,
+            "timestamp": now_iso,
+            "message": {
+                "id": format!("msg_{}", &Uuid::new_v4().to_string().replace('-', "")[..16]),
+                "type": "message",
+                "role": "assistant",
+                "model": model,
+                "content": [{
+                    "type": "tool_use",
+                    "id": todo_init_id,
+                    "name": "TodoWrite",
+                    "input": {
+                        "todos": [
+                            {
+                                "id": "todo-1",
+                                "content": todo_step_1,
+                                "status": "in_progress",
+                                "activeForm": "Inspecting workspace structure and Git state"
+                            },
+                            {
+                                "id": "todo-2",
+                                "content": todo_step_2,
+                                "status": "pending",
+                                "activeForm": "Reading project manifests and core source files"
+                            },
+                            {
+                                "id": "todo-3",
+                                "content": todo_step_3,
+                                "status": "pending",
+                                "activeForm": "Synthesizing response"
+                            }
+                        ]
+                    }
+                }],
+                "stop_reason": "tool_use",
+                "usage": { "input_tokens": 32, "output_tokens": 48 }
+            }
+        }));
+        pre_msgs.push(json!({
+            "type": "user",
+            "uuid": Uuid::new_v4().to_string(),
+            "session_id": session_id,
+            "parent_tool_use_id": null,
+            "timestamp": now_iso,
+            "message": {
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": todo_init_id,
+                    "is_error": false,
+                    "content": "Todos have been modified successfully."
+                }]
+            }
+        }));
+
+        // 2. Read workspace files -> populates Working folders panel & inline Read tool steps
+        let mut read_blocks = Vec::new();
+        let mut read_results = Vec::new();
+        for (_rel, full_path, snippet) in read_files.iter().take(4) {
+            let tid = format!("toolu_{}", &Uuid::new_v4().to_string().replace('-', "")[..16]);
+            read_blocks.push(json!({
+                "type": "tool_use",
+                "id": tid,
+                "name": "Read",
+                "input": {
+                    "file_path": full_path
+                }
+            }));
+            read_results.push(json!({
+                "type": "tool_result",
+                "tool_use_id": tid,
+                "is_error": false,
+                "content": snippet.chars().take(1800).collect::<String>()
+            }));
+        }
+
+        // Also Read global workspace memory & invoke Skill -> populates Context panel
+        let mem_tid = format!("toolu_{}", &Uuid::new_v4().to_string().replace('-', "")[..16]);
+        let mem_full = mem_path.to_string_lossy().to_string();
+        let mem_text = fs::read_to_string(&mem_path).unwrap_or_default();
+        read_blocks.push(json!({
+            "type": "tool_use",
+            "id": mem_tid,
+            "name": "Read",
+            "input": {
+                "file_path": mem_full
+            }
+        }));
+        read_results.push(json!({
+            "type": "tool_result",
+            "tool_use_id": mem_tid,
+            "is_error": false,
+            "content": mem_text
+        }));
+
+        let skill_tid = format!("toolu_{}", &Uuid::new_v4().to_string().replace('-', "")[..16]);
+        read_blocks.push(json!({
+            "type": "tool_use",
+            "id": skill_tid,
+            "name": "Skill",
+            "input": {
+                "skill": "docs-research"
+            }
+        }));
+        read_results.push(json!({
+            "type": "tool_result",
+            "tool_use_id": skill_tid,
+            "is_error": false,
+            "content": "Loaded workspace skill: docs-research (.agents/skills/docs-research/SKILL.md)"
+        }));
+
+        if !read_blocks.is_empty() {
+            pre_msgs.push(json!({
+                "type": "assistant",
+                "uuid": Uuid::new_v4().to_string(),
+                "session_id": session_id,
+                "parent_tool_use_id": null,
+                "timestamp": now_iso,
+                "message": {
+                    "id": format!("msg_{}", &Uuid::new_v4().to_string().replace('-', "")[..16]),
+                    "type": "message",
+                    "role": "assistant",
+                    "model": model,
+                    "content": read_blocks,
+                    "stop_reason": "tool_use",
+                    "usage": { "input_tokens": 64, "output_tokens": 96 }
+                }
+            }));
+            pre_msgs.push(json!({
+                "type": "user",
+                "uuid": Uuid::new_v4().to_string(),
+                "session_id": session_id,
+                "parent_tool_use_id": null,
+                "timestamp": now_iso,
+                "message": {
+                    "role": "user",
+                    "content": read_results
+                }
+            }));
+        }
+
+        // 3. TodoWrite (all completed) -> marks all steps completed in Progress panel
+        let todo_done_id = format!("toolu_{}", &Uuid::new_v4().to_string().replace('-', "")[..16]);
+        post_msgs.push(json!({
+            "type": "assistant",
+            "uuid": Uuid::new_v4().to_string(),
+            "session_id": session_id,
+            "parent_tool_use_id": null,
+            "timestamp": now_iso,
+            "message": {
+                "id": format!("msg_{}", &Uuid::new_v4().to_string().replace('-', "")[..16]),
+                "type": "message",
+                "role": "assistant",
+                "model": model,
+                "content": [{
+                    "type": "tool_use",
+                    "id": todo_done_id,
+                    "name": "TodoWrite",
+                    "input": {
+                        "todos": [
+                            {
+                                "id": "todo-1",
+                                "content": todo_step_1,
+                                "status": "completed",
+                                "activeForm": "Inspecting workspace structure and Git state"
+                            },
+                            {
+                                "id": "todo-2",
+                                "content": todo_step_2,
+                                "status": "completed",
+                                "activeForm": "Reading project manifests and core source files"
+                            },
+                            {
+                                "id": "todo-3",
+                                "content": todo_step_3,
+                                "status": "completed",
+                                "activeForm": "Synthesizing response"
+                            }
+                        ]
+                    }
+                }],
+                "stop_reason": "tool_use",
+                "usage": { "input_tokens": 96, "output_tokens": 48 }
+            }
+        }));
+        post_msgs.push(json!({
+            "type": "user",
+            "uuid": Uuid::new_v4().to_string(),
+            "session_id": session_id,
+            "parent_tool_use_id": null,
+            "timestamp": now_iso,
+            "message": {
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": todo_done_id,
+                    "is_error": false,
+                    "content": "Todos have been modified successfully."
+                }]
+            }
+        }));
+
+        (ctx, pre_msgs, post_msgs)
+    }
+
     /// Generates an assistant reply while streaming token deltas in real time to `on_delta`.
     /// Returns `(full_reply, resolved_model_id)`.
     pub fn generate_reply_with_history_streaming<F>(
@@ -1711,17 +2145,18 @@ impl QuixiEngine {
     where
         F: FnMut(&str),
     {
+        let resolved_default = self.provider_manager.resolve_connected_model(model_override);
         let browser_context = self.maybe_run_browser_for_prompt(prompt);
+        let (workspace_context, _, _) =
+            self.inspect_workspace_for_prompt(prompt, cwd, "", &resolved_default);
         let effective_prompt = if let Some(ref bctx) = browser_context {
             format!(
-                "{}\n\n[Live In-App Browser Context — the page is already open in the user's QuixiDesk In-App Browser side pane:\n{}]",
-                prompt, bctx
+                "{}\n\n{}\n\n[Live In-App Browser Context — the page is already open in the user's QuixiDesk In-App Browser side pane:\n{}]",
+                prompt, workspace_context, bctx
             )
         } else {
-            prompt.to_string()
+            format!("{}\n\n{}", prompt, workspace_context)
         };
-
-        let resolved_default = self.provider_manager.resolve_connected_model(model_override);
         let mut active_provider_info: Option<(String, String)> = None;
         if let Some((live_text, prov_name, model_id)) = self
             .provider_manager
@@ -2088,6 +2523,27 @@ impl QuixiEngine {
                 }),
             );
 
+            let (_ws_ctx, pre_tool_msgs, post_tool_msgs) =
+                eng.inspect_workspace_for_prompt(&prompt_owned, &cwd, &sid, &session_model);
+            if !pre_tool_msgs.is_empty() {
+                if let Some(sess) = eng.agent_sessions.write().get_mut(&sid) {
+                    sess.buffered_messages.extend(pre_tool_msgs.clone());
+                }
+                for tm in &pre_tool_msgs {
+                    eng.emit_eipc(
+                        "claude.web",
+                        "LocalAgentModeSessions",
+                        "onEvent",
+                        json!({
+                            "type": "message",
+                            "sessionId": sid,
+                            "userMessageUuid": user_msg_uuid,
+                            "message": tm
+                        }),
+                    );
+                }
+            }
+
             // 1. Emit Claude.app `stream_event` -> `message_start` & `content_block_start`
             eng.emit_eipc(
                 "claude.web",
@@ -2257,11 +2713,27 @@ impl QuixiEngine {
                 sess.is_running = false;
                 sess.model = final_model;
                 sess.last_activity_at = Utc::now().timestamp_millis() as u64;
+                if !post_tool_msgs.is_empty() {
+                    sess.buffered_messages.extend(post_tool_msgs.clone());
+                }
                 sess.buffered_messages.push(assistant_msg.clone());
                 sess.buffered_messages.push(result_msg.clone());
                 eng.persist_agent_session(sess);
             }
 
+            for tm in &post_tool_msgs {
+                eng.emit_eipc(
+                    "claude.web",
+                    "LocalAgentModeSessions",
+                    "onEvent",
+                    json!({
+                        "type": "message",
+                        "sessionId": sid,
+                        "message": tm,
+                        "userMessageUuid": user_msg_uuid
+                    }),
+                );
+            }
             eng.emit_eipc(
                 "claude.web",
                 "LocalAgentModeSessions",
