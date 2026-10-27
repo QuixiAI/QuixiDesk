@@ -51,7 +51,7 @@ pub struct QuixiEngine {
 
 impl QuixiEngine {
     pub fn new(resources_dir: PathBuf) -> Arc<Self> {
-        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/Users/eric"));
+        let home = dirs::home_dir().unwrap_or_else(quixi_proto::paths::home_dir);
         let data_dir = home.join(".quixi");
         for sub in [
             "sessions",
@@ -93,7 +93,7 @@ impl QuixiEngine {
             .unwrap_or_default();
 
         let now_ms = Utc::now().timestamp_millis() as u64;
-        let default_workspace = "/Users/eric/quixi-desk".to_string();
+        let default_workspace = quixi_proto::paths::default_workspace_str().to_string();
 
         let mut spaces = HashMap::new();
         let default_space_id = "space_quixidesk_default".to_string();
@@ -249,10 +249,10 @@ impl QuixiEngine {
                                 && sess
                                     .user_selected_folders
                                     .iter()
-                                    .any(|d| d == "/Users/eric/quixi-desk")
-                                && sess.user_selected_folders.iter().any(|d| d == "/Users/eric")
+                                    .any(|d| d == quixi_proto::paths::default_workspace_str())
+                                && sess.user_selected_folders.iter().any(|d| d == quixi_proto::paths::home_dir_str())
                             {
-                                sess.user_selected_folders.retain(|d| d != "/Users/eric");
+                                sess.user_selected_folders.retain(|d| d != quixi_proto::paths::home_dir_str());
                                 changed = true;
                             }
                             // Deduplicate Read tool_use blocks by file basename across buffered_messages
@@ -803,7 +803,7 @@ impl QuixiEngine {
             .or_else(|| opts.get("folderPath"))
             .and_then(|v| v.as_str())
             .or_else(|| existing.as_ref().and_then(|e| e.get("cwd")).and_then(|v| v.as_str()))
-            .unwrap_or("/Users/eric/quixi-desk")
+            .unwrap_or(quixi_proto::paths::default_workspace_str())
             .to_string();
         let model = opts
             .get("model")
@@ -1697,7 +1697,7 @@ impl QuixiEngine {
                 })
                 .unwrap_or_default();
             let reply_text =
-                self.generate_reply_with_history(prompt, "/Users/eric/quixi-desk", &history);
+                self.generate_reply_with_history(prompt, quixi_proto::paths::default_workspace_str(), &history);
             let now = Utc::now().to_rfc3339();
 
             let active_model = self.provider_manager.resolve_connected_model(
@@ -2586,7 +2586,7 @@ impl QuixiEngine {
             .map(|s| s.to_string());
         let now_ms = Utc::now().timestamp_millis() as u64;
         let home = dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("/Users/eric"))
+            .unwrap_or_else(|| PathBuf::from(quixi_proto::paths::home_dir_str()))
             .to_string_lossy()
             .to_string();
         let folders: Vec<String> = opts
@@ -2598,7 +2598,7 @@ impl QuixiEngine {
                     .collect()
             })
             .filter(|v: &Vec<String>| !v.is_empty())
-            .unwrap_or_else(|| vec!["/Users/eric/quixi-desk".to_string()]);
+            .unwrap_or_else(|| vec![quixi_proto::paths::default_workspace_str().to_string()]);
         let cwd = opts
             .get("cwd")
             .and_then(|v| v.as_str())
@@ -2720,13 +2720,13 @@ impl QuixiEngine {
             }
         });
 
-        let mut cwd = "/Users/eric/quixi-desk".to_string();
+        let mut cwd = quixi_proto::paths::default_workspace_str().to_string();
         let mut session_model = self.provider_manager.resolve_connected_model(None);
         {
             let mut sessions = self.agent_sessions.write();
             if !sessions.contains_key(session_id) && !session_id.is_empty() {
                 let home = dirs::home_dir()
-                    .unwrap_or_else(|| PathBuf::from("/Users/eric"))
+                    .unwrap_or_else(|| PathBuf::from(quixi_proto::paths::home_dir_str()))
                     .to_string_lossy()
                     .to_string();
                 let auto_sess = LocalAgentSession {
@@ -3109,7 +3109,7 @@ impl QuixiEngine {
             .and_then(|v| v.as_str())
             .filter(|s| !s.trim().is_empty() && *s != "~")
             .map(|s| s.to_string())
-            .unwrap_or_else(|| "/Users/eric/quixi-desk".to_string());
+            .unwrap_or_else(|| quixi_proto::paths::default_workspace_str().to_string());
         let prompt = opts
             .get("message")
             .or_else(|| opts.get("prompt"))
@@ -3228,7 +3228,7 @@ impl QuixiEngine {
             }
         });
 
-        let mut cwd = "/Users/eric/quixi-desk".to_string();
+        let mut cwd = quixi_proto::paths::default_workspace_str().to_string();
         let mut session_model = self.provider_manager.resolve_connected_model(None);
         if let Some(sess) = self.code_sessions.write().get_mut(session_id) {
             sess.is_running = true;

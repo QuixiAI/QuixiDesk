@@ -106,11 +106,16 @@ cargo test --workspace
 ```
 
 ### 3. Build & Package `QuixiDesk.app`
-Build the optimized release binaries and package the macOS application bundle into `dist/QuixiDesk.app`:
+Build the optimized release binaries and package a self-contained macOS application bundle into `dist/QuixiDesk.app`:
 ```bash
 cargo build --release --workspace
-./scripts/package-macos-app.sh
+./scripts/package-macos-app.sh      # or simply: make app
 ```
+The bundle is relocatable (resources are copied, not symlinked), ad-hoc codesigned, and can be moved to `/Applications`. Use `make install` to do that in one step, or `QUIXI_APP_SYMLINK_RESOURCES=1 make app` for a fast iteration loop that symlinks `resources/` instead.
+
+> **Workspace folder:** the engine opens the source checkout by default. Point it anywhere else with `QUIXI_WORKSPACE=/path/to/folder`. All path defaults live in `crates/quixi-proto/src/paths.rs` — no machine-specific paths are baked in.
+>
+> **Note:** the `reference/` directory (1,400-channel EIPC catalogue and exact schemas) is a reverse-engineering artifact and is *not* part of the repository. Builds fall back to `crates/quixi-ipc/assets/ipc-exact-schemas.json`, and the 1,400-channel parity sweep test self-skips when the catalogue is missing.
 
 Or run the desktop app directly in release mode:
 ```bash

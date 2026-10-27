@@ -1,3 +1,5 @@
+pub mod paths;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
