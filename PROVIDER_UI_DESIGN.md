@@ -17,7 +17,7 @@ This specification defines the UI and native Rust backend architecture for manag
 
 ### 1.2 Priority Provider Ordering
 The provider list is ordered explicitly by versatility and authentication convenience:
-1. **`#1` OpenRouter (`openrouter`)** — *First on the list (Recommended)*: Unified API gateway to 200+ frontier models (Claude Sonnet/Opus 4.6, GPT-5.4, Grok 4, Gemini 3.1 Pro, DeepSeek R1) with a single API key (`sk-or-v1-...`).
+1. **`#1` OpenRouter (`openrouter`)** — *First on the list (Recommended)*: Unified API gateway to 200+ frontier models (Claude Sonnet/Opus 4.6, GPT-5.4, Grok 4, Gemini 3.1 Pro, DeepSeek V4.1 Flash) with a single API key (`sk-or-v1-...`).
 2. **`#2` Custom Endpoint (`custom`)** — *Second on the list*: Any OpenAI-compatible (`/v1/chat/completions`) or Anthropic-compatible (`/v1/messages`) base URL, optional API key, custom model IDs, and custom context window.
 3. **`#3` OpenAI (`openai` / `openai-codex`)** — *Third on the list (Supports OAuth)*: 1-click **ChatGPT Plus/Pro Subscription Sign-In (Codex OAuth)** via RFC 8628 Device Code + PKCE browser flow, or OpenAI Platform API key (`sk-proj-...`).
 4. **`#4` Grok / xAI (`xai` / `xai-oauth`)** — *Fourth on the list (Supports OAuth)*: 1-click **SuperGrok / X Account Sign-In (OAuth)** via xAI RFC 8628 Device Code flow, or xAI Console API key (`xai-...`).

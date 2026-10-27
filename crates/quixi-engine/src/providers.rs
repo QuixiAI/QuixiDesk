@@ -182,7 +182,8 @@ impl ProviderManager {
                     Self::model("openai/gpt-5.4", "GPT-5.4 (via OpenRouter)", 256_000, true, true),
                     Self::model("x-ai/grok-4", "Grok 4 (via OpenRouter)", 256_000, true, true),
                     Self::model("google/gemini-3.1-pro-preview", "Gemini 3.1 Pro (via OpenRouter)", 1_000_000, true, true),
-                    Self::model("deepseek/deepseek-r1", "DeepSeek R1 (via OpenRouter)", 128_000, true, false),
+                    Self::model("deepseek/deepseek-v4.1-flash", "DeepSeek V4.1 Flash (via OpenRouter)", 1_048_576, true, true),
+                    Self::model("deepseek/deepseek-v4-pro", "DeepSeek V4 Pro (via OpenRouter)", 1_048_576, true, false),
                     Self::model("qwen/qwen3-coder-480b", "Qwen 3 Coder 480B (via OpenRouter)", 128_000, true, false),
                 ],
                 custom_models: vec![],
@@ -372,7 +373,7 @@ impl ProviderManager {
             ProviderEntry {
                 id: "deepseek".to_string(),
                 name: "DeepSeek".to_string(),
-                subtitle: "DeepSeek V3 (chat) and DeepSeek R1 (reasoner)".to_string(),
+                subtitle: "DeepSeek V4.1 Flash (thinking + native vision) and V4 Pro — 1M context".to_string(),
                 badge: "Reasoning".to_string(),
                 category: "cloud".to_string(),
                 priority_rank: 7,
@@ -391,13 +392,21 @@ impl ProviderManager {
                 env_var: "DEEPSEEK_API_KEY".to_string(),
                 docs_url: "https://platform.deepseek.com/api_keys".to_string(),
                 configured: false,
-                selected_model: "deepseek-chat".to_string(),
+                // DeepSeek's API exposes exactly two model ids since V4:
+                // "deepseek-flash" (V4.1-Flash, text+vision, thinking on by default with
+                // low/high/max effort) and "deepseek-v4-pro" (V4-Pro, text only).
+                // "deepseek-chat" / "deepseek-reasoner" are legacy aliases: both are served
+                // by deepseek-flash today (verified against api.deepseek.com/models), and
+                // the R1 naming was retired back in 2025.
+                selected_model: "deepseek-flash".to_string(),
                 models: vec![
-                    Self::model("deepseek-chat", "DeepSeek V3 (Chat)", 128_000, false, false),
-                    Self::model("deepseek-reasoner", "DeepSeek R1 (Reasoner)", 128_000, true, false),
+                    Self::model("deepseek-flash", "DeepSeek V4.1 Flash · thinking + vision", 1_048_576, true, true),
+                    Self::model("deepseek-v4-pro", "DeepSeek V4 Pro", 1_048_576, true, false),
+                    Self::model("deepseek-chat", "Legacy alias · non-thinking · served by V4.1 Flash", 1_048_576, false, true),
+                    Self::model("deepseek-reasoner", "Legacy alias · thinking · served by V4.1 Flash", 1_048_576, true, true),
                 ],
                 custom_models: vec![],
-                context_window: 128_000,
+                context_window: 1_048_576,
                 last_tested_ok: None,
                 last_latency_ms: None,
             },
@@ -872,6 +881,8 @@ impl ProviderManager {
                         if !sm.trim().is_empty() {
                             if id == "openai" && sm.trim() == "gpt-5.3-codex" {
                                 entry.selected_model = "gpt-6.1-sol".to_string();
+                            } else if let Some(current) = Self::migrate_legacy_model_id(id, sm.trim()) {
+                                entry.selected_model = current;
                             } else {
                                 entry.selected_model = sm.to_string();
                             }
@@ -929,7 +940,43 @@ impl ProviderManager {
                 }
             }
         }
+        // DeepSeek moved from R1-era ids to V4 (deepseek-flash / deepseek-v4-pro, 1M ctx).
+        if let Some(ds) = catalog.providers.iter_mut().find(|p| p.id == "deepseek") {
+            if let Some(current) = Self::migrate_legacy_model_id("deepseek", &ds.selected_model) {
+                ds.selected_model = current;
+            }
+            if ds.context_window < 1_048_576 {
+                ds.context_window = 1_048_576;
+            }
+        }
+        if let Some(current) = Self::migrate_legacy_model_id("deepseek", &catalog.active_model) {
+            catalog.active_model = current;
+        }
+        if let Some(current) = Self::migrate_legacy_model_id("deepseek", &catalog.subagent_model) {
+            catalog.subagent_model = current;
+        }
+
         Some(catalog)
+    }
+
+    /// Maps retired provider-specific model ids onto the ids the provider serves today.
+    ///
+    /// DeepSeek retired the R1-era aliases: `deepseek-chat` (non-thinking) and
+    /// `deepseek-reasoner` (thinking) are both served by `deepseek-flash` now, so a
+    /// persisted selection keeps working while showing the real model.
+    pub fn migrate_legacy_model_id(provider_id: &str, model_id: &str) -> Option<String> {
+        match (provider_id, model_id) {
+            ("deepseek", "deepseek-chat")
+            | ("deepseek", "deepseek-reasoner")
+            | ("deepseek", "deepseek-v4-flash")
+            | ("deepseek", "deepseek-v4-flash-0731") => Some("deepseek-flash".to_string()),
+            ("deepseek", "deepseek-v4-pro-preview") => Some("deepseek-v4-pro".to_string()),
+            ("openrouter", "deepseek/deepseek-r1")
+            | ("openrouter", "deepseek/deepseek-r1-0528") => {
+                Some("deepseek/deepseek-v4.1-flash".to_string())
+            }
+            _ => None,
+        }
     }
 
     pub fn persist(&self) {
@@ -2731,5 +2778,77 @@ impl ProviderManager {
         }
 
         Some((String::new(), provider_name, model_id))
+    }
+}
+
+#[cfg(test)]
+mod provider_catalog_tests {
+    use super::ProviderManager;
+
+    fn entry(id: &str) -> super::ProviderEntry {
+        ProviderManager::default_catalog()
+            .providers
+            .into_iter()
+            .find(|p| p.id == id)
+            .unwrap_or_else(|| panic!("provider {id} missing from catalog"))
+    }
+
+    /// DeepSeek retired the R1 naming in 2025. Their live API
+    /// (`GET https://api.deepseek.com/models`) exposes exactly two ids:
+    /// `deepseek-flash` (V4.1-Flash, 1M ctx, text+vision) and `deepseek-v4-pro`.
+    /// `deepseek-chat` / `deepseek-reasoner` are legacy aliases served by `deepseek-flash`.
+    #[test]
+    fn deepseek_catalog_matches_live_api() {
+        let ds = entry("deepseek");
+        assert_eq!(ds.selected_model, "deepseek-flash");
+        assert_eq!(ds.context_window, 1_048_576);
+
+        let ids: Vec<&str> = ds.models.iter().map(|m| m.id.as_str()).collect();
+        assert!(ids.contains(&"deepseek-flash"), "ids: {ids:?}");
+        assert!(ids.contains(&"deepseek-v4-pro"), "ids: {ids:?}");
+
+        let labels: Vec<&str> = ds.models.iter().map(|m| m.label.as_str()).collect();
+        assert!(
+            !labels.iter().any(|l| l.contains("R1")),
+            "R1 is retired and must not be advertised: {labels:?}"
+        );
+
+        let flash = ds.models.iter().find(|m| m.id == "deepseek-flash").unwrap();
+        assert!(flash.supports_thinking && flash.supports_vision);
+        assert_eq!(flash.context_window, 1_048_576);
+    }
+
+    #[test]
+    fn openrouter_deepseek_entries_are_current() {
+        let or = entry("openrouter");
+        let ids: Vec<&str> = or.models.iter().map(|m| m.id.as_str()).collect();
+        assert!(!ids.contains(&"deepseek/deepseek-r1"), "ids: {ids:?}");
+        assert!(ids.contains(&"deepseek/deepseek-v4.1-flash"), "ids: {ids:?}");
+        assert!(ids.contains(&"deepseek/deepseek-v4-pro"), "ids: {ids:?}");
+    }
+}
+
+#[cfg(test)]
+mod legacy_model_migration_tests {
+    use super::ProviderManager;
+
+    #[test]
+    fn r1_era_deepseek_ids_migrate_to_current_models() {
+        assert_eq!(
+            ProviderManager::migrate_legacy_model_id("deepseek", "deepseek-reasoner").as_deref(),
+            Some("deepseek-flash")
+        );
+        assert_eq!(
+            ProviderManager::migrate_legacy_model_id("deepseek", "deepseek-chat").as_deref(),
+            Some("deepseek-flash")
+        );
+        assert_eq!(
+            ProviderManager::migrate_legacy_model_id("openrouter", "deepseek/deepseek-r1")
+                .as_deref(),
+            Some("deepseek/deepseek-v4.1-flash")
+        );
+        // Current ids stay untouched.
+        assert!(ProviderManager::migrate_legacy_model_id("deepseek", "deepseek-flash").is_none());
+        assert!(ProviderManager::migrate_legacy_model_id("deepseek", "deepseek-v4-pro").is_none());
     }
 }
