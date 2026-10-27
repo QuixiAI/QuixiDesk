@@ -1,0 +1,1 @@
+var e={maxTagsPerProject:16,maxValueLength:256},t=class extends Error{constructor(e,t){super(`Project tags not saved: ${e}`),this.failure=e,this.keyId=t,this.name="TagSaveError"}};export{t as n,e as t};

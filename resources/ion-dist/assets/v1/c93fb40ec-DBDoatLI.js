@@ -1,0 +1,1 @@
+var e="/new?mode=chat&surface=chat";export{e as t};

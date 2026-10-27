@@ -1,0 +1,1 @@
+import{Eu as e,uv as t}from"./shared-0-DDOOdL6P.js";function n(n){return{error_code:n instanceof t?n.errorCode??null:null,status_code:e(n)??null}}export{n as t};

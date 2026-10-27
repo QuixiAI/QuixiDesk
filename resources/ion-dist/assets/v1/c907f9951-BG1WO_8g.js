@@ -1,0 +1,1 @@
+import{F as e}from"./vendor-all-0-DXM0MGjZ.js";var t=e()(e=>({visible:!1,setVisible:t=>e({visible:t})}));export{t};

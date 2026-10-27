@@ -1,0 +1,1 @@
+import{Op as e,Pp as t}from"./shared-0-DDOOdL6P.js";import{pE as n,xE as r}from"./shared-78-D5Fw2h0a.js";function i(){return n()?"alt":"ctrl"}function a(){return r()?"alt":"ctrl"}function o(){let n=t(window.navigator);return!(n==="chromeos"||n==="windows"&&e(window.navigator)==="firefox")}export{i as n,a as r,o as t};

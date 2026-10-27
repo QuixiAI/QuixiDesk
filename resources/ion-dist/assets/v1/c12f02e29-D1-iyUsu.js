@@ -1,0 +1,1 @@
+import"./shared-0-DDOOdL6P.js";var e=.5;function t(e){return e?"52px":"48px"}function n(t){return{top:`calc(${t} + ${e}px)`,left:0,right:0,bottom:0}}function r(e){return{top:`calc(${e} + 65px)`,left:12.5,right:12.5,bottom:12.5}}export{r as n,n as r,t};

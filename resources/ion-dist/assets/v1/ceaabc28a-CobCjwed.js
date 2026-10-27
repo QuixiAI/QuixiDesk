@@ -1,0 +1,1 @@
+import{ah as e}from"./shared-52-uHFNjl7C.js";import{Js as t,Ks as n}from"./shared-78-D5Fw2h0a.js";function r(r){if(e.getState().pendingMode===null)return;e.setState({pendingMode:null});let i=n(r);i!==null&&t(i)}export{r as t};

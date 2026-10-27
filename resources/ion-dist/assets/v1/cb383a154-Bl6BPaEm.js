@@ -1,0 +1,1 @@
+import{wo as e}from"./vendor-frame-CnSY1sxv.js";import{bv as t}from"./shared-0-DDOOdL6P.js";function n(){let[n]=e(t);return n}export{n as t};

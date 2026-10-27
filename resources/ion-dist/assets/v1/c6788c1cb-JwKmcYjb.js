@@ -1,0 +1,1 @@
+function e(e){return e.key==="Enter"&&(e.altKey||e.getModifierState("AltGraph"))&&!e.shiftKey&&!e.metaKey}function t(e){return e==="rtl"?"ArrowRight":"ArrowLeft"}function n(e,n){return e.key===t(n)&&!e.repeat&&!e.shiftKey&&!e.altKey&&!e.metaKey&&!e.ctrlKey}export{e as n,t as r,n as t};

@@ -1,0 +1,1 @@
+import{d as e}from"./vendor-intl-DYfox5Co.js";var t=e({defaultMessage:"Continue",id:"acrOozm08x"});export{t};

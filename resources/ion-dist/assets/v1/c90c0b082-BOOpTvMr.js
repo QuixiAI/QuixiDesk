@@ -1,0 +1,1 @@
+function e(e,t,n){e.key!=="Escape"||e.nativeEvent.isComposing||t===""||(e.stopPropagation(),n(""))}export{e as t};

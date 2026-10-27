@@ -1,0 +1,1 @@
+var e="claude_science_chat_banner_upsell",t={mac:"claude_science_promo_os_mac",windows:"claude_science_promo_os_windows"},n="claude-science-chat-line-download",r="claude-science-chat-line-download-enterprise",i="https://www.claude.com/product/claude-science";export{i as a,t as i,r as n,n as r,e as t};

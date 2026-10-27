@@ -1,0 +1,1 @@
+import{to as e,uo as t}from"./vendor-frame-CnSY1sxv.js";var n=e(null),r=n;function i(){return t(n)}function a({children:e}){return t(n)?.renderInHeader(e)??null}export{r as n,i as r,a as t};

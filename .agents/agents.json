@@ -1,0 +1,292 @@
+{
+  "schemaVersion": 4,
+  "instructions": {
+    "path": "AGENTS.md"
+  },
+  "integrations": {
+    "enabled": [
+      "codex",
+      "claude",
+      "claude_desktop",
+      "gemini",
+      "copilot_vscode",
+      "copilot_cli",
+      "cursor",
+      "antigravity",
+      "windsurf",
+      "opencode",
+      "junie",
+      "grok",
+      "amp",
+      "droid",
+      "kilo",
+      "devin",
+      "zed",
+      "goose"
+    ],
+    "options": {
+      "cursorAutoApprove": true,
+      "antigravityGlobalSync": true,
+      "claudeScope": "project",
+      "copilotCliPath": ".mcp.json"
+    }
+  },
+  "syncMode": "source-only",
+  "mcp": {
+    "servers": {
+      "computer-use": {
+        "label": "Computer Use",
+        "description": "Screenshots, GUI automation, window inspection, and input control",
+        "transport": "stdio",
+        "command": "/Users/eric/.local/bin/quixi-mcp-builtin",
+        "args": [
+          "--computer-use"
+        ],
+        "targets": [
+          "codex",
+          "claude",
+          "claude_desktop",
+          "gemini",
+          "copilot_vscode",
+          "copilot_cli",
+          "cursor",
+          "antigravity",
+          "windsurf",
+          "opencode",
+          "junie",
+          "grok",
+          "amp",
+          "droid",
+          "kilo",
+          "devin",
+          "zed",
+          "goose"
+        ],
+        "enabled": true
+      },
+      "browser-use": {
+        "label": "Browser Use",
+        "description": "Browser automation, DOM tree inspection, and tab management",
+        "transport": "stdio",
+        "command": "/Users/eric/.local/bin/quixi-mcp-builtin",
+        "args": [
+          "--browser-use"
+        ],
+        "targets": [
+          "codex",
+          "claude",
+          "claude_desktop",
+          "gemini",
+          "copilot_vscode",
+          "copilot_cli",
+          "cursor",
+          "antigravity",
+          "windsurf",
+          "opencode",
+          "junie",
+          "grok",
+          "amp",
+          "droid",
+          "kilo",
+          "devin",
+          "zed",
+          "goose"
+        ],
+        "enabled": true
+      },
+      "filesystem": {
+        "label": "Filesystem",
+        "description": "Read and write files in the current project",
+        "transport": "stdio",
+        "command": "npx",
+        "args": [
+          "-y",
+          "@modelcontextprotocol/server-filesystem",
+          "${PROJECT_ROOT}"
+        ],
+        "targets": [
+          "codex",
+          "claude",
+          "claude_desktop",
+          "gemini",
+          "copilot_vscode",
+          "copilot_cli",
+          "cursor",
+          "antigravity",
+          "windsurf",
+          "opencode",
+          "junie",
+          "grok",
+          "amp",
+          "droid",
+          "kilo",
+          "devin",
+          "zed",
+          "goose"
+        ],
+        "enabled": true
+      },
+      "fetch": {
+        "label": "Fetch",
+        "description": "HTTP fetching and scraping helpers",
+        "transport": "stdio",
+        "command": "uvx",
+        "args": [
+          "mcp-server-fetch"
+        ],
+        "env": {
+          "FASTMCP_LOG_LEVEL": "ERROR"
+        },
+        "targets": [
+          "codex",
+          "claude",
+          "claude_desktop",
+          "gemini",
+          "copilot_vscode",
+          "copilot_cli",
+          "cursor",
+          "antigravity",
+          "windsurf",
+          "opencode",
+          "junie",
+          "grok",
+          "amp",
+          "droid",
+          "kilo",
+          "devin",
+          "zed",
+          "goose"
+        ],
+        "enabled": true
+      },
+      "git": {
+        "label": "Git",
+        "description": "Repository-aware git operations",
+        "transport": "stdio",
+        "command": "uvx",
+        "args": [
+          "mcp-server-git",
+          "--repository",
+          "${PROJECT_ROOT}"
+        ],
+        "env": {
+          "FASTMCP_LOG_LEVEL": "ERROR"
+        },
+        "targets": [
+          "codex",
+          "claude",
+          "claude_desktop",
+          "gemini",
+          "copilot_vscode",
+          "copilot_cli",
+          "cursor",
+          "antigravity",
+          "windsurf",
+          "opencode",
+          "junie",
+          "grok",
+          "amp",
+          "droid",
+          "kilo",
+          "devin",
+          "zed",
+          "goose"
+        ],
+        "enabled": true
+      },
+      "rea": {
+        "label": "REA Reverse Engineering",
+        "description": "Reverse engineer native, managed, Electron/JavaScript, and packaged targets",
+        "transport": "stdio",
+        "command": "npx",
+        "args": [
+          "-y",
+          "rea-agents@6.7.0",
+          "mcp"
+        ],
+        "env": {
+          "HOPPER_LAUNCHER_PATH": "/Users/eric/Applications/Hopper Disassembler.app/Contents/MacOS/hopper",
+          "GHIDRA_INSTALL_DIR": "/Users/eric/Applications/ghidra_12.1.4_PUBLIC",
+          "JAVA_HOME": "/Users/eric/Library/Java/JavaVirtualMachines/jdk-21.0.13+9/Contents/Home"
+        },
+        "targets": [
+          "codex",
+          "claude",
+          "claude_desktop",
+          "gemini",
+          "cursor",
+          "antigravity",
+          "windsurf",
+          "grok"
+        ],
+        "enabled": true
+      },
+      "zvec_grep": {
+        "label": "zvec_grep",
+        "description": "Fast semantic and vector code search",
+        "transport": "stdio",
+        "command": "zg",
+        "args": [
+          "server",
+          "--stdio"
+        ],
+        "targets": [
+          "codex",
+          "claude",
+          "gemini",
+          "cursor",
+          "antigravity",
+          "windsurf",
+          "grok"
+        ],
+        "enabled": true
+      },
+      "adrafinil": {
+        "label": "Adrafinil",
+        "description": "Adrafinil native macOS helper MCP server",
+        "transport": "stdio",
+        "command": "/Applications/Adrafinil.app/Contents/Helpers/adrafinil",
+        "args": [
+          "mcp",
+          "--tool",
+          "claude-code"
+        ],
+        "targets": [
+          "codex",
+          "claude",
+          "claude_desktop",
+          "antigravity"
+        ],
+        "enabled": true
+      }
+    }
+  },
+  "workspace": {
+    "vscode": {
+      "hideGenerated": true,
+      "hiddenPaths": [
+        "**/.codex",
+        "**/.claude",
+        "**/.gemini",
+        "**/.cursor",
+        "**/.antigravity",
+        "**/.agents/mcp_config.json",
+        "**/.windsurf",
+        "**/.opencode",
+        "**/.junie",
+        "**/.mcp.json",
+        "**/opencode.json",
+        "**/.agents/generated",
+        "**/.grok",
+        "**/.amp",
+        "**/.factory",
+        "**/.kilo",
+        "**/kilo.jsonc",
+        "**/.devin",
+        "**/.zed"
+      ]
+    }
+  },
+  "lastSync": null,
+  "lastSyncSourceHash": null
+}

@@ -1,0 +1,52 @@
+{
+  "context_servers": {
+    "browser-use": {
+      "source": "custom",
+      "command": "/Users/eric/.local/bin/quixi-mcp-builtin",
+      "args": [
+        "--browser-use"
+      ],
+      "env": {}
+    },
+    "computer-use": {
+      "source": "custom",
+      "command": "/Users/eric/.local/bin/quixi-mcp-builtin",
+      "args": [
+        "--computer-use"
+      ],
+      "env": {}
+    },
+    "fetch": {
+      "source": "custom",
+      "command": "uvx",
+      "args": [
+        "mcp-server-fetch"
+      ],
+      "env": {
+        "FASTMCP_LOG_LEVEL": "ERROR"
+      }
+    },
+    "filesystem": {
+      "source": "custom",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "/Users/eric/quixi-desk"
+      ],
+      "env": {}
+    },
+    "git": {
+      "source": "custom",
+      "command": "uvx",
+      "args": [
+        "mcp-server-git",
+        "--repository",
+        "/Users/eric/quixi-desk"
+      ],
+      "env": {
+        "FASTMCP_LOG_LEVEL": "ERROR"
+      }
+    }
+  }
+}

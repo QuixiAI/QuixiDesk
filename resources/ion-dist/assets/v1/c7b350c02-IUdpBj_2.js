@@ -1,0 +1,1 @@
+import{_r as e}from"./shared-4-DUB1Oi0O.js";var t="__gb__303923690";function n(e){return e.untrustedAuthorSurface?e.isFullscreenMiniChat?!1:e.ownSession||e.servedCards&&"served_only":!0}function r(e,t){return e===!0||e==="served_only"&&t}function i(t){return e("skillProposalCardStaysGuarded")||t}export{i,r as n,n as r,t};

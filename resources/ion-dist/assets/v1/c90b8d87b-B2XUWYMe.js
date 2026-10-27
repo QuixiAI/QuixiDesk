@@ -1,0 +1,1 @@
+import{PC as e,en as t}from"./shared-78-D5Fw2h0a.js";function n(){return e(),!1}function r(){return t()?.userContentFrameAllowed!==!1}export{n,r as t};

@@ -1,0 +1,1 @@
+import{eg as e}from"./shared-25-DOWZRSlq.js";function t(){return e("__gb__3132383516")}export{t};

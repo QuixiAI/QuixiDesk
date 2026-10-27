@@ -1,0 +1,1 @@
+import{Ha as e}from"./vendor-frame-CnSY1sxv.js";import{Qf as J1,ip as J9,op as K1}from"./shared-frame-6jtSkIit.js";import{Af as t}from"./shared-78-D5Fw2h0a.js";function n(n){let $=J9(2),{size:r}=n,i=r===void 0?16:r;return J1($,0,i)?K1($,0,i,e(t,{size:i,"aria-hidden":!0})):$[1]}export{n as t};

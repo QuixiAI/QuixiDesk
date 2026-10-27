@@ -1,0 +1,70 @@
+<!-- viewBox cropped to the art bounds (x 2-24, y 2-25); Fluent's 28px canvas padding
+     would render the mark ~20% smaller than the full-bleed slack-icon.svg beside it. -->
+<svg width="23" height="23" viewBox="1.5 2 23 23" xmlns="http://www.w3.org/2000/svg">
+  <path d="M13 12H20.4999C22.4329 12 23.9999 13.567 23.9999 15.5V21.0002C23.9999 23.2093 22.2091 25.0002 20 25.0002C17.7908 25.0002 16 23.2093 16 21.0002V15C16 13.3431 14.6568 12 13 12Z" fill="url(#teams_p0)"/>
+  <path d="M4 13.5C4 11.567 5.567 10 7.5 10H12.4999C14.4329 10 15.9999 11.567 15.9999 13.5V21.0002C15.9999 23.2094 17.7908 25.0002 19.9999 25.0002H10C6.6863 25.0002 4 22.3139 4 19.0002V13.5Z" fill="url(#teams_p1)"/>
+  <path d="M4 13.5C4 11.567 5.567 10 7.5 10H12.4999C14.4329 10 15.9999 11.567 15.9999 13.5V21.0002C15.9999 23.2094 17.7908 25.0002 19.9999 25.0002H10C6.6863 25.0002 4 22.3139 4 19.0002V13.5Z" fill="url(#teams_p2)" fill-opacity="0.7"/>
+  <path d="M4 13.5C4 11.567 5.567 10 7.5 10H12.4999C14.4329 10 15.9999 11.567 15.9999 13.5V21.0002C15.9999 23.2094 17.7908 25.0002 19.9999 25.0002H10C6.6863 25.0002 4 22.3139 4 19.0002V13.5Z" fill="url(#teams_p3)" fill-opacity="0.7"/>
+  <path d="M19 11.0001C20.6568 11.0001 22 9.65692 22 8.00004C22 6.34316 20.6568 5 19 5C17.3431 5 16 6.34316 16 8.00004C16 9.65692 17.3431 11.0001 19 11.0001Z" fill="url(#teams_p4)"/>
+  <path d="M19 11.0001C20.6568 11.0001 22 9.65692 22 8.00004C22 6.34316 20.6568 5 19 5C17.3431 5 16 6.34316 16 8.00004C16 9.65692 17.3431 11.0001 19 11.0001Z" fill="url(#teams_p5)" fill-opacity="0.46"/>
+  <path d="M19 11.0001C20.6568 11.0001 22 9.65692 22 8.00004C22 6.34316 20.6568 5 19 5C17.3431 5 16 6.34316 16 8.00004C16 9.65692 17.3431 11.0001 19 11.0001Z" fill="url(#teams_p6)" fill-opacity="0.4"/>
+  <path d="M10.5 9.0001C12.433 9.0001 14 7.43307 14 5.50005C14 3.56702 12.433 2 10.5 2C8.567 2 7 3.56702 7 5.50005C7 7.43307 8.567 9.0001 10.5 9.0001Z" fill="url(#teams_p7)"/>
+  <path d="M10.5 9.0001C12.433 9.0001 14 7.43307 14 5.50005C14 3.56702 12.433 2 10.5 2C8.567 2 7 3.56702 7 5.50005C7 7.43307 8.567 9.0001 10.5 9.0001Z" fill="url(#teams_p8)" fill-opacity="0.6"/>
+  <path d="M10.5 9.0001C12.433 9.0001 14 7.43307 14 5.50005C14 3.56702 12.433 2 10.5 2C8.567 2 7 3.56702 7 5.50005C7 7.43307 8.567 9.0001 10.5 9.0001Z" fill="url(#teams_p9)" fill-opacity="0.5"/>
+  <rect x="2" y="13" width="10" height="10" rx="2.25" fill="url(#teams_p10)"/>
+  <rect x="2" y="13" width="10" height="10" rx="2.25" fill="url(#teams_p11)" fill-opacity="0.7"/>
+  <path d="M9.27946 16.1004H7.67634V21H6.3237V16.1004H4.72058V15H9.27946V16.1004Z" fill="white"/>
+  <defs>
+    <radialGradient id="teams_p0" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(23.2456 13) scale(8.15791 20.137)">
+      <stop stop-color="#A98AFF"/>
+      <stop offset="0.14" stop-color="#8C75FF"/>
+      <stop offset="0.565" stop-color="#5F50E2"/>
+      <stop offset="0.9" stop-color="#3C2CB8"/>
+    </radialGradient>
+    <radialGradient id="teams_p1" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(4.5 8.99999) rotate(68.4594) scale(20.4269 20.4266)">
+      <stop stop-color="#85C2FF"/>
+      <stop offset="0.69" stop-color="#7588FF"/>
+      <stop offset="1" stop-color="#6459FE"/>
+    </radialGradient>
+    <linearGradient id="teams_p2" x1="11.75" y1="10" x2="11.75" y2="25.0002" gradientUnits="userSpaceOnUse">
+      <stop offset="0.801159" stop-color="#6864F6" stop-opacity="0"/>
+      <stop offset="1" stop-color="#5149DE"/>
+    </linearGradient>
+    <radialGradient id="teams_p3" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(15.9999 9.49999) rotate(113.004) scale(11.983 9.51651)">
+      <stop stop-color="#BD96FF"/>
+      <stop offset="0.686685" stop-color="#BD96FF" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="teams_p4" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(19 7.14289) rotate(-90) scale(6.00008 7.57294)">
+      <stop offset="0.268201" stop-color="#6868F7"/>
+      <stop offset="1" stop-color="#3923B1"/>
+    </radialGradient>
+    <radialGradient id="teams_p5" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(16.5206 6.52644) rotate(40.0521) scale(4.28778 6.20179)">
+      <stop offset="0.270711" stop-color="#A1D3FF"/>
+      <stop offset="0.813393" stop-color="#A1D3FF" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="teams_p6" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(21.3893 6.42117) rotate(-41.6586) scale(5.10766 12.5295)">
+      <stop stop-color="#E3ACFD"/>
+      <stop offset="0.816041" stop-color="#9FA2FF" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="teams_p7" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(10.5 4.50003) rotate(-90) scale(7.0001 8.8351)">
+      <stop offset="0.268201" stop-color="#8282FF"/>
+      <stop offset="1" stop-color="#3923B1"/>
+    </radialGradient>
+    <radialGradient id="teams_p8" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(7.60736 3.78085) rotate(40.0521) scale(5.00241 7.23542)">
+      <stop offset="0.270711" stop-color="#A1D3FF"/>
+      <stop offset="0.813393" stop-color="#A1D3FF" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="teams_p9" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(13.2875 3.65803) rotate(-41.6586) scale(5.95894 14.6178)">
+      <stop stop-color="#E3ACFD"/>
+      <stop offset="0.816041" stop-color="#9FA2FF" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="teams_p10" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(2 13) rotate(45) scale(14.1421)">
+      <stop offset="0.046875" stop-color="#688EFF"/>
+      <stop offset="0.946875" stop-color="#230F94"/>
+    </radialGradient>
+    <radialGradient id="teams_p11" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(7 19) rotate(90) scale(7 8.16888)">
+      <stop offset="0.570647" stop-color="#6965F6" stop-opacity="0"/>
+      <stop offset="1" stop-color="#8F8FFF"/>
+    </radialGradient>
+  </defs>
+</svg>

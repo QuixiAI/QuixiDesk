@@ -1,0 +1,1 @@
+var e="ccd_remote_control_serve_main";export{e as t};

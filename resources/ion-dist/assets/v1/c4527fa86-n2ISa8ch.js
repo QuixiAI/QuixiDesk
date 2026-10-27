@@ -1,0 +1,1 @@
+import{$f as J2,ip as J9,sp as K2}from"./shared-frame-6jtSkIit.js";import{Is as e,Ps as t}from"./shared-78-D5Fw2h0a.js";import{ff as n}from"./shared-26-CGuBxVt9.js";import{p as r}from"./vendor-intl-DYfox5Co.js";var i="1c9j8du";function a(a){let $=J9(3),o=r(),s=n(a);return J2($,0,s,o)?K2($,0,s,o,s&&t(o.messages,i)?e({id:i,intl:o}):void 0):$[2]}export{a as t};

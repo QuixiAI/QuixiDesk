@@ -1,0 +1,1 @@
+import{$f as J2,ip as J9,sp as K2}from"./shared-frame-6jtSkIit.js";import{Ba as e,Va as t}from"./shared-78-D5Fw2h0a.js";var n="claudified_learn_tab";function r(){return t(n)}function i(){let $=J9(3),t=r(),n=e(),i=t||n;return J2($,0,t,i)?K2($,0,t,i,{enabled:t,settled:i}):$[2]}export{i as n,r as t};

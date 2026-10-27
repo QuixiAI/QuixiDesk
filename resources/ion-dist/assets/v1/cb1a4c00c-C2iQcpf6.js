@@ -1,0 +1,1 @@
+var e="!border-[color-mix(in_srgb,var(--cds-fill-accent)_30%,transparent)] bg-[radial-gradient(ellipse_150%_150%_at_50%_-30%,color-mix(in_srgb,var(--cds-fill-accent)_10%,transparent),transparent_90%)]";export{e as t};

@@ -1,0 +1,1 @@
+import{fo as e,ho as t,to as n}from"./vendor-frame-CnSY1sxv.js";import{ep as J3,ip as J9,lp as K4}from"./shared-frame-6jtSkIit.js";var r=n(null);function i(n,i){let $=J9(5),a=e(r),o,s;J3($,0,n,i,a)?(o=()=>{n&&a?.(i)},s=[n,i,a],K4($,0,n,i,a,o,s)):(o=$[3],s=$[4]),t(o,s)}function a(e){let{exp:t}=e;return i(!0,t),null}export{a as n,i as r,r as t};

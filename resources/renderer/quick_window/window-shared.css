@@ -1,0 +1,249 @@
+/*
+ * Tailwind v4 CSS-first entry for every desktop shell document; each window's
+ * HTML inline-imports this file, except the main window, which loads it with
+ * its page chunk (src/renderer/mainWindow/deferredStyles.css) (legacy
+ * documents also import window-legacy-pins.css after it; see that file for
+ * the coexistence pins and their per-document removal model). Ordering rules
+ * for this file, each of which fails silently when broken:
+ * - the bare "@layer cds-card;" line must stay first so that layer sorts
+ *   lowest (packages/cds docs/getting-started.md section 2; without it
+ *   CdsRoot logs an error in dev).
+ * - the imports must come directly after it: CSS ignores an @import that
+ *   follows any statement other than @charset or an @layer declaration.
+ * - theme.css pulls in tokens.css itself; importing tokens.css here would
+ *   bundle the token set twice.
+ * The legacy v3 JS config stays loaded via @config while shell styles still
+ * use its theme.
+ */
+@layer cds-card;
+
+@import "tailwindcss";
+@import "@ant/cds/theme.css";
+/* Opts this app out of CDS's lighter dark-mode weight for text with no weight class. Keep after the
+ * theme import. TODO(chsmc, 2026-09): remove once this app's own heavier weights carry a dark-mode value; see
+ * Opt-out in packages/cds/CONSUMING.md. */
+@import "@ant/cds/root-weight-pin.css";
+
+@config "../tailwind.config.js";
+
+/*
+ * @tailwindcss/forms compiles theme("colors.gray.500") and
+ * theme("colors.blue.600") lookups into its form-control base rules: the
+ * placeholder and default control border color, the focus ring, and the
+ * checkbox, radio, and select-chevron colors. Under the v3 build those
+ * lookups fell back to the plugin's own literals, because this app's
+ * palette defines no gray or blue ramp; @ant/cds's theme.css registers
+ * both ramps, which would silently re-color every one of those rules.
+ * Pin the two keys the plugin reads back to its v3 fallback values so the
+ * forms output stays byte-identical. Cost while this lives: a CDS
+ * component using a raw gray-500 or blue-600 ramp stop inside these
+ * documents (none today; the Badge blue variant is the known candidate)
+ * resolves these literals instead of the CDS ramp. Remove together with
+ * the forms plugin when the shell's form controls are CDS components.
+ */
+@theme {
+  --color-gray-500: #6b7280;
+  --color-blue-600: #2563eb;
+  /*
+   * theme.css re-keys the sans and mono families through CDS tokens, which
+   * changes the computed font-family strings and their fallback tails. Pin
+   * the stacks; --default-*-font-family is what v4's preflight reads for
+   * html and for code/kbd/samp/pre. --font-anthropic-sans (family name plus
+   * its system fallbacks) is set by @ant/typography's sheet, which
+   * windowBase.ts loads into these documents (the main window loads it with
+   * its page chunk, MainWindowPage.tsx).
+   */
+  --font-sans:
+    var(--font-anthropic-sans), ui-sans-serif, system-ui, sans-serif,
+    "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol",
+    "Noto Color Emoji";
+  --default-font-family: var(--font-sans);
+  --font-mono:
+    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+    "Liberation Mono", "Courier New", monospace;
+  --default-mono-font-family: var(--font-mono);
+}
+
+/* TMP: @tailwindcss/forms draws its blue focus ring through these variables, and the shadow-none on a CDS input
+ * still builds box-shadow from them. Remove with the forms plugin. */
+@layer components {
+  .cds-input:focus {
+    --tw-ring-shadow: 0 0 #0000;
+    --tw-ring-offset-shadow: 0 0 #0000;
+  }
+}
+
+@layer base {
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
+
+  * {
+    margin: 0;
+  }
+
+  img,
+  picture,
+  video,
+  canvas,
+  svg {
+    display: block;
+    max-width: 100%;
+  }
+
+  input,
+  button,
+  textarea,
+  select {
+    font: inherit;
+  }
+
+  p,
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6 {
+    overflow-wrap: break-word;
+  }
+
+  /* Values taken from claude.ai on 2025-10-17T02:46:12.721Z */
+  :root {
+    --accent-brand: 15 63.1% 59.6%;
+    --brand-000: 15 54.2% 51.2%;
+    --brand-100: 15 54.2% 51.2%;
+    --brand-200: 15 63.1% 59.6%;
+    --brand-900: 0 0% 0%;
+    --accent-pro-000: 251 34.2% 33.3%;
+    --accent-pro-100: 251 40% 45.1%;
+    --accent-pro-200: 251 61% 72.2%;
+    --accent-pro-900: 253 33.3% 91.8%;
+    --accent-000: 210 73.7% 40.2%;
+    --accent-100: 210 70.9% 51.6%;
+    --accent-200: 210 70.9% 51.6%;
+    --accent-900: 211 72% 90%;
+    --bg-000: 0 0% 100%;
+    --bg-100: 48 33.3% 97.1%;
+    --bg-200: 53 28.6% 94.5%;
+    --bg-300: 48 25% 92.2%;
+    --bg-400: 50 20.7% 88.6%;
+    --bg-500: 50 20.7% 88.6%;
+    --border-100: 30 3.3% 11.8%;
+    --border-200: 30 3.3% 11.8%;
+    --border-300: 30 3.3% 11.8%;
+    --border-400: 30 3.3% 11.8%;
+    --danger-000: 0 58.6% 34.1%;
+    --danger-100: 0 56.2% 45.4%;
+    --danger-200: 0 56.2% 45.4%;
+    --danger-900: 0 50% 95%;
+    --oncolor-100: 0 0% 100%;
+    --oncolor-200: 60 6.7% 97.1%;
+    --oncolor-300: 60 6.7% 97.1%;
+    --success-000: 125 100% 18%;
+    --success-100: 103 72.3% 26.9%;
+    --success-200: 103 72.3% 26.9%;
+    --success-900: 86 45.1% 90%;
+    --text-000: 60 2.6% 7.6%;
+    --text-100: 60 2.6% 7.6%;
+    --text-200: 60 2.5% 23.3%;
+    --text-300: 60 2.5% 23.3%;
+    --text-400: 51 3.1% 43.7%;
+    --text-500: 51 3.1% 43.7%;
+  }
+
+  .darkTheme {
+    --accent-brand: 15 63.1% 59.6%;
+    --brand-000: 15 54.2% 51.2%;
+    --brand-100: 15 63.1% 59.6%;
+    --brand-200: 15 63.1% 59.6%;
+    --brand-900: 0 0% 0%;
+    --accent-pro-000: 251 84.6% 74.5%;
+    --accent-pro-100: 251 40.2% 54.1%;
+    --accent-pro-200: 251 40% 45.1%;
+    --accent-pro-900: 250 25.3% 19.4%;
+    --accent-000: 210 65.5% 67.1%;
+    --accent-100: 210 70.9% 51.6%;
+    --accent-200: 210 70.9% 51.6%;
+    --accent-900: 210 55.9% 24.6%;
+    --bg-000: 60 2.1% 18.4%;
+    --bg-100: 60 2.7% 14.5%;
+    --bg-200: 30 3.3% 11.8%;
+    --bg-300: 60 2.6% 7.6%;
+    --bg-400: 0 0% 0%;
+    --bg-500: 0 0% 0%;
+    --border-100: 51 16.5% 84.5%;
+    --border-200: 51 16.5% 84.5%;
+    --border-300: 51 16.5% 84.5%;
+    --border-400: 51 16.5% 84.5%;
+    --danger-000: 0 98.4% 75.1%;
+    --danger-100: 0 67% 59.6%;
+    --danger-200: 0 67% 59.6%;
+    --danger-900: 0 46.5% 27.8%;
+    --oncolor-100: 0 0% 100%;
+    --oncolor-200: 60 6.7% 97.1%;
+    --oncolor-300: 60 6.7% 97.1%;
+    --success-000: 97 59.1% 46.1%;
+    --success-100: 97 75% 32.9%;
+    --success-200: 97 75% 32.9%;
+    --success-900: 127 100% 13.9%;
+    --text-000: 48 33.3% 97.1%;
+    --text-100: 48 33.3% 97.1%;
+    --text-200: 50 9% 73.7%;
+    --text-300: 50 9% 73.7%;
+    --text-400: 48 4.8% 59.2%;
+    --text-500: 48 4.8% 59.2%;
+  }
+
+  /* NB: Legacy color variables - claude-* needs to be synced with
+   * updateTitleOverlayColors */
+  :root {
+    --claude-foreground-color: black;
+    --claude-background-color: #fcfcfb;
+  }
+
+  /* Resolve the page colors from the OS/nativeTheme scheme in CSS so the
+   * shell's very first paint is already the right color. windowBaseCore.ts
+   * only adds .darkTheme once its module graph has loaded, and the body
+   * paints before that: without this block a dark-mode window flashed
+   * light (#fcfcfb) for a few frames on launch, masked where the window is
+   * revealed only after load and exposed where it is shown on construction.
+   * Same values as .darkTheme below. The main window's index.html restates
+   * this block inline, since it loads this sheet only with its page chunk. */
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --claude-foreground-color: white;
+      --claude-background-color: #151515;
+      --claude-text-500: #a6a39b;
+    }
+  }
+
+  .darkTheme {
+    --claude-foreground-color: white;
+    --claude-background-color: #151515;
+    --claude-text-500: #a6a39b;
+  }
+
+  html,
+  body {
+    color: var(--claude-foreground-color);
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  body {
+    background-color: var(--claude-background-color);
+  }
+
+  .nc-no-drag {
+    -webkit-app-region: no-drag;
+  }
+  .nc-drag {
+    -webkit-app-region: drag;
+  }
+}

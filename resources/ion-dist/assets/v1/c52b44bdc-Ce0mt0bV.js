@@ -1,0 +1,1 @@
+var e=new Set,t=new Set;function n(e){return t.add(e),()=>t.delete(e)}function r(n){e.add(n),o.set(n,Date.now());for(let e of t)e()}function i(t){return e.has(t)}var a=3e4,o=new Map;function s(e){return o.get(e)}export{n as a,r as i,i as n,s as r,a as t};

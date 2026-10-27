@@ -1,0 +1,1 @@
+import{Yh as e,on as t}from"./shared-25-DOWZRSlq.js";import{n,r}from"./vendor-all-0-DXM0MGjZ.js";var i=2097152;function a({content:e,conversation_uuid:a,keyAllText:o=!1}){if(!(!r(a)||e.length>i||!(o||e.includes("mcp_servers"))))return{type:"artifact",uuid:n(`sha256:${t(e)}`,a),conversation_uuid:a}}function o(){return e("__gb__1570650957")}export{a as n,o as t};

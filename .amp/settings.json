@@ -1,0 +1,44 @@
+{
+  "amp.mcpServers": {
+    "browser-use": {
+      "command": "/Users/eric/.local/bin/quixi-mcp-builtin",
+      "args": [
+        "--browser-use"
+      ]
+    },
+    "computer-use": {
+      "command": "/Users/eric/.local/bin/quixi-mcp-builtin",
+      "args": [
+        "--computer-use"
+      ]
+    },
+    "fetch": {
+      "command": "uvx",
+      "args": [
+        "mcp-server-fetch"
+      ],
+      "env": {
+        "FASTMCP_LOG_LEVEL": "ERROR"
+      }
+    },
+    "filesystem": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "/Users/eric/quixi-desk"
+      ]
+    },
+    "git": {
+      "command": "uvx",
+      "args": [
+        "mcp-server-git",
+        "--repository",
+        "/Users/eric/quixi-desk"
+      ],
+      "env": {
+        "FASTMCP_LOG_LEVEL": "ERROR"
+      }
+    }
+  }
+}

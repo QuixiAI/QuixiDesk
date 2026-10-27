@@ -1,0 +1,1 @@
+import{n as e}from"./c9a5287df-BXe9RB05.js";var t=new Set(["stripe_subscription_contracted","c4e_consumption_trial"]);function n(n,r){let i=e(n);return i>0||!n||!r?i:t.has(r)&&!n.unlimited_members?n.members_limit:0}export{n as t};

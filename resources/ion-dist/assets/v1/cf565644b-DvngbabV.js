@@ -1,0 +1,1 @@
+function e(e){if(e.type!=="status"||e.status.app_installed!==!1)return!1;let{reason:t}=e.status;return t==null||t==="installation_not_found"}export{e as t};

@@ -1,0 +1,19 @@
+[package]
+name = "quixi-ipc"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+tracing.workspace = true
+dirs.workspace = true
+quixi-proto.workspace = true
+quixi-platform.workspace = true
+quixi-workspace.workspace = true
+quixi-mcp.workspace = true
+quixi-netstack.workspace = true
+quixi-engine.workspace = true

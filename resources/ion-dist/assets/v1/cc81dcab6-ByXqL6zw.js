@@ -1,0 +1,1 @@
+import{wc as e}from"./shared-8-Db1QN4mf.js";function t(t,n,r,i){return n!==void 0&&r?.type==="remote"?e(t,n,{server:{uuid:r.uuid,type:"remote"}},i):void 0}export{t};

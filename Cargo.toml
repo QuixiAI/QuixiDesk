@@ -1,0 +1,58 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/quixi-proto",
+    "crates/quixi-platform",
+    "crates/quixi-workspace",
+    "crates/quixi-mcp",
+    "crates/quixi-netstack",
+    "crates/quixi-engine",
+    "crates/quixi-ipc",
+    "crates/quixi-guest-daemon",
+    "crates/quixi-app",
+    "bins/quixi-disclaimer",
+    "bins/quixi-chrome-native-host",
+    "bins/quixi-ssh-askpass",
+    "bins/quixi-mcp-builtin",
+]
+
+[workspace.package]
+version = "3.6556.2"
+edition = "2021"
+authors = ["QuixiDesk Team"]
+license = "MIT"
+
+[workspace.dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.40", features = ["full"] }
+anyhow = "1.0"
+thiserror = "1.0"
+uuid = { version = "1.10", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+parking_lot = "0.12"
+dashmap = "6.1"
+rayon = "1.10"
+ignore = "0.4"
+libc = "0.2"
+dirs = "5.0"
+base64 = "0.22"
+sha2 = "0.10"
+url = "2.5"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream", "blocking"] }
+futures-util = "0.3"
+tao = "0.30"
+wry = { version = "0.47", features = ["transparent", "devtools"] }
+http = "1.1"
+objc = "0.2"
+cocoa = "0.26"
+
+quixi-proto = { path = "crates/quixi-proto" }
+quixi-platform = { path = "crates/quixi-platform" }
+quixi-workspace = { path = "crates/quixi-workspace" }
+quixi-mcp = { path = "crates/quixi-mcp" }
+quixi-netstack = { path = "crates/quixi-netstack" }
+quixi-engine = { path = "crates/quixi-engine" }
+quixi-ipc = { path = "crates/quixi-ipc" }

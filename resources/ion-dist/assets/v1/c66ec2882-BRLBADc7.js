@@ -1,0 +1,1 @@
+import{to as e}from"./vendor-frame-CnSY1sxv.js";var t=e(!1),n=new Map,r=()=>!1;function i(e){r=e}function a(e,t){return r(e,t)}export{i,a as n,n as r,t};

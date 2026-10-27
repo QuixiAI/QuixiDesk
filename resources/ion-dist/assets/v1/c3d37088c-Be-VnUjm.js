@@ -1,0 +1,1 @@
+function e(e,t){return{kind:"lottie",name:e,parse(){return JSON.parse(t)}}}export{e as t};

@@ -1,0 +1,1 @@
+import{To as e}from"./vendor-frame-CnSY1sxv.js";import{Qf as J1,ip as J9,op as K1}from"./shared-frame-6jtSkIit.js";import{_p as t}from"./shared-25-DOWZRSlq.js";import{il as n,tl as r}from"./shared-5-Bg6ZMqvt.js";function i(){return null}function a(){let $=J9(2),a=t(),o=J1($,0,a)?K1($,0,a,()=>r(a)):$[1];return e(n,o,i)}export{a as t};

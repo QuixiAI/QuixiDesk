@@ -1,0 +1,1 @@
+var e="[unicode-bidi:plaintext]";export{e as t};

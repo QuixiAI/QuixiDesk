@@ -1,0 +1,1 @@
+var e=new WeakMap;function t(t){let n=e.get(t);n===void 0?e.set(t,{count:1,was:t.disabled}):n.count+=1,t.disabled=!0;let r=!1;return()=>{let n=e.get(t);r||n===void 0||(r=!0,--n.count,n.count===0&&(e.delete(t),t.disabled=n.was))}}export{t};

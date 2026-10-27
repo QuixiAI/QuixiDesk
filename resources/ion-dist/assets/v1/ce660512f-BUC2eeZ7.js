@@ -1,0 +1,1 @@
+import{f as e}from"./vendor-intl-DYfox5Co.js";var t=e({compactSession:{defaultMessage:"Compact session",id:"ccakFk0PFz"}});export{t};

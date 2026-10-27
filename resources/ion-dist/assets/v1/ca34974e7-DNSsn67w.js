@@ -1,0 +1,1 @@
+import{Ha as e}from"./vendor-frame-CnSY1sxv.js";import{hu as t}from"./shared-frame-6jtSkIit.js";import{_a as n}from"./shared-52-uHFNjl7C.js";function r(e){return e.hostname.replace(/^www\./,"")}function i(i){return n(i,{renderLink:(n,i)=>e(t,{href:n,external:!0,inheritColor:!0,dir:"ltr",children:r(i)})})}export{i as t};

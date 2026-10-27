@@ -1,0 +1,1 @@
+function e(e,t){let[n,r=""]=e.split(",",2),i=/data:([^;]+)/.exec(n)?.[1]??"image/png",a=atob(r),o=new Uint8Array(a.length);for(let e=0;e<a.length;e++)o[e]=a.charCodeAt(e);return new File([o],t,{type:i})}export{e as t};

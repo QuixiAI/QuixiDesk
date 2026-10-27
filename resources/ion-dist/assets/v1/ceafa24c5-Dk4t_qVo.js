@@ -1,0 +1,1 @@
+import{lp as e}from"./shared-25-DOWZRSlq.js";var t="ant-layout-settled";function n(n){let{Event:r}=e(n);n.dispatchEvent(new r(t,{bubbles:!0}))}export{n,t};

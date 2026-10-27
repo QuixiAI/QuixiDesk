@@ -1,0 +1,1 @@
+import{Hl as e}from"./shared-frame-6jtSkIit.js";function t(e,t){let n=e.getPropertyValue(t).trim(),r=n.endsWith("ms")?1:n.endsWith("s")?1e3:0;return Math.max(0,parseFloat(n)*r)||0}function n(n){let r=getComputedStyle(n);return{duration:e()?0:t(r,"--cds-dur-base")||200,easing:r.getPropertyValue("--cds-ease-out").trim()||"ease-out"}}export{n,t};

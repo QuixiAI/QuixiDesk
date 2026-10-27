@@ -1,0 +1,1 @@
+import{rg as e}from"./shared-25-DOWZRSlq.js";import{FC as t}from"./shared-78-D5Fw2h0a.js";function n(){return e("__gb__1949077749",t())}export{n as t};

@@ -1,0 +1,1 @@
+import{Ha as e}from"./vendor-frame-CnSY1sxv.js";import{Zf as J0,ap as K0,ip as J9}from"./shared-frame-6jtSkIit.js";function t(){let $=J9(1);return J0($,0)?K0($,0,e("span",{role:"separator","aria-orientation":"vertical",className:"h-4 w-px shrink-0 bg-border"})):$[0]}export{t};

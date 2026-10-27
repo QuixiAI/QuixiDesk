@@ -1,0 +1,1 @@
+import{Xr as e}from"./shared-4-DUB1Oi0O.js";import{c as t}from"./vendor-markdown-CTRWgQFt.js";function n(n){if(n)return n.startsWith("computer://")||n.startsWith("tel:")||e(n)?n:t(n)||void 0}export{n as t};

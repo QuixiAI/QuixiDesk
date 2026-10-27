@@ -1,0 +1,1 @@
+import{Ha as e}from"./vendor-frame-CnSY1sxv.js";import{Qf as J1,ip as J9,op as K1}from"./shared-frame-6jtSkIit.js";function t(t){let $=J9(2),{ref:n}=t;return J1($,0,n)?K1($,0,n,e("div",{ref:n,"aria-hidden":"true","data-testid":"last-message-sentinel",className:"h-px w-full pointer-events-none"})):$[1]}export{t};

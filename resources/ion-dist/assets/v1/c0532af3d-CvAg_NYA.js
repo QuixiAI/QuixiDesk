@@ -1,0 +1,1 @@
+function e(e){if(typeof e!="object"||!e)return;let{type:t,source:n}=e;if(t!=="image"||typeof n!="object"||!n)return;let r=n;return r.type==="base64"&&typeof r.media_type=="string"&&typeof r.data=="string"?{type:"base64",media_type:r.media_type,data:r.data}:void 0}function t(t){let n=e(t);return n?{type:"image",data:n.data,mimeType:n.media_type}:t}export{t};

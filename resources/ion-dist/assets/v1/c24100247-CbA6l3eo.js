@@ -1,0 +1,1 @@
+import{$l as e}from"./shared-0-DDOOdL6P.js";function t(t){if(typeof document.startViewTransition!="function"){let n=new Promise(e=>{e(t())});return n.catch(e),{ready:n,updateCallbackDone:n,finished:n,skipTransition:e}}let n=document.startViewTransition(t);return n.ready.catch(e),n.updateCallbackDone.catch(e),n.finished.catch(e),n}export{t};

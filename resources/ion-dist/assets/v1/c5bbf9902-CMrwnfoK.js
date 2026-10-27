@@ -1,0 +1,1 @@
+import{bE as e}from"./shared-78-D5Fw2h0a.js";function t(){return e()}export{t};

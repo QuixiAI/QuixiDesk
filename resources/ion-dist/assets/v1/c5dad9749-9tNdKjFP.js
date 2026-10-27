@@ -1,0 +1,1 @@
+var e="13px",t="34px",n={"--chat-turn-gap":t,"--chat-item-gap":e};export{n,t as r,e as t};

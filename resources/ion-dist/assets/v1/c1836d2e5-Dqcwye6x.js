@@ -1,0 +1,1 @@
+import{uv as e}from"./shared-0-DDOOdL6P.js";function t(t){return t instanceof e&&t.errorCode==="legal_attestation_required"}function n(t){return t instanceof e&&t.statusCode===403&&t.errorCode==="owner_attestation_required"}export{n,t};

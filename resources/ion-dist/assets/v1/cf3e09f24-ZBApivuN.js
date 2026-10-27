@@ -1,0 +1,1 @@
+import{Wc as e}from"./shared-78-D5Fw2h0a.js";import{n as t}from"./c1347d2a5-CY1z_ak9.js";function n(n,r){return n.urlRegex?t(n,e(r)):!1}export{n as t};

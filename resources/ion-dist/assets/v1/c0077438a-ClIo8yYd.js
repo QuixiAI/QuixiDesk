@@ -1,0 +1,1 @@
+import{Yu as e}from"./shared-0-DDOOdL6P.js";var t=80;function n(n){let r=Array.from(e(n));return r.length<=t?r.join(""):`${r.slice(0,47).join("")}\u2026${r.slice(-32).join("")}`}export{n as t};

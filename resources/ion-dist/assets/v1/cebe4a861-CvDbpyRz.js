@@ -1,0 +1,1 @@
+import{$f as J2,ip as J9,sp as K2}from"./shared-frame-6jtSkIit.js";import{Ln as e,zr as t}from"./shared-25-DOWZRSlq.js";import{L_ as n}from"./shared-52-uHFNjl7C.js";var r="cxdir:pcs-sample";function i(){let $=J9(3),{account:i}=t(),[a]=e(r,!1);return J2($,0,i,a)?K2($,0,i,a,a===!0&&n(i)):$[2]}export{i as n,r as t};

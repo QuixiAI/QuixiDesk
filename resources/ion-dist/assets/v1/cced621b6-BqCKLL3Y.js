@@ -1,0 +1,1 @@
+import{Ct as e,wt as t}from"./shared-9-CM21XrJw.js";function n(){let n=t("CaretRightFilled");return n===void 0?void 0:{name:n,headSize:"sm",dropStyle:e}}export{n as t};

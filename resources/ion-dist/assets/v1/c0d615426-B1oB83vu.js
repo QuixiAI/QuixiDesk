@@ -1,0 +1,1 @@
+import{Ha as e}from"./vendor-frame-CnSY1sxv.js";import{Qf as J1,ip as J9,op as K1,ql as t}from"./shared-frame-6jtSkIit.js";function n(n){let $=J9(2),{children:r}=n;return J1($,0,r)?K1($,0,r,e("div",{className:"flex items-center gap-1 flex-shrink-0",children:e(t,{children:r})})):$[1]}export{n as t};

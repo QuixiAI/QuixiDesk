@@ -1,0 +1,1 @@
+@keyframes fadeInTextReveal{0%{opacity:0}to{opacity:1}}.fade-in-text__word{opacity:0;will-change:opacity;animation:.4s ease-out forwards fadeInTextReveal}.fade-in-text__word--instant{opacity:1;will-change:auto;animation:none}

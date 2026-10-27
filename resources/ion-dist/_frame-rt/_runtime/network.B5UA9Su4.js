@@ -1,0 +1,1 @@
+function t(i){const n=i.capabilities.network;if(!n||n.optional===!0)return[];const r=n.config?.origins;return!Array.isArray(r)||r.length===0||!r.every(e=>typeof e=="string")?[]:r}function o(i){const n=t(i),r=i.pipe("network");i.mount("network",{origins:r.wrap("origins",()=>Promise.resolve([...n]))})}export{o as install};

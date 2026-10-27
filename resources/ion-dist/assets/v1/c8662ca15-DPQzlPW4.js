@@ -1,0 +1,1 @@
+import{Ha as e}from"./vendor-frame-CnSY1sxv.js";import{hu as t}from"./shared-frame-6jtSkIit.js";import{tn as n}from"./shared-0-DDOOdL6P.js";import{F as r}from"./shared-156-BLTosN8U.js";var i=({type:i,children:a})=>{let{websiteBaseUrl:o}=n(),s=r()?.[i];return e(t,{external:!0,href:`${o}/legal/${s?`archive/${s}`:i}`,children:a})};export{i as t};

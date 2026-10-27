@@ -1,0 +1,1 @@
+function e(e,t){return e||t}Object.freeze({claude_web_login:"",aws_marketplace:"",trust_portal:"",oauth_consent:"",console_login:"",send_magic_link:"",claude_web_social:"",console_social:"",admin_login:"",admin_social:"",auth_login:"",phone_send:""});export{e as t};

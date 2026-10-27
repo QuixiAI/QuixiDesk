@@ -1,0 +1,1 @@
+import{Ha as e}from"./vendor-frame-CnSY1sxv.js";import{mm as t}from"./shared-104-CTONUSaz.js";import{vt as n}from"./shared-17-COtqou4I.js";import{n as r}from"./c230724a2-Dey3VRG9.js";var i=t({entry:n,pick:e=>e.CoworkArtifactsGallery,options:{loading:()=>e(r,{})}}).Component;export{i as t};

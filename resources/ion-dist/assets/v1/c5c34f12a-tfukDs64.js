@@ -1,0 +1,1 @@
+import{Qf as J1,ip as J9,op as K1}from"./shared-frame-6jtSkIit.js";import{Wp as e,so as t}from"./shared-52-uHFNjl7C.js";import{ym as n}from"./shared-26-CGuBxVt9.js";var r="cai_ancient_locket",i=n.__built("cai_ancient_locket");function a(){let $=J9(2),t=e(o);return J1($,0,t)?K1($,0,t,t):$[1]}function o(e){return t(e,r)}export{i as n,a as r,r as t};

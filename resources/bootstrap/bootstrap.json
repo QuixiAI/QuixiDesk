@@ -1,0 +1,924 @@
+{
+  "account": {
+    "tagged_id": "cowork_3p_00000000-0000-4000-8000-000000000002",
+    "uuid": "00000000-0000-4000-8000-000000000002",
+    "email_address": "user@quixidesk.local",
+    "full_name": "QuixiDesk",
+    "display_name": "QuixiDesk",
+    "created_at": "2026-10-26T10:28:57.690Z",
+    "updated_at": "2026-10-26T10:28:57.690Z",
+    "accepted_clickwrap_versions": {},
+    "is_verified": true,
+    "age_is_verified": true,
+    "memberships": [
+      {
+        "role": "admin",
+        "seat_tier": "unassigned",
+        "created_at": "2026-10-26T10:28:57.690Z",
+        "updated_at": "2026-10-26T10:28:57.690Z",
+        "organization": {
+          "uuid": "00000000-0000-4000-8000-000000000001",
+          "id": 0,
+          "name": "QuixiDesk",
+          "settings": {
+            "claude_ai_skill_publish_policy_effective": "review"
+          },
+          "parent_organization_uuid": null,
+          "capabilities": [
+            "chat",
+            "claude_pro",
+            "claude_max"
+          ],
+          "billing_type": "stripe_subscription",
+          "free_credits_status": null,
+          "api_disabled_reason": null,
+          "api_disabled_until": null,
+          "rate_limit_tier": null,
+          "data_retention": null,
+          "raven_type": null,
+          "claude_ai_bootstrap_models_config": []
+        }
+      }
+    ],
+    "workspace_memberships": [],
+    "invites": [],
+    "settings": {
+      "enabled_wiggle_egress": true,
+      "wiggle_egress_hosts_template": "full_egress",
+      "enabled_geolocation": false
+    }
+  },
+  "current_user_access": {
+    "features": [
+      {
+        "feature": "chat",
+        "status": "available"
+      },
+      {
+        "feature": "claude_code",
+        "status": "available"
+      },
+      {
+        "feature": "claude_code_desktop",
+        "status": "available"
+      },
+      {
+        "feature": "skills",
+        "status": "available"
+      },
+      {
+        "feature": "skill_creation",
+        "status": "available"
+      },
+      {
+        "feature": "tool_approval_default_always_allow",
+        "status": "available"
+      },
+      {
+        "feature": "claude_code_fast_mode",
+        "status": "blocked_by_platform"
+      },
+      {
+        "feature": "cowork",
+        "status": "available"
+      },
+      {
+        "feature": "claude_browser_extension",
+        "status": "available"
+      },
+      {
+        "feature": "miami_grand_prix",
+        "status": "available"
+      },
+      {
+        "feature": "skill_plugins_scanning",
+        "status": "available"
+      }
+    ]
+  },
+  "featureFlagsOrgUuid": "00000000-0000-4000-8000-000000000001",
+  "locale": "en-US",
+  "statsig": {
+    "user": {
+      "userID": "00000000-0000-4000-8000-000000000002"
+    },
+    "values": {},
+    "values_hash": "custom3p"
+  },
+  "feature_flags": {
+    "user": {
+      "userID": "00000000-0000-4000-8000-000000000002"
+    },
+    "values": {},
+    "values_hash": "custom3p"
+  },
+  "growthbook": {
+    "features": {
+      "101380594": {
+        "defaultValue": true
+      },
+      "130942744": {
+        "defaultValue": true
+      },
+      "147471044": {
+        "defaultValue": true
+      },
+      "151700879": {
+        "defaultValue": true
+      },
+      "259843659": {
+        "defaultValue": {
+          "rehydrate": true,
+          "gracefulFailure": true
+        }
+      },
+      "304458538": {
+        "defaultValue": {
+          "enabled": "enabled"
+        }
+      },
+      "505512513": {
+        "defaultValue": true
+      },
+      "507049721": {
+        "defaultValue": true
+      },
+      "520984675": {
+        "defaultValue": true
+      },
+      "574905726": {
+        "defaultValue": true
+      },
+      "942840715": {
+        "defaultValue": false
+      },
+      "986399546": {
+        "defaultValue": true
+      },
+      "1002481325": {
+        "defaultValue": true
+      },
+      "1045446575": {
+        "defaultValue": {
+          "enabled": true,
+          "pollBaseMs": 30000,
+          "pollCapMs": 900000,
+          "pollResetOnTransitionsOnly": true
+        }
+      },
+      "1093656152": {
+        "defaultValue": true
+      },
+      "1144854707": {
+        "defaultValue": true
+      },
+      "1179150525": {
+        "defaultValue": true
+      },
+      "1215221242": {
+        "defaultValue": true
+      },
+      "1294710626": {
+        "defaultValue": true
+      },
+      "1417478306": {
+        "defaultValue": false
+      },
+      "1441987769": {
+        "defaultValue": false
+      },
+      "1588340729": {
+        "defaultValue": true
+      },
+      "1658632017": {
+        "defaultValue": true
+      },
+      "1686253244": {
+        "defaultValue": true
+      },
+      "1686654419": {
+        "defaultValue": true
+      },
+      "1709592054": {
+        "defaultValue": true
+      },
+      "1868684740": {
+        "defaultValue": true
+      },
+      "1895339162": {
+        "defaultValue": {
+          "enabled": true
+        }
+      },
+      "1997501558": {
+        "defaultValue": true
+      },
+      "2136381871": {
+        "defaultValue": true
+      },
+      "2138864756": {
+        "defaultValue": true
+      },
+      "2215170874": {
+        "defaultValue": true
+      },
+      "2344289156": {
+        "defaultValue": true
+      },
+      "2346508742": {
+        "defaultValue": true
+      },
+      "2431502897": {
+        "defaultValue": "inherit"
+      },
+      "2464296336": {
+        "defaultValue": true
+      },
+      "2479960717": {
+        "defaultValue": true
+      },
+      "2547348043": {
+        "defaultValue": true
+      },
+      "2688060585": {
+        "defaultValue": true
+      },
+      "2714218019": {
+        "defaultValue": true
+      },
+      "2722545484": {
+        "defaultValue": true
+      },
+      "2774291247": {
+        "defaultValue": true
+      },
+      "2831057674": {
+        "defaultValue": true
+      },
+      "2895944283": {
+        "defaultValue": true
+      },
+      "2971093051": {
+        "defaultValue": true
+      },
+      "2973881027": {
+        "defaultValue": {
+          "model": "claude-sonnet-4-6",
+          "overrideSticky": false,
+          "nuxId": null
+        }
+      },
+      "3007887412": {
+        "defaultValue": false
+      },
+      "3019411446": {
+        "defaultValue": true
+      },
+      "3088953445": {
+        "defaultValue": true
+      },
+      "3112015973": {
+        "defaultValue": true
+      },
+      "3264789062": {
+        "defaultValue": true
+      },
+      "3269331205": {
+        "defaultValue": true
+      },
+      "3353525254": {
+        "defaultValue": true
+      },
+      "3356268835": {
+        "defaultValue": {
+          "enableAdditionalDirectoriesClaudeMd": true,
+          "autoDownloadInBackground": false
+        }
+      },
+      "3368286709": {
+        "defaultValue": true
+      },
+      "3413676205": {
+        "defaultValue": true
+      },
+      "3464534777": {
+        "defaultValue": true
+      },
+      "3491501307": {
+        "defaultValue": true
+      },
+      "3525173228": {
+        "defaultValue": true
+      },
+      "3671534883": {
+        "defaultValue": false
+      },
+      "3716359568": {
+        "defaultValue": true
+      },
+      "3809766863": {
+        "defaultValue": true
+      },
+      "3840073744": {
+        "defaultValue": true
+      },
+      "3927880029": {
+        "defaultValue": {
+          "value": 3
+        }
+      },
+      "4108768567": {
+        "defaultValue": true
+      },
+      "4112513247": {
+        "defaultValue": true
+      },
+      "4175257006": {
+        "defaultValue": true
+      }
+    }
+  },
+  "model_selector_config": [
+    {
+      "id": "cowork",
+      "models": [
+        {
+          "id": "claude-sonnet-4-6",
+          "name": "Sonnet 4.6",
+          "description": "Best for everyday tasks",
+          "thinking": {
+            "effort_options": [
+              {
+                "id": "low",
+                "name": "Low",
+                "description": "Quick replies to simple questions"
+              },
+              {
+                "id": "medium",
+                "name": "Medium",
+                "description": "Balanced for everyday work",
+                "recommended": true,
+                "badge": {
+                  "message": "Default",
+                  "variant": "neutral"
+                }
+              },
+              {
+                "id": "high",
+                "name": "High",
+                "description": "Complex, detailed work"
+              },
+              {
+                "id": "max",
+                "name": "Max",
+                "description": "The hardest problems. Takes longest.",
+                "tooltip": {
+                  "content": "May use excessive tokens resulting in long response times and may hit token limits. Use sparingly for the hardest tasks."
+                }
+              }
+            ],
+            "description": "Higher effort means more thorough responses, but takes longer and uses your limits faster.",
+            "mode_options": [
+              {
+                "id": "auto",
+                "name": "Thinking",
+                "description": "Can think for more complex tasks"
+              },
+              {
+                "id": "off",
+                "name": "Off"
+              }
+            ]
+          }
+        },
+        {
+          "id": "claude-opus-4-7",
+          "name": "Opus 4.7",
+          "description": "Most capable for complex work",
+          "thinking": {
+            "effort_options": [
+              {
+                "id": "low",
+                "name": "Low",
+                "description": "Quick replies to simple questions"
+              },
+              {
+                "id": "medium",
+                "name": "Medium",
+                "description": "Balanced for everyday work"
+              },
+              {
+                "id": "high",
+                "name": "High",
+                "description": "Complex, detailed work",
+                "recommended": true,
+                "badge": {
+                  "message": "Default",
+                  "variant": "neutral"
+                }
+              },
+              {
+                "id": "max",
+                "name": "Max",
+                "description": "The hardest problems. Takes longest.",
+                "tooltip": {
+                  "content": "May use excessive tokens resulting in long response times and may hit token limits. Use sparingly for the hardest tasks."
+                }
+              }
+            ],
+            "description": "Higher effort means more thorough responses, but takes longer and uses your limits faster.",
+            "mode_options": [
+              {
+                "id": "auto",
+                "name": "Thinking",
+                "description": "Can think for more complex tasks"
+              },
+              {
+                "id": "off",
+                "name": "Off"
+              }
+            ]
+          }
+        },
+        {
+          "id": "claude-haiku-4-5-20251001",
+          "name": "Haiku 4.5",
+          "description": "Fastest for quick answers",
+          "thinking": {
+            "effort_options": [
+              {
+                "id": "low",
+                "name": "Low",
+                "description": "Quick replies to simple questions"
+              },
+              {
+                "id": "medium",
+                "name": "Medium",
+                "description": "Balanced for everyday work",
+                "recommended": true,
+                "badge": {
+                  "message": "Default",
+                  "variant": "neutral"
+                }
+              },
+              {
+                "id": "high",
+                "name": "High",
+                "description": "Complex, detailed work"
+              },
+              {
+                "id": "max",
+                "name": "Max",
+                "description": "The hardest problems. Takes longest.",
+                "tooltip": {
+                  "content": "May use excessive tokens resulting in long response times and may hit token limits. Use sparingly for the hardest tasks."
+                }
+              }
+            ],
+            "description": "Higher effort means more thorough responses, but takes longer and uses your limits faster.",
+            "mode_options": [
+              {
+                "id": "auto",
+                "name": "Thinking",
+                "description": "Can think for more complex tasks"
+              },
+              {
+                "id": "off",
+                "name": "Off"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "code",
+      "models": [
+        {
+          "id": "claude-sonnet-4-6",
+          "name": "Sonnet 4.6",
+          "description": "Best for everyday tasks",
+          "thinking": {
+            "effort_options": [
+              {
+                "id": "low",
+                "name": "Low",
+                "description": "Quick replies to simple questions"
+              },
+              {
+                "id": "medium",
+                "name": "Medium",
+                "description": "Balanced for everyday work",
+                "recommended": true,
+                "badge": {
+                  "message": "Default",
+                  "variant": "neutral"
+                }
+              },
+              {
+                "id": "high",
+                "name": "High",
+                "description": "Complex, detailed work"
+              },
+              {
+                "id": "max",
+                "name": "Max",
+                "description": "The hardest problems. Takes longest.",
+                "tooltip": {
+                  "content": "May use excessive tokens resulting in long response times and may hit token limits. Use sparingly for the hardest tasks."
+                }
+              }
+            ],
+            "description": "Higher effort means more thorough responses, but takes longer and uses your limits faster.",
+            "type": "effort"
+          }
+        },
+        {
+          "id": "claude-opus-4-7",
+          "name": "Opus 4.7",
+          "description": "Most capable for complex work",
+          "thinking": {
+            "effort_options": [
+              {
+                "id": "low",
+                "name": "Low",
+                "description": "Quick replies to simple questions"
+              },
+              {
+                "id": "medium",
+                "name": "Medium",
+                "description": "Balanced for everyday work"
+              },
+              {
+                "id": "high",
+                "name": "High",
+                "description": "Complex, detailed work",
+                "recommended": true,
+                "badge": {
+                  "message": "Default",
+                  "variant": "neutral"
+                }
+              },
+              {
+                "id": "max",
+                "name": "Max",
+                "description": "The hardest problems. Takes longest.",
+                "tooltip": {
+                  "content": "May use excessive tokens resulting in long response times and may hit token limits. Use sparingly for the hardest tasks."
+                }
+              }
+            ],
+            "description": "Higher effort means more thorough responses, but takes longer and uses your limits faster.",
+            "type": "effort"
+          }
+        },
+        {
+          "id": "claude-haiku-4-5-20251001",
+          "name": "Haiku 4.5",
+          "description": "Fastest for quick answers",
+          "thinking": {
+            "effort_options": [
+              {
+                "id": "low",
+                "name": "Low",
+                "description": "Quick replies to simple questions"
+              },
+              {
+                "id": "medium",
+                "name": "Medium",
+                "description": "Balanced for everyday work",
+                "recommended": true,
+                "badge": {
+                  "message": "Default",
+                  "variant": "neutral"
+                }
+              },
+              {
+                "id": "high",
+                "name": "High",
+                "description": "Complex, detailed work"
+              },
+              {
+                "id": "max",
+                "name": "Max",
+                "description": "The hardest problems. Takes longest.",
+                "tooltip": {
+                  "content": "May use excessive tokens resulting in long response times and may hit token limits. Use sparingly for the hardest tasks."
+                }
+              }
+            ],
+            "description": "Higher effort means more thorough responses, but takes longer and uses your limits faster.",
+            "type": "effort"
+          }
+        }
+      ]
+    },
+    {
+      "id": "chat",
+      "models": [
+        {
+          "id": "claude-sonnet-4-6",
+          "name": "Sonnet 4.6",
+          "description": "Best for everyday tasks",
+          "thinking": {
+            "effort_options": [
+              {
+                "id": "low",
+                "name": "Low",
+                "description": "Quick replies to simple questions"
+              },
+              {
+                "id": "medium",
+                "name": "Medium",
+                "description": "Balanced for everyday work",
+                "recommended": true,
+                "badge": {
+                  "message": "Default",
+                  "variant": "neutral"
+                }
+              },
+              {
+                "id": "high",
+                "name": "High",
+                "description": "Complex, detailed work"
+              },
+              {
+                "id": "max",
+                "name": "Max",
+                "description": "The hardest problems. Takes longest.",
+                "tooltip": {
+                  "content": "May use excessive tokens resulting in long response times and may hit token limits. Use sparingly for the hardest tasks."
+                }
+              }
+            ],
+            "description": "Higher effort means more thorough responses, but takes longer and uses your limits faster.",
+            "mode_options": [
+              {
+                "id": "auto",
+                "name": "Thinking",
+                "description": "Can think for more complex tasks"
+              },
+              {
+                "id": "off",
+                "name": "Off"
+              }
+            ]
+          }
+        },
+        {
+          "id": "claude-opus-4-7",
+          "name": "Opus 4.7",
+          "description": "Most capable for complex work",
+          "thinking": {
+            "effort_options": [
+              {
+                "id": "low",
+                "name": "Low",
+                "description": "Quick replies to simple questions"
+              },
+              {
+                "id": "medium",
+                "name": "Medium",
+                "description": "Balanced for everyday work"
+              },
+              {
+                "id": "high",
+                "name": "High",
+                "description": "Complex, detailed work",
+                "recommended": true,
+                "badge": {
+                  "message": "Default",
+                  "variant": "neutral"
+                }
+              },
+              {
+                "id": "max",
+                "name": "Max",
+                "description": "The hardest problems. Takes longest.",
+                "tooltip": {
+                  "content": "May use excessive tokens resulting in long response times and may hit token limits. Use sparingly for the hardest tasks."
+                }
+              }
+            ],
+            "description": "Higher effort means more thorough responses, but takes longer and uses your limits faster.",
+            "mode_options": [
+              {
+                "id": "auto",
+                "name": "Thinking",
+                "description": "Can think for more complex tasks"
+              },
+              {
+                "id": "off",
+                "name": "Off"
+              }
+            ]
+          }
+        },
+        {
+          "id": "claude-haiku-4-5-20251001",
+          "name": "Haiku 4.5",
+          "description": "Fastest for quick answers",
+          "thinking": {
+            "effort_options": [
+              {
+                "id": "low",
+                "name": "Low",
+                "description": "Quick replies to simple questions"
+              },
+              {
+                "id": "medium",
+                "name": "Medium",
+                "description": "Balanced for everyday work",
+                "recommended": true,
+                "badge": {
+                  "message": "Default",
+                  "variant": "neutral"
+                }
+              },
+              {
+                "id": "high",
+                "name": "High",
+                "description": "Complex, detailed work"
+              },
+              {
+                "id": "max",
+                "name": "Max",
+                "description": "The hardest problems. Takes longest.",
+                "tooltip": {
+                  "content": "May use excessive tokens resulting in long response times and may hit token limits. Use sparingly for the hardest tasks."
+                }
+              }
+            ],
+            "description": "Higher effort means more thorough responses, but takes longer and uses your limits faster.",
+            "mode_options": [
+              {
+                "id": "auto",
+                "name": "Thinking",
+                "description": "Can think for more complex tasks"
+              },
+              {
+                "id": "off",
+                "name": "Off"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "model_selector_state": [
+    {
+      "id": "cowork",
+      "model": "claude-sonnet-4-6",
+      "selection_source": "global_default"
+    },
+    {
+      "id": "code",
+      "model": "claude-sonnet-4-6",
+      "selection_source": "global_default"
+    },
+    {
+      "id": "chat",
+      "model": "claude-sonnet-4-6",
+      "selection_source": "global_default"
+    }
+  ],
+  "bootstrap_push_revision": 1,
+  "install_id": "00000000-0000-4000-8000-000000000002",
+  "intercom_account_hash": null,
+  "gated_messages": {
+    "messages": {
+      "secret:5b2kir": "Publish {name}",
+      "secret:j8xoh1": "Publish to org",
+      "secret:1xysh0t": "Your workspace admins review it before it goes live and decide who at {org} can find and install it.",
+      "secret:1xoaim0": "Your workspace admins review it before it goes live and decide who can find and install it.",
+      "secret:1x3l9ww": "Add people or groups by name or email",
+      "secret:jptrge": "Add people by name or email",
+      "secret:1umf9tx": "Who has access",
+      "secret:ay4ujt": "Creator",
+      "secret:16bge16": "Only you. Add someone above to share it.",
+      "secret:141v2ez": "Share with {count}",
+      "secret:1delh16": "Share with {count}+",
+      "secret:1awfdb9": "Org-wide access is granted by publishing — a separate flow where your workspace admins review it first. <link>Publish to org →</link>",
+      "secret:1jmebs4": "Org-wide access is granted by publishing instead. <link>Publish to org →</link>",
+      "secret:p4ybai": "Frozen when you submit — later edits won’t change what reviewers see.",
+      "secret:emrcyj": "Frozen when you submit — scan passed, no issues found. Later edits won’t change what reviewers see.",
+      "secret:1h2asan": "Frozen when you publish — later edits need a new publish.",
+      "secret:6vnvoc": "An admin already reviewed this submission.",
+      "secret:17t9pv2": "Appears in the library. Members can install or uninstall anytime.",
+      "secret:14imllm": "Pre-installed. Members can disable or uninstall.",
+      "secret:t7d9ii": "Pre-installed and always on. Members can’t disable or uninstall.",
+      "secret:69jajx": "How it installs",
+      "secret:kt6se0": "How it installs (proposed)",
+      "secret:1oq8kyu": "Available to everyone",
+      "secret:12m9a1h": "Admins can change this after publishing.",
+      "secret:5pkxep": "No change to access",
+      "secret:1j69k8q": "The new version goes to everyone who has it today. Admins can change access later.",
+      "secret:1hywc5n": "Your organization publishes member skills and plugins automatically after a security scan.",
+      "secret:1yvrudj": "Your organization publishes member skills and plugins automatically.",
+      "secret:7wn4wr": "You manage your organization’s library, so this doesn’t need review. It goes live after a security scan.",
+      "secret:nuh5zr": "You manage your organization’s library, so this doesn’t need review. It goes live as soon as you publish.",
+      "secret:q24bwc": "Submit for review",
+      "secret:pfovjz": "Previous review: “{reason}”",
+      "secret:16nexkj": "Published to your organization.",
+      "secret:pyyyku": "Publishing to your organization. It goes live once the security scan passes.",
+      "secret:17lu0em": "Publishing to your organization…",
+      "secret:oh9fgg": "Submitted for review.",
+      "secret:xvs6y1": "Submission withdrawn.",
+      "secret:n3dtv6": "The security scan is still running. Try again in a moment.",
+      "secret:iuyjuq": "This version failed the security scan and can’t be published. Fix the files and save a new version first.",
+      "secret:1cotomr": "A submission is already pending review.",
+      "secret:1hb6qbj": "Your organization doesn’t accept member submissions.",
+      "secret:15olvdm": "Couldn’t submit. You can try again.",
+      "secret:1369q93": "Couldn’t withdraw the submission. Try again.",
+      "secret:1jv45sd": "Submitted {version} to your workspace admins for review. Later edits won’t change the submitted version.",
+      "secret:5fga5s": "Proposed: {preference}.",
+      "secret:r2hcbi": "Denied {date} — “{reason}”",
+      "secret:1suymn9": "Denied {date}.",
+      "secret:1pz9ag4": "Published {version}.",
+      "secret:1no6hi8": "An admin rolled back {version}. Members no longer receive it.",
+      "secret:1ywa29m": "Submitted to your workspace admins for review. Later edits won’t change the submitted version.",
+      "secret:1en4ddv": "Published.",
+      "secret:1or37en": "Submitted — publishing is turned off for your organization.",
+      "secret:4jw8u3": "in review",
+      "secret:6ih0ar": "published to {marketplace}",
+      "secret:1htnepv": "{version} is live for your organization",
+      "secret:18rjtp0": "{version} in review",
+      "secret:18h8q8x": "you’re editing {version} (not published yet)",
+      "secret:6igzvj": "published by {org}",
+      "secret:1ybtpu0": "Available to {groups}",
+      "secret:pgghj6": "Available to everyone at {org}",
+      "secret:17zfhkz": "Available to everyone in your organization",
+      "secret:p7z5lx": "Available to {groups}.",
+      "secret:cogc58": "Available to everyone at {org}.",
+      "secret:1fmvcsd": "Available to everyone in your organization.",
+      "secret:pjv8xn": "Not currently available to anyone.",
+      "secret:abj1xc": "required for {groups}",
+      "secret:w7gxi0": "pre-installed for {groups}",
+      "secret:1natphj": "An admin rolled back this skill’s published version. Members no longer receive it.",
+      "secret:3iyltp": "Approved — publishing…",
+      "secret:13pnvjz": "Approved — it goes live once the security scan passes.",
+      "secret:1u0hmnr": "Publishing failed.",
+      "secret:zbmjak": "Your last publish didn’t pass the security scan, so it didn’t go live. You can change the files and publish again.",
+      "secret:tj7o49": "Your last publish didn’t finish, so it didn’t go live. Try publishing again.",
+      "secret:62j2du": "This skill can’t be published to your organization.",
+      "secret:k97pps": "You already have a skill with this name. Publish that one instead.",
+      "secret:zgon2y": "This version is already in your organization’s library. Save a new version to publish again.",
+      "secret:2bc7u": "This item is still being published. Try again once it finishes.",
+      "secret:17e3gts": "Only an admin can publish this to your organization’s library. Ask an admin to publish it.",
+      "secret:2er599": "This item is managed from organization settings. Add the new version there instead.",
+      "secret:psymt0": "An item with this name is already in your organization’s library. Rename yours and publish again.",
+      "secret:gcw8xc": "Your organization’s library is full. Ask an admin to remove an item, then try again.",
+      "secret:1h6xp1g": "Your organization’s publishing settings just changed. Reload the page and try again.",
+      "secret:1ur7x0q": "The library entry changed while you were publishing. Try again.",
+      "secret:ggwrn7": "This skill has a submission pending review. Withdraw it or wait for the review before renaming.",
+      "secret:1vq31j5": "If you make this skill private, you won’t be able to share it with your whole organization again.",
+      "secret:i8hrwu": "Publishing",
+      "secret:dbqtv6": "Publishing makes a skill or plugin available to everyone at {orgName}.",
+      "secret:1v6owpk": "Requires review",
+      "secret:o11kzj": "Turn off publishing?",
+      "secret:160d38b": "{count, plural, one {# pending request} other {# pending requests}} will be hidden until you turn publishing back on.",
+      "secret:fwr8dv": "Any pending requests will be hidden until you turn publishing back on.",
+      "secret:1jyqd0n": "A plugin with this name is already in {orgName}’s library · <view>View org plugin</view>",
+      "secret:db1xul": "A skill with this name is already in {orgName}’s library · <view>View org skill</view>",
+      "secret:17fcssq": "Upload anyway",
+      "secret:bvhkx3": "A plugin with this name is already in your organization’s library.",
+      "secret:1a95xwd": "A skill with this name is already in your organization’s library.",
+      "secret:1wsmwkd": "A plugin with this name exists in your organization but isn’t shared with you.",
+      "secret:kleztz": "A skill with this name exists in your organization but isn’t shared with you.",
+      "secret:vyq3hq": "{count, plural, one {# person uses it} other {# people use it}}",
+      "secret:1x23fv7": "Use this instead",
+      "secret:19h1ako": "Use this instead: {name}",
+      "secret:4d6et9": "Already on for you",
+      "secret:l31di7": "Give yours a different name to keep both, or use the org’s version above.",
+      "secret:g5w5tw": "Give yours a different name to keep both.",
+      "secret:g5xzlu": "<keep>Keep “{name}”</keep>",
+      "secret:g5xzvf": "Keeping “{name}”.",
+      "secret:17pjxm5": "Keeping “{name}”. If you also add your organization’s skill, typing /{command} will list both.",
+      "secret:40ne3b": "Keeping “{name}”. If you also add your organization’s plugin, you’ll have two plugins with this name.",
+      "secret:ktyhdd": "Keeping “{name}”. You already use your organization’s skill, so typing /{command} will list both.",
+      "secret:emby87": "Keeping “{name}”. You already use your organization’s plugin, so you’ll have two plugins with this name.",
+      "secret:1qx6k35": "Saved as <b>{name}</b>",
+      "secret:1bzxorr": "This file couldn’t be renamed. Keep its name to upload it as is, or change the name inside the file and choose it again.",
+      "secret:ahfklq": "<use>Use “{suggested}” instead</use>."
+    },
+    "gates": [
+      "__gb__2220396766",
+      "__gb__3715667375"
+    ],
+    "locale": "en-US"
+  },
+  "gated_imports": {},
+  "gated_imports_build_id": "spa-dev",
+  "system_prompts": {
+    "cowork_system_prompt": {
+      "value": {
+        "prompt": "<application_details>\nQuixiDesk is operating as an agent inside the QuixiDesk desktop app. QuixiDesk runs with a secure workspace sandbox on the user's computer, allowing controlled access to workspace folders and tools.\n</application_details>"
+      },
+      "on": true,
+      "off": false,
+      "source": "defaultValue",
+      "ruleId": null
+    }
+  }
+}

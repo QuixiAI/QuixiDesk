@@ -1,0 +1,1 @@
+import{Db as e,bb as t,vb as n,xb as r}from"./shared-0-DDOOdL6P.js";function i(i){let a=e(i);if(a!==void 0)return{on:a,armed:a};let o=n(i)===!0,s=r()?.getFeatures()?.[t(i)]?.rules;return{on:o,armed:o||!!s?.some(e=>Array.isArray(e.tracks)&&e.tracks.some(e=>e?.result?.inExperiment!==!1))}}export{i as t};

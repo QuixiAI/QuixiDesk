@@ -1,0 +1,1 @@
+var e="data-pane-header";function t({owns:e,isDrawerOpen:t,isNarrowContainer:n}){return e&&t&&n}function n(e){return e.formatMessage({defaultMessage:"Side panel",id:"GhCUil/yVV"})}export{n,e as r,t};

@@ -1,0 +1,1 @@
+import{$f as J2,ip as J9,sp as K2}from"./shared-frame-6jtSkIit.js";import{n as e,t}from"./c28ee0d82-dbmybvja.js";function n(){let $=J9(3),n=e(),[r]=t(),i=n&&!r,a=n&&r;return J2($,0,i,a)?K2($,0,i,a,{prLinksOpenInPane:i,prsOpenInBrowser:a}):$[2]}function r(){return n().prLinksOpenInPane}export{r as n,n as t};

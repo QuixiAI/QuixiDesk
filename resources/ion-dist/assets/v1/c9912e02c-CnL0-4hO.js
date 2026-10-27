@@ -1,0 +1,1 @@
+function e(e){return e.isPending&&!e.errorUpdateCount}export{e as t};

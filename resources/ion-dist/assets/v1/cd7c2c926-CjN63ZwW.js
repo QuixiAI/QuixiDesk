@@ -1,0 +1,1 @@
+var e=class extends Error{constructor(e,t,n){super(`${e} ${t} failed (${n})`),this.status=n,this.name="FetchJsonError"}},t=class extends Error{constructor(e,t){super(`${e} ${t} returned an unparseable response`),this.name="UnparseableResponseError"}};export{t as n,e as t};

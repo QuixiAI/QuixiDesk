@@ -1,0 +1,8 @@
+[package]
+name = "quixi-disclaimer"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+quixi-platform.workspace = true
+anyhow.workspace = true

@@ -1,0 +1,1 @@
+var e=Object.freeze({escape:!1,cmdEnter:!1}),t=Object.freeze({escape:!0,cmdEnter:!0}),n=Object.freeze({escape:!1,cmdEnter:!0});function r(t){return t.featureDisabled?n:e}export{r as i,t as n,e as r,n as t};

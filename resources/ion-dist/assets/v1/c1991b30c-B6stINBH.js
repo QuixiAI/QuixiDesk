@@ -1,0 +1,1 @@
+function e(e){return e.claude_code_data_sharing_enabled===!1&&e.development_partner_program_enrollment_eligible===!0}export{e as checkDppPromoEligible};

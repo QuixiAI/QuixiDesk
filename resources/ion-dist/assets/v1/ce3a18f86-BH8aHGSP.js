@@ -1,0 +1,2 @@
+const __vite__mapDeps=(i,m=__vite__mapDeps,d=(m.f||(m.f=["assets/v1/shared-frame-CegduNQ2.css","assets/v1/shared-styles-D_GJawPO.css"])))=>i.map(i=>d[i]);
+import{t as e}from"./preload-helper-D0dM6GpB.js";import{hm as t,mm as n}from"./shared-104-CTONUSaz.js";var r=n({entry:{id:"preview_allowed_sites_modal",tier:"T3",load:()=>e(()=>import("./c25b1be4a-BTEJT1nx.js"),__vite__mapDeps([0,1]))},pick:e=>e.PreviewAllowedSitesModal,options:{ssr:!1,loading:t("mounted-closed"),isOpen:e=>e.isOpen===!0}}).Component;export{r as t};

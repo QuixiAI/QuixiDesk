@@ -1,0 +1,4 @@
+interface:
+  display_name: "Visualize"
+  short_description: "Turn ideas and data into interactive visuals"
+  default_prompt: "Use $visualize to create an interactive visual when a chart, map, diagram, simulation, 3D model, data explorer, or UI preview would make the result easier to understand or adjust."

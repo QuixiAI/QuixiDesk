@@ -1,0 +1,1 @@
+import{Yh as e}from"./shared-25-DOWZRSlq.js";var t="copper_lantern";function n(){return e(t)}var r="__gb__2945647101";function i(){return e(r)}var a="__gb__175213174";function o(){return e(a)}function s(e){return e!=null&&e.metaSource!=="seed"&&e.isShared===!1}export{n as a,t as i,o as n,i as r,s as t};

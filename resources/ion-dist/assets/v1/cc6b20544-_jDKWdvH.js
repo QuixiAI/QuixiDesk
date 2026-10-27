@@ -1,0 +1,1 @@
+function e(e){return e?.closedToOtherChats===!1}export{e as t};

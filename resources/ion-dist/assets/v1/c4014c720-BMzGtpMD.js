@@ -1,0 +1,1 @@
+import{U_ as e}from"./shared-52-uHFNjl7C.js";var t=new Set,n=new Set;function r(e,r){r?t.add(e):t.delete(e);for(let e of n)try{e()}catch{}}function i(n){return t.has(e(n))}function a(e){return n.add(e),()=>{n.delete(e)}}export{r as n,a as r,i as t};

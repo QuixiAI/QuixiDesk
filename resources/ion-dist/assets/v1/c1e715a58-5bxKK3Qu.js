@@ -1,0 +1,1 @@
+import{Ha as e,to as t}from"./vendor-frame-CnSY1sxv.js";import{$f as J2,ip as J9,sp as K2}from"./shared-frame-6jtSkIit.js";var n={kind:"native"},r=t(void 0);function i(t){let $=J9(6),{owned:n,sessionId:i,children:a}=t,o=J2($,0,n,i)?K2($,0,n,i,{owned:n,sessionId:i}):$[2];return J2($,3,a,o)?K2($,3,a,o,e(r.Provider,{value:o,children:a})):$[5]}export{r as n,n as r,i as t};

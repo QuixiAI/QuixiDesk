@@ -1,0 +1,1 @@
+import{b as e}from"./vendor-query-DVJ0goAF.js";var t=3e5,n=6e4;function r(){let r;return(i,a)=>(a>=t&&(r=i),r!==void 0&&i-r<n?!1:e.isOnline())}export{r as t};

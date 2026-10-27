@@ -1,0 +1,343 @@
+<!-- this is the html for app title bar and error UI. everything else gets loaded from claude.ai -->
+<!doctype html>
+<!-- CDS token scope stamp, static so every CDS custom property resolves from
+     the first frame (precedent: apps/claude-ai/index.html). data-mode="system"
+     follows the app's saved theme via Electron's nativeTheme. Deliberately no
+     data-font, no CDS text color class, and no inline font size: those change
+     the document's inherited font and color. Add them only when this window's
+     styles are CDS-based. -->
+<html
+  class="cds-root"
+  data-mode="system"
+  data-density="comfortable"
+  data-platform="desktop"
+>
+  <head>
+    <script>(function (placeholder, phase) {
+  try {
+    var root = document.documentElement;
+    var paintShapes = function (shapes, scale) {
+      var host = document.getElementById("boot-placeholder-sidebar-rows");
+      if (!host) {
+        return;
+      }
+      host.textContent = "";
+      for (var i = 0; shapes && i < shapes.length; i++) {
+        var s = shapes[i];
+        var el = document.createElement("div");
+        el.style.top = s.top * scale + "px";
+        el.style.left = s.left * scale + "px";
+        el.style.width = s.width * scale + "px";
+        el.style.height = s.height * scale + "px";
+        el.style.borderRadius = s.radius * scale + "px";
+        host.appendChild(el);
+      }
+    };
+    var paintColors = function (colors) {
+      var painted = [];
+      ["page", "sidebar", "seam"].forEach(function (name) {
+        var c = colors && colors[name];
+        var property = "--boot-placeholder-reported-" + name;
+        if (c) {
+          var rgba = "rgba(" + [c.red, c.green, c.blue, c.alpha].join(",") + ")";
+          root.style.setProperty(property, rgba);
+          painted.push(name);
+        } else {
+          root.style.removeProperty(property);
+        }
+      });
+      if (painted.length) {
+        root.setAttribute("data-boot-placeholder-colors", painted.join(" "));
+      } else {
+        root.removeAttribute("data-boot-placeholder-colors");
+      }
+    };
+    var frame = placeholder && placeholder.frame;
+    if (phase === "body") {
+      var stamped = parseFloat(
+        root.style.getPropertyValue("--boot-placeholder-scale"),
+      );
+      if (root.getAttribute("data-boot-placeholder-frame") === "sidebar") {
+        paintShapes(frame && frame.shapes, stamped > 0 ? stamped : 1);
+      }
+      return;
+    }
+    var create = phase === "head";
+    if (create) {
+      if (!placeholder || placeholder.enabled !== true) {
+        return;
+      }
+      root.setAttribute("data-boot-placeholder", "");
+      root.setAttribute("data-boot-placeholder-drag", "");
+    } else if (!root.hasAttribute("data-boot-placeholder")) {
+      return;
+    }
+    var colors = placeholder.colors;
+    if (
+      create &&
+      colors &&
+      colors.dark !== matchMedia("(prefers-color-scheme: dark)").matches
+    ) {
+      colors = null;
+    }
+    if (colors || !create) {
+      paintColors(colors);
+    }
+    var shown =
+      root.getAttribute("data-boot-placeholder-frame") === "sidebar";
+    root.removeAttribute("data-boot-placeholder-frame");
+    root.style.removeProperty("--boot-placeholder-sidebar-width");
+    paintShapes(null, 1);
+    if (!frame || (!create && !shown)) {
+      return;
+    }
+    var shellZoom = placeholder.shellZoomFactor;
+    if (!(shellZoom > 0)) {
+      shellZoom = 1;
+    }
+    var scale = frame.zoomFactor / shellZoom;
+    if (!(scale > 0)) {
+      return;
+    }
+    var width = window.innerWidth;
+    var collapsed =
+      frame.collapsed ||
+      (width > 0 && width / scale <= frame.narrowViewportMaxWidth);
+    root.style.setProperty("--boot-placeholder-scale", String(scale));
+    if (!collapsed) {
+      root.style.setProperty(
+        "--boot-placeholder-sidebar-width",
+        frame.sidebarWidth * scale + "px",
+      );
+      paintShapes(frame.shapes, scale);
+    }
+    root.setAttribute(
+      "data-boot-placeholder-frame",
+      collapsed ? "collapsed" : "sidebar",
+    );
+  } catch (_e) {}
+})(globalThis.desktopBootPlaceholder, "head");</script>
+
+    <!-- First-frame rules only. The page ground resolves light/dark from
+         nativeTheme via prefers-color-scheme, then from .darkTheme once
+         windowBaseCore runs (values = window-shared.css's
+         --claude-*-color, pinned equal by build/mainWindowFirstFrame.test.ts:
+         these unlayered rules outrank that sheet's @layer base for the
+         document's life; the boot placeholder, when this launch enables it,
+         paints its own ground over this). Tailwind/CDS and the fonts arrive
+         with the lazy MainWindowPage chunk: the shell draws no text and no
+         styled element at rest. -->
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+      }
+      body {
+        background-color: #fcfcfb;
+        color: black;
+      }
+      @media (prefers-color-scheme: dark) {
+        body {
+          background-color: #151515;
+          color: white;
+        }
+      }
+      body.darkTheme {
+        background-color: #151515;
+        color: white;
+      }
+      .nc-no-drag {
+        -webkit-app-region: no-drag;
+      }
+      .nc-drag {
+        -webkit-app-region: drag;
+      }
+    </style>
+    <script type="module" crossorigin src="./assets/main-CFEgSd4i.js"></script>
+    <style>
+  html[data-boot-placeholder] body {
+    background-color: #fcfcfb;
+    --boot-placeholder-sidebar: color-mix(in srgb, #f9f9f7 50%, #fcfcfb);
+    --boot-placeholder-seam: rgba(11, 11, 11, 0.1);
+    --boot-placeholder-row: rgba(11, 11, 11, 0.05);
+  }
+  @media (prefers-color-scheme: dark) {
+    html[data-boot-placeholder] body {
+      background-color: #151515;
+      --boot-placeholder-sidebar: color-mix(in srgb, #151515 80%, black);
+      --boot-placeholder-seam: rgba(255, 255, 255, 0.1);
+      --boot-placeholder-row: rgba(255, 255, 255, 0.075);
+    }
+  }
+  html[data-boot-placeholder] body.darkTheme {
+    background-color: #151515;
+    --boot-placeholder-sidebar: color-mix(in srgb, #151515 80%, black);
+    --boot-placeholder-seam: rgba(255, 255, 255, 0.1);
+    --boot-placeholder-row: rgba(255, 255, 255, 0.075);
+  }
+  html[data-boot-placeholder][data-boot-placeholder-colors~="page"] body {
+    background-color: var(--boot-placeholder-reported-page);
+  }
+  html[data-boot-placeholder][data-boot-placeholder-colors~="sidebar"] body {
+    --boot-placeholder-sidebar: var(--boot-placeholder-reported-sidebar);
+  }
+  html[data-boot-placeholder][data-boot-placeholder-colors~="seam"] body {
+    --boot-placeholder-seam: var(--boot-placeholder-reported-seam);
+  }
+  #boot-placeholder-sidebar {
+    display: none;
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: var(--boot-placeholder-sidebar-width);
+    box-sizing: border-box;
+    border-right: calc(0.5px * var(--boot-placeholder-scale, 1)) solid var(--boot-placeholder-seam);
+    background-color: var(--boot-placeholder-sidebar);
+    pointer-events: none;
+    font-family: system-ui;
+  }
+  html[data-boot-placeholder][data-boot-placeholder-frame="sidebar"] #boot-placeholder-sidebar {
+    display: block;
+  }
+  html[data-boot-placeholder] body:has([data-load-error-overlay]) #boot-placeholder-sidebar {
+    display: none;
+  }
+  #boot-placeholder-sidebar-rows {
+    position: absolute;
+    inset: 0;
+    overflow: hidden;
+  }
+  #boot-placeholder-sidebar-rows > div {
+    position: absolute;
+    background-color: var(--boot-placeholder-row);
+  }
+  #boot-placeholder-drag-strip {
+    display: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: calc(48px * var(--boot-placeholder-scale, 1));
+    -webkit-app-region: drag;
+  }
+  html[data-boot-placeholder][data-boot-placeholder-drag] #boot-placeholder-drag-strip {
+    display: block;
+  }
+</style>
+  </head>
+
+  <body class="light">
+    <div id="boot-placeholder-sidebar" aria-hidden="true">      <div id="boot-placeholder-sidebar-rows"></div>
+</div>
+    <script>(function (placeholder, phase) {
+  try {
+    var root = document.documentElement;
+    var paintShapes = function (shapes, scale) {
+      var host = document.getElementById("boot-placeholder-sidebar-rows");
+      if (!host) {
+        return;
+      }
+      host.textContent = "";
+      for (var i = 0; shapes && i < shapes.length; i++) {
+        var s = shapes[i];
+        var el = document.createElement("div");
+        el.style.top = s.top * scale + "px";
+        el.style.left = s.left * scale + "px";
+        el.style.width = s.width * scale + "px";
+        el.style.height = s.height * scale + "px";
+        el.style.borderRadius = s.radius * scale + "px";
+        host.appendChild(el);
+      }
+    };
+    var paintColors = function (colors) {
+      var painted = [];
+      ["page", "sidebar", "seam"].forEach(function (name) {
+        var c = colors && colors[name];
+        var property = "--boot-placeholder-reported-" + name;
+        if (c) {
+          var rgba = "rgba(" + [c.red, c.green, c.blue, c.alpha].join(",") + ")";
+          root.style.setProperty(property, rgba);
+          painted.push(name);
+        } else {
+          root.style.removeProperty(property);
+        }
+      });
+      if (painted.length) {
+        root.setAttribute("data-boot-placeholder-colors", painted.join(" "));
+      } else {
+        root.removeAttribute("data-boot-placeholder-colors");
+      }
+    };
+    var frame = placeholder && placeholder.frame;
+    if (phase === "body") {
+      var stamped = parseFloat(
+        root.style.getPropertyValue("--boot-placeholder-scale"),
+      );
+      if (root.getAttribute("data-boot-placeholder-frame") === "sidebar") {
+        paintShapes(frame && frame.shapes, stamped > 0 ? stamped : 1);
+      }
+      return;
+    }
+    var create = phase === "head";
+    if (create) {
+      if (!placeholder || placeholder.enabled !== true) {
+        return;
+      }
+      root.setAttribute("data-boot-placeholder", "");
+      root.setAttribute("data-boot-placeholder-drag", "");
+    } else if (!root.hasAttribute("data-boot-placeholder")) {
+      return;
+    }
+    var colors = placeholder.colors;
+    if (
+      create &&
+      colors &&
+      colors.dark !== matchMedia("(prefers-color-scheme: dark)").matches
+    ) {
+      colors = null;
+    }
+    if (colors || !create) {
+      paintColors(colors);
+    }
+    var shown =
+      root.getAttribute("data-boot-placeholder-frame") === "sidebar";
+    root.removeAttribute("data-boot-placeholder-frame");
+    root.style.removeProperty("--boot-placeholder-sidebar-width");
+    paintShapes(null, 1);
+    if (!frame || (!create && !shown)) {
+      return;
+    }
+    var shellZoom = placeholder.shellZoomFactor;
+    if (!(shellZoom > 0)) {
+      shellZoom = 1;
+    }
+    var scale = frame.zoomFactor / shellZoom;
+    if (!(scale > 0)) {
+      return;
+    }
+    var width = window.innerWidth;
+    var collapsed =
+      frame.collapsed ||
+      (width > 0 && width / scale <= frame.narrowViewportMaxWidth);
+    root.style.setProperty("--boot-placeholder-scale", String(scale));
+    if (!collapsed) {
+      root.style.setProperty(
+        "--boot-placeholder-sidebar-width",
+        frame.sidebarWidth * scale + "px",
+      );
+      paintShapes(frame.shapes, scale);
+    }
+    root.setAttribute(
+      "data-boot-placeholder-frame",
+      collapsed ? "collapsed" : "sidebar",
+    );
+  } catch (_e) {}
+})(globalThis.desktopBootPlaceholder, "body");</script>
+    <div id="boot-placeholder-drag-strip"></div>
+
+    <div id="root"></div>
+  </body>
+</html>

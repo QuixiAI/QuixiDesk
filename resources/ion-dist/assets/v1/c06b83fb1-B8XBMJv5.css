@@ -1,0 +1,1 @@
+@keyframes review-scroll-flash{0%{box-shadow:0 0 0 2px color-mix(in srgb, var(--cds-fill-accent) 55%, transparent), 0 0 16px 2px color-mix(in srgb, var(--cds-fill-accent) 25%, transparent)}to{box-shadow:0 0 #0000,0 0 #0000}}.review-scroll-flash{animation:.9s ease-out review-scroll-flash}

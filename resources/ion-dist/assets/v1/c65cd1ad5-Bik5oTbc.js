@@ -1,0 +1,1 @@
+function e(e){if(!e)return e;try{new URL(e)}catch{return e}let t=/^([^:/?#]+:\/\/)([^/\\?#]*)([\s\S]*)$/.exec(e);if(!t)return e;let[,n="",r="",i=""]=t,a=r.lastIndexOf("@")+1;return n.toLowerCase()+r.slice(0,a)+r.slice(a).toLowerCase()+i}export{e as t};

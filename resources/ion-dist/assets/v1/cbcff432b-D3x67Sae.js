@@ -1,0 +1,1 @@
+import{wo as e}from"./vendor-frame-CnSY1sxv.js";import{Qf as J1,Zf as J0,ap as K0,ip as J9,op as K1}from"./shared-frame-6jtSkIit.js";function t(){let $=J9(3),[t,n]=e(0),r=J0($,0)?K0($,0,e=>{n(t=>Math.max(0,t+(e?1:-1)))}):$[0],i=t>0;return J1($,1,i)?K1($,1,i,{onTokenWait:r,waitsForToken:i}):$[2]}export{t};

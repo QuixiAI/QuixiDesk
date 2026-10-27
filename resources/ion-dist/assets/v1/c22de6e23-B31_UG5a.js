@@ -1,0 +1,1 @@
+import{Pl as e,Yr as t,si as n}from"./shared-25-DOWZRSlq.js";import{Va as r}from"./shared-78-D5Fw2h0a.js";import{Ef as i}from"./shared-130-dWztbTO1.js";var a="/admin-settings/sensitivity-labels";function o(){let a=r("basalt_kite"),o=t(e.OrganizationManage),s=n(),c=i();return a&&o&&s&&!c}export{o as n,a as t};

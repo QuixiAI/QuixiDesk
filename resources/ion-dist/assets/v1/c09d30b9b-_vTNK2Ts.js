@@ -1,0 +1,1 @@
+import{Mn as e}from"./shared-19-DIKJVT7c.js";var t=[["cxdir-granular"],e];function n(e,n){return t.flatMap(t=>e.getQueriesData({queryKey:t})).flatMap(([,e])=>r(e)).flatMap(e=>e.plugins).find(e=>e.isRegistry===!0&&e.pluginId===n&&e.omitted===void 0)}function r(e){return e===void 0?[]:"pages"in e?e.pages:[e]}export{n as t};

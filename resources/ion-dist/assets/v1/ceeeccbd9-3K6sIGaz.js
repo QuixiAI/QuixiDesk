@@ -1,0 +1,1 @@
+import{bo as e}from"./vendor-frame-CnSY1sxv.js";import{$f as J2,cp as K3,ip as J9}from"./shared-frame-6jtSkIit.js";function t(t,n){let $=J9(4),r,i;J2($,0,t,n)?(r=()=>{let e=t.current,r=e?.parentElement,i=e?.ownerDocument.activeElement;n&&i===e?r?.focus({preventScroll:!0}):!n&&i===r&&e?.focus({preventScroll:!0})},i=[t,n],K3($,0,t,n,r,i)):(r=$[2],i=$[3]),e(r,i)}export{t};

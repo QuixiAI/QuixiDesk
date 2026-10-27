@@ -1,0 +1,1 @@
+import{fo as e,to as t}from"./vendor-frame-CnSY1sxv.js";import{Ys as n}from"./shared-6-sd9jbJqs.js";var r=t(!1);function i(){let t=e(r);return n()===!1&&t}export{r as n,i as t};

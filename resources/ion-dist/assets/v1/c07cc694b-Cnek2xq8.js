@@ -1,0 +1,1 @@
+import{M_ as e}from"./shared-78-D5Fw2h0a.js";function t(t,n,r){let i=new Date(n);return Number.isNaN(i.getTime())?null:i.getTime()>=r-6e4?"just now":e(t,i,new Date(r))}export{t};

@@ -1,0 +1,155 @@
+/*
+ * Legacy-value pins for the desktop shell documents that still render
+ * pre-CDS (Tailwind v3 era) markup while the CDS pipeline is wired in.
+ * Loaded by each legacy document's HTML AFTER window-shared.css, so every
+ * rule here lands later in source order than the theme.css/tokens.css rule
+ * it overrides, winning at tied specificity; layer names join the layers
+ * the Tailwind build in window-shared.css already declared.
+ *
+ * Removal model: when a surface is rebuilt on CDS components, its document
+ * simply stops importing this file (and any pin whose last consumer that
+ * removes gets deleted here). A rebuilt document then takes every CDS
+ * default (color-scheme, radius tokens, dark-mode weight compensation,
+ * the desktop cursor convention) deliberately and all at once.
+ *
+ * Decided but not pinned here: Tailwind v4's preflight makes untyped
+ * <input> elements transparent (v3 left the UA white). No pin restores
+ * that, because the only untyped inputs in these documents, BuddyWindow's
+ * device-name and pairing-code fields, already carry bg-white, which was
+ * inert under v3 and is load-bearing now; the class is commented as such
+ * in BuddyWindow.tsx so a legacy-utility sweep does not strip it.
+ */
+
+/*
+ * tokens.css (pulled in by theme.css) declares color-scheme on .cds-root
+ * scopes: ".cds-root { color-scheme: light }" at (0,1,0) plus per-mode
+ * rules up to (0,2,0) (".cds-root[data-mode=system]" under a dark OS).
+ * These documents' legacy surfaces assume the default 'normal'; color-
+ * scheme changes the browser's backdrop behind transparent documents and
+ * native form-control and scrollbar rendering under a dark OS. The
+ * selector is (0,2,1) so it outranks every tokens.css color-scheme rule
+ * that can match these documents (the (0,4,0) ancestor-keyed rule needs
+ * a [data-mode=dark] ancestor, which html cannot have); unlayered to sit
+ * with the rules it overrides.
+ */
+html.cds-root[data-mode] {
+  color-scheme: normal;
+}
+
+/* The same documents stay off CDS's dark-mode text weight at the root too: text with no weight
+ * class would otherwise inherit the root's lighter value under a dark OS. */
+html.cds-root[data-mode] {
+  font-variation-settings: normal;
+}
+
+@layer base {
+  /*
+   * theme.css sets a default border color of var(--cds-border) for
+   * everything inside a .cds-root scope; Tailwind v3's default here was
+   * currentColor (this app's palette defines no border DEFAULT). Restore
+   * currentColor at the same specificity, declared later so it wins. No
+   * element paints from this default; it is kept so a color-less border
+   * added to a legacy surface before it migrates keeps the v3 value. CDS
+   * components set their border colors explicitly and are unaffected.
+   */
+  html:where(.cds-root) *,
+  html:where(.cds-root) ::before,
+  html:where(.cds-root) ::after,
+  html :where(.cds-root) *,
+  html :where(.cds-root) ::before,
+  html :where(.cds-root) ::after {
+    border-color: currentColor;
+  }
+}
+
+/*
+ * Buttons in these documents need an explicit pointer cursor: Tailwind v4's
+ * preflight no longer sets one (v3 did), and with the documents now inside a
+ * .cds-root scope stamped data-platform="desktop", @ant/cds's own base rule
+ * resolves its interactive cursor token to "default" (the CDS desktop
+ * convention: arrow on buttons, pointer on links). This rule preserves the
+ * pointer these buttons have always had; selectors are copied verbatim from
+ * Tailwind v3's preflight. A surface rebuilt on CDS components drops this
+ * file and adopts the CDS cursor convention deliberately.
+ */
+@layer base {
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+}
+
+/*
+ * theme.css pins b and strong inside a CDS scope to the CDS bold weight
+ * (600) and, in dark mode, adds variable-font weight compensation; v3
+ * rendered them with the browser's bolder (700) and no variation settings.
+ * No shell markup uses b or strong today; pinned so nothing changes when
+ * one appears before its surface is CDS-based.
+ */
+@layer components {
+  html:where(.cds-root) :is(b, strong),
+  html :where(.cds-root) :is(b, strong) {
+    font-weight: bolder;
+  }
+}
+
+/*
+ * Utility-value pins for the legacy utilities these documents still use.
+ * @ant/cds's theme.css redefines them through CDS tokens, which changes
+ * their computed values: bare rounded becomes var(--cds-radius) (8px at
+ * comfortable density, was 4px), font-bold becomes 600 (was 700), the
+ * mono stack leads with Anthropic Mono, and dark mode adds
+ * font-variation-settings weight compensation to the font-weight
+ * utilities. Declared after the theme.css import so they win within the
+ * utilities layer, restoring the Tailwind v3 values for the surfaces
+ * that still use them.
+ */
+@layer utilities {
+  .rounded {
+    border-radius: 0.25rem;
+  }
+  .font-bold {
+    --tw-font-weight: 700;
+    font-weight: 700;
+  }
+  .font-semibold {
+    --tw-font-weight: 600;
+    font-weight: 600;
+  }
+  .font-normal,
+  .font-medium,
+  .font-semibold,
+  .font-bold,
+  :is(b, strong),
+  :is(.font-normal, .font-medium, .font-semibold) :is(b, strong) {
+    font-variation-settings: normal;
+  }
+  .font-mono {
+    font-family:
+      ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+      "Liberation Mono", "Courier New", monospace;
+  }
+}
+
+/*
+ * Tailwind v4 changed space-y-* semantics: v3 emitted "margin-top on each
+ * following sibling" at class specificity; v4 emits "margin-bottom on every
+ * non-last child" at zero specificity. That changes how the spacing stacks
+ * with a child's own margin utilities: the error overlay's description
+ * sets !mb-2, which under v3 added to the next sibling's space-y margin-top
+ * (16px gap in its flex column, where margins don't collapse) and under v4
+ * merely restates the margin the container already gives (8px). Pin the v3
+ * form for the one spacing the shell uses; the margin-bottom reset
+ * suppresses the v4 rule (a child's own mb-* utility still wins: higher
+ * specificity, and the one current consumer is marked !important).
+ * space-y-2 in ErrorOverlay.tsx is the only space/divide utility in these
+ * documents.
+ */
+@layer utilities {
+  .space-y-2 > :not([hidden]) ~ :not([hidden]) {
+    margin-top: 0.5rem;
+  }
+  .space-y-2 > :not(:last-child) {
+    margin-bottom: 0;
+  }
+}

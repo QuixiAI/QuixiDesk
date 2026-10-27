@@ -1,0 +1,1 @@
+import{no as e}from"./vendor-frame-CnSY1sxv.js";import{hu as t}from"./shared-frame-6jtSkIit.js";import{u as n}from"./cbf215181-B-Z3x9eP.js";function r(r){return i=>e(t,{external:!0,href:n(r)},i)}export{r as t};

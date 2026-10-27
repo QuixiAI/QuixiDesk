@@ -1,0 +1,1 @@
+import{fo as e,to as t}from"./vendor-frame-CnSY1sxv.js";var n=t(null),r=t(null),i=r.Provider;function a(){return e(r)}function o({unifiedPluginsUi:e,inDialog:t,tab:n,listTab:r}){return{listControlsShown:e===!1,yoursFirstRowsShown:e===!0&&n==="shared",onlyYoursShown:e===!0&&t===!0&&r==="mine"}}export{n as i,i as n,a as r,o as t};

@@ -1,0 +1,1 @@
+import{Fx as e}from"./shared-0-DDOOdL6P.js";var t="claude-code-github-app-skipped",n="claude-code-github-auth-skipped";function r(){e.setItem(t,"true")}function i(){return e.getItem(t)==="true"}function a(){e.removeItem(t)}function o(){e.setItem(n,"true")}function s(){return e.getItem(n)==="true"}function c(){e.removeItem(n)}export{r as a,s as i,c as n,o,i as r,a as t};

@@ -1,0 +1,1 @@
+var e="BookClosed";export{e as t};

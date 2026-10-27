@@ -1,0 +1,35 @@
+[package]
+name = "quixi-app"
+version.workspace = true
+edition.workspace = true
+default-run = "QuixiDesk"
+
+[[bin]]
+name = "QuixiDesk"
+path = "src/main.rs"
+
+[dependencies]
+quixi-proto.workspace = true
+quixi-platform.workspace = true
+quixi-workspace.workspace = true
+quixi-mcp.workspace = true
+quixi-netstack.workspace = true
+quixi-engine.workspace = true
+quixi-ipc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+parking_lot.workspace = true
+tao.workspace = true
+wry.workspace = true
+http.workspace = true
+url.workspace = true
+dirs.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc.workspace = true
+cocoa.workspace = true
+block = "0.1"

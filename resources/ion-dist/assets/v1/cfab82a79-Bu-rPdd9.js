@@ -1,0 +1,1 @@
+import{n as e}from"./c2fa036a4-zp5teWgJ.js";function t(t){let{kind:n,target:r}=t;if(n!=="improvement"||r===void 0)return;let i=r.trim();return e(i.startsWith("/")?i.slice(1):i)}export{t};

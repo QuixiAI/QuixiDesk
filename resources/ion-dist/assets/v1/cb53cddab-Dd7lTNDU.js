@@ -1,0 +1,1 @@
+import{Co as e,do as t,ho as n}from"./vendor-frame-CnSY1sxv.js";function r(r,i,a={autoInvoke:!1}){let o=e(null),s=t((...e)=>{o.current||=window.setTimeout(()=>{r(e),o.current=null},i)},[i]),c=t(()=>{o.current&&=(window.clearTimeout(o.current),null)},[]);return n(()=>(a.autoInvoke&&s(),c),[c,s]),{start:s,clear:c}}export{r as t};

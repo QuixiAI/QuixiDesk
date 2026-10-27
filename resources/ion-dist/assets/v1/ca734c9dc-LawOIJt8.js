@@ -1,0 +1,1 @@
+import{Zf as J0,ap as K0,ip as J9}from"./shared-frame-6jtSkIit.js";import{n as e,r as t,t as n}from"./c28d5d643-Bq5tr_RR.js";function r(){let $=J9(1),e=J0($,0)?K0($,0,{beforeRedirect:i}):$[0];return t(e),null}function i(){return e(),n()}export{r as EnterpriseOrgSignOut};import"./ca82bcec9-Dj0q6Mwj.js";

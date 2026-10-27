@@ -1,0 +1,1 @@
+function e(e){let t=1/0;for(let n of e){if(n!==n)return NaN;(n<t||Object.is(n,-0)&&t===0)&&(t=n)}return t}export{e as t};

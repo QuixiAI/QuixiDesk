@@ -1,0 +1,1 @@
+function e(e,t){let n=3;return{handle:e,subscribe:t=>e.onSettled(t),mounts:t,askAgain:()=>{n>0&&!e.resident&&!e.pending&&(--n,e.warm("open"))}}}export{e as t};

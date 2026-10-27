@@ -1,0 +1,1 @@
+import{Yh as e}from"./shared-25-DOWZRSlq.js";function t(t,n){return e("cowork_snapshot_sync")&&!!t&&!!n}export{t};

@@ -1,0 +1,1 @@
+import{Nn as e}from"./shared-0-DDOOdL6P.js";function t(){return!e("conversation_preferences").isAvailable}export{t};

@@ -1,0 +1,1 @@
+import{Br as e}from"./shared-25-DOWZRSlq.js";function t(){return e()?.activeOrganization?.settings?.cobalt_plinth_org_sharing_enabled===!1}export{t};

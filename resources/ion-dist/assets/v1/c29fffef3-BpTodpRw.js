@@ -1,0 +1,1 @@
+var e="/third-party-notices.txt";export{e as t};

@@ -1,0 +1,1 @@
+function e(e){return e==="SendUserMessage"||e==="SendUserFile"}export{e as t};

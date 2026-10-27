@@ -1,0 +1,1 @@
+import{hp as e}from"./shared-78-D5Fw2h0a.js";import{s as t}from"./c45281563-DSOO4Usn.js";function n(n){return!n.isConnected&&n.connector?.isConnecting!==!0&&!(n.connector!==void 0&&e(n.connector))&&t(n.connector)}export{n as t};

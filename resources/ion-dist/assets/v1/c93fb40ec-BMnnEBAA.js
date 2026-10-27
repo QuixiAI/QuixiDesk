@@ -1,0 +1,1 @@
+var e={type:"enterprise_analytics_v0",name:"enterprise_analytics"},t=[e];export{t as n,e as t};

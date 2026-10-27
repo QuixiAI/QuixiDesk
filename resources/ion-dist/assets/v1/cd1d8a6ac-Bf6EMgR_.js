@@ -1,0 +1,1 @@
+var e="--df-pane-corner-end",t="data-pane-corner-end",n={"data-pane-corner-row":""};export{e as n,n as r,t};

@@ -1,0 +1,1 @@
+import{a as e,o as t}from"./cccebd687-DVTfWCSN.js";var n={[e.ACTIVE]:"active",[e.ENDED]:"ended",[e.FAILED]:"failed"};function r(e,r){let i=n[e.displayState];return{unread:r&&i!=="failed",proxied_session:{product:e.product===t.CODE?"code":"cowork",...i===void 0?{}:{display_state:i},...e.sessionId?{session_id:e.sessionId}:{}}}}export{r as t};

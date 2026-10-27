@@ -1,0 +1,1 @@
+import{Jh as e}from"./shared-25-DOWZRSlq.js";var t="admin_onboarding_checklist_steps",n="admin_onboarding_checklist_variant";function r(e){return e==="inline"?"inline":"overlay"}function i(t){let i=e(n,t,"overlay");return t?r(i):"overlay"}export{t as i,r as n,i as r,n as t};

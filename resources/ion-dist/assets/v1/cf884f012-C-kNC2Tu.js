@@ -1,0 +1,1 @@
+function e(e,t){let n;return{kind:"flipbook",name:e,parse(){return n??=JSON.parse(t),n}}}export{e as t};

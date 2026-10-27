@@ -1,0 +1,1 @@
+import{As as e,Os as t}from"./shared-52-uHFNjl7C.js";import{_ as n,o as r}from"./cebf5e0b3-aQDHpNB1.js";function i(i){let a=t(i),o=i instanceof Error?i.message:String(i);return n(r(a)?a:null,e(o))??a}function a(e,t){return e==="ssh_connection_removed"?null:t}export{i as n,a as t};

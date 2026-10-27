@@ -1,0 +1,1 @@
+import{r as e}from"./c16f659b9-Lmh4bP4f.js";import{a as t}from"./c4acc1503-CtuKkx7L.js";function n(n){let r=t(n);r!==null&&e(()=>{window.open(r,"_blank","noopener,noreferrer")})}export{n as t};

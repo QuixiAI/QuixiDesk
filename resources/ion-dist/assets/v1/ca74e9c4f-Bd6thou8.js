@@ -1,0 +1,1 @@
+import{fo as e,ho as t,wo as n}from"./vendor-frame-CnSY1sxv.js";import{F as r,S as i,_ as a}from"./vendor-motion-DlXQpU4V.js";function o(o){let s=r(()=>i(o)),{isStatic:c}=e(a);if(c){let[,e]=n(o);t(()=>s.on("change",e),[])}return s}export{o as t};

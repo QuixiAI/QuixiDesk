@@ -1,0 +1,1 @@
+import{LC as e,PC as t}from"./shared-78-D5Fw2h0a.js";import{r as n}from"./cbfba4a4c-xw5NbPJ_.js";function r(){let e=n(),t=i();return e||t}function i(){let n=t(),{status:r}=e("cobalt_plinth");return n&&r!=="available"}export{r as n,i as t};

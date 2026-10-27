@@ -1,0 +1,1 @@
+import{Ha as e}from"./vendor-frame-CnSY1sxv.js";import{Ci as t,Qf as J1,ip as J9,op as K1}from"./shared-frame-6jtSkIit.js";function n(n){let $=J9(2),r=n;return J1($,0,r)?K1($,0,r,e(t,{"data-cds":"FilterCombobox",variant:"outline",fullWidth:!1,...r})):$[1]}export{n as t};

@@ -1,0 +1,1 @@
+import{da as e,sa as t}from"./shared-52-uHFNjl7C.js";import{Cd as n}from"./shared-156-BLTosN8U.js";function r(r,i,a){return i?.asNotice===!0&&a.error instanceof n&&a.error.reason==="provider_error"&&(r.addInfo(i.message,{timeout:t}),e(i.message,a),!0)}function i(e,t,n,i){r(e,t,i)||e.addError(n,i)}export{i as n,r as t};

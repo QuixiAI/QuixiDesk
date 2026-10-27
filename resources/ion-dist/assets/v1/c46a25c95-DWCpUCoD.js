@@ -1,0 +1,1 @@
+function e(e,t){return e&&t!==null&&!t.storeRelocated}export{e as t};

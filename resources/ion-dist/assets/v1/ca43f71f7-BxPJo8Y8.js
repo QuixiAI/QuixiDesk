@@ -1,0 +1,1 @@
+import{Qf as J1,ip as J9,op as K1}from"./shared-frame-6jtSkIit.js";import{On as e,jn as t,zn as n}from"./shared-0-DDOOdL6P.js";function r(n){if(n)return e(n)?"live":t(n)?"no_answer":"unmarked"}function i(){let $=J9(2),{data:e}=n(),t=J1($,0,e)?K1($,0,e,r(e)):$[1];return(e?.features?.length??0)>0&&(t==="live"||t==="unmarked"&&!0)}export{i as n,r as t};

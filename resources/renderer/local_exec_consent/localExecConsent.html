@@ -1,0 +1,270 @@
+<!doctype html>
+<!--
+  Main-owned confirm for direct-MCP Connect / Disconnect, the standing Chat
+  grant, and 3P's bootstrap-settings prompt, packaged like the app's other
+  windows. Deliberately dependency-free (no windowBase / React): the consent
+  surface must not run any stack the web-origin renderer could influence.
+  Content arrives via query; the page renders it with textContent only.
+  Color values are the resolved CDS tokens (same set as the watch-record
+  chooser). Body copy is not localized yet (only the native window title is).
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <!-- The dark :root --bg/--primary-fg values are pinned to CDS
+         surface-0 dark by apps/claude-ai/surface-sync.test.ts, which also
+         expects the dark :root to be the first rule of the
+         prefers-color-scheme block — keep that ordering. -->
+    <style>
+      :root {
+        --bg: #f9f9f7;
+        --fg: #0b0b0b;
+        --dim: #52514e;
+        --border: rgba(11, 11, 11, 0.1);
+        --hover: rgba(11, 11, 11, 0.05);
+        --hover-strong: rgba(11, 11, 11, 0.1);
+        --warn: rgba(217, 119, 6, 0.08);
+        --warn-border: rgba(217, 119, 6, 0.25);
+        --primary-fg: #f9f9f7;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #0b0b0b;
+          --fg: #ffffff;
+          --dim: #c3c2b7;
+          --border: rgba(255, 255, 255, 0.1);
+          --hover: rgba(255, 255, 255, 0.1);
+          --hover-strong: rgba(255, 255, 255, 0.14);
+          --warn: rgba(245, 158, 11, 0.1);
+          --warn-border: rgba(245, 158, 11, 0.25);
+          --primary-fg: #0b0b0b;
+        }
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+      }
+      body {
+        background: var(--bg);
+        color: var(--fg);
+        font:
+          14px/1.5 "Anthropic Sans Variable",
+          "Anthropic Sans",
+          -apple-system,
+          BlinkMacSystemFont,
+          system-ui,
+          sans-serif;
+        -webkit-font-smoothing: antialiased;
+        display: flex;
+        flex-direction: column;
+        user-select: none;
+      }
+      .dialog {
+        flex: 1;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+      }
+      /* Focused by script (apply opens on it) or a click inside; only controls draw a ring. */
+      .dialog:focus {
+        outline: none;
+      }
+      header {
+        padding: 22px 24px 0;
+      }
+      h1 {
+        font-size: 17px;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+        margin: 0 0 8px;
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        overflow-wrap: anywhere;
+      }
+      h1 svg {
+        width: 20px;
+        height: 20px;
+        flex-shrink: 0;
+      }
+      #title {
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+        unicode-bidi: isolate;
+      }
+      .desc {
+        font-size: 14px;
+        line-height: 1.55;
+        margin: 0;
+        color: var(--dim);
+      }
+      .warn {
+        margin: 14px 24px 0;
+        padding: 11px 13px;
+        border-radius: 8px;
+        background: var(--warn);
+        border: 1px solid var(--warn-border);
+        font-size: 12.5px;
+        display: flex;
+        align-items: flex-start;
+        gap: 9px;
+      }
+      /* The author display:flex above would otherwise beat the UA
+         [hidden] rule, showing the disconnect banner on Connect. */
+      .warn[hidden] {
+        display: none;
+      }
+      .warn svg {
+        width: 14px;
+        height: 14px;
+        margin-top: 2px;
+        flex-shrink: 0;
+      }
+      .ico {
+        stroke: currentColor;
+        fill: none;
+        stroke-width: 1.5;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+      .body-scroll {
+        flex: 1;
+        min-height: 0;
+        overflow-y: auto;
+      }
+      #trust-note {
+        margin: 12px 24px 0;
+      }
+      .targets {
+        margin: 14px 24px 0;
+        padding: 12px 14px;
+        border-radius: 8px;
+        border: 1px solid var(--border);
+        font-size: 12px;
+        list-style: none;
+      }
+      .targets[hidden] {
+        display: none;
+      }
+      .targets li + li {
+        margin-top: 8px;
+      }
+      /* pre-wrap, here and on .detail: a run of spaces is shown as written, not folded into one. */
+      .targets summary {
+        cursor: pointer;
+        overflow-wrap: anywhere;
+        unicode-bidi: plaintext;
+        white-space: pre-wrap;
+      }
+      /* App-derived origin of a URL row: its own element, so an org-authored
+         name can't be written to look like one. */
+      .targets .origin {
+        display: inline-block;
+        margin-left: 6px;
+        padding: 0 5px;
+        border-radius: 4px;
+        background: var(--hover-strong);
+        font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+        font-size: 11px;
+        max-width: 100%;
+        overflow-wrap: anywhere;
+        unicode-bidi: isolate;
+      }
+      .targets .detail {
+        margin: 4px 0 0 16px;
+        color: var(--dim);
+        font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+        overflow-wrap: anywhere;
+        unicode-bidi: plaintext;
+        white-space: pre-wrap;
+      }
+      .actions {
+        display: flex;
+        flex-shrink: 0;
+        gap: 10px;
+        justify-content: flex-end;
+        padding: 0 24px 20px;
+        margin-top: 18px;
+      }
+      .btn {
+        font: inherit;
+        font-size: 13px;
+        font-weight: 500;
+        padding: 8px 16px;
+        border-radius: 8px;
+        cursor: pointer;
+        border: none;
+      }
+      .btn:focus-visible {
+        outline: 2px solid var(--fg);
+        outline-offset: 2px;
+      }
+      #cancel {
+        background: var(--hover);
+        color: var(--fg);
+      }
+      #cancel:enabled:hover {
+        background: var(--hover-strong);
+      }
+      #allow {
+        background: var(--fg);
+        color: var(--primary-fg);
+      }
+      #allow:enabled:hover {
+        opacity: 0.9;
+      }
+      /* Input protection: held disabled until the page arms them after main's LOCAL_EXEC_CONSENT_INPUT_PROTECTION_MS. */
+      .btn:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+    </style>
+    <script type="module" crossorigin src="./assets/main-8O6S3MaN.js"></script>
+  </head>
+  <body>
+    <div
+      class="dialog"
+      id="dialog"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="title"
+      aria-describedby="desc"
+      tabindex="-1"
+    >
+      <header>
+        <h1>
+          <svg class="ico" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7" />
+            <path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7" />
+          </svg>
+          <span id="title"></span>
+        </h1>
+        <p class="desc" id="desc"></p>
+      </header>
+      <div class="body-scroll">
+        <div class="warn" id="warn" hidden>
+          <svg class="ico" viewBox="0 0 24 24" aria-hidden="true">
+            <rect x="5" y="11" width="14" height="9" rx="2" />
+            <path d="M8 11V8a4 4 0 0 1 8 0v3" />
+          </svg>
+          <span
+            >Disconnecting clears the stored credentials for this connector on
+            this device.</span
+          >
+        </div>
+        <ul class="targets" id="targets" hidden></ul>
+        <p class="desc" id="trust-note" hidden></p>
+      </div>
+      <div class="actions">
+        <button class="btn" id="cancel" type="button">Cancel</button>
+        <button class="btn" id="allow" type="button" disabled></button>
+      </div>
+    </div>
+  </body>
+</html>

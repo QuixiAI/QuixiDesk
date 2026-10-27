@@ -1,0 +1,1 @@
+function e(e){return e==="SURFACE_SESSION_GROUPING"||e==="SURFACE_HEARTH"}function t(t){return!t.is_silo&&t.created_by_account_uuid!=="00000000-0000-0000-0000-000000000000"&&!e(t.surface)}function n(e){return e.filter(t).sort((e,t)=>(e.created_at??"9999").localeCompare(t.created_at??"9999"))[0]}var r={slug:"claude",display_name:"Claude",is_silo:!1};export{n,e as r,r as t};

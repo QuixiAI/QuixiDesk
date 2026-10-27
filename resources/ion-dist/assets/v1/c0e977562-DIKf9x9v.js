@@ -1,0 +1,1 @@
+import{Lr as e}from"./shared-25-DOWZRSlq.js";function t(){return e()}function n(t){let n=e(t);return t&&n}export{t as n,n as t};

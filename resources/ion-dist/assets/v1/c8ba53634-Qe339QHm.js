@@ -1,0 +1,1 @@
+var e="--cds-assistant-message-text-inset",t="ps-[var(--cds-assistant-message-text-inset,0px)]",n="[--cds-assistant-message-text-inset:0px] [--cds-assistant-message-text-stop:0px]",r="ms-[calc(var(--cds-assistant-message-text-inset,0px)_-_6px)]";export{e as i,t as n,n as r,r as t};

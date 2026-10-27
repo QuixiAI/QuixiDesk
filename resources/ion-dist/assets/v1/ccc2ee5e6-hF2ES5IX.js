@@ -1,0 +1,1 @@
+import{f as e}from"./vendor-intl-DYfox5Co.js";var t=e({need_to_know:{defaultMessage:"Confidential NTK",id:"pl6TkoR5Iz"}}),n=e({other:{defaultMessage:"Label",id:"bwZo4FMOuo"}});function r(e){return e==="need_to_know"?t.need_to_know:n.other}export{r as t};

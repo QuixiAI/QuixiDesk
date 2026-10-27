@@ -1,0 +1,1 @@
+function e(e,{start:t,end:n}){return t===n?e.formatMessage({defaultMessage:"Add comment on line {line}",id:"jUVibH9vnU"},{line:t}):e.formatMessage({defaultMessage:"Add comment on lines {start}\u2013{end}",id:"ZlOT/dcEsK"},{start:t,end:n})}export{e as t};

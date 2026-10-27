@@ -1,0 +1,1 @@
+function e(e){return`/login?returnTo=${encodeURIComponent(e)}`}export{e as t};

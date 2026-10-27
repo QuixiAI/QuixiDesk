@@ -1,0 +1,1 @@
+import{x as e}from"./shared-52-uHFNjl7C.js";import{g as t}from"./c94ec092e-BPbTEAw8.js";function n(n){return t({owner:null,publisher:e(n.author?.name??"").trim(),repository:n.type==="plugin"&&n.isGember!==!0?n.repository?.label:void 0})}export{n as t};

@@ -1,0 +1,1 @@
+var e={"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"};function t(t){return t.replace(/[&<>"']/g,t=>e[t])}export{t};

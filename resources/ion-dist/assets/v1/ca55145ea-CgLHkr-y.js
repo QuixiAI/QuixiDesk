@@ -1,0 +1,1 @@
+import{Ix as e}from"./shared-0-DDOOdL6P.js";var t="team_signup_source",n="team_signup_flow",r="flow",i="team_signup",a="/create/team/name",o=`/create/team/verify?${r}=${i}`;function s(e){return e.get(r)===i}function c(r){return e.getItem(t)===n||s(r)}function l(e){return c(e)?`${a}?${r}=${i}`:a}function u(r){s(r)&&e.setItem(t,n)}export{u as i,c as n,l as r,o as t};

@@ -1,0 +1,1 @@
+import{a as e}from"./vendor-markdown-CTRWgQFt.js";function t(t){e(t,[/\r?\n|\r/g,n])}function n(){return{type:"break"}}function r(){return function(e){t(e)}}export{r as t};

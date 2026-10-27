@@ -1,0 +1,1 @@
+import{ho as e}from"./vendor-frame-CnSY1sxv.js";import{ep as J3,ip as J9,lp as K4}from"./shared-frame-6jtSkIit.js";import{p as t}from"./vendor-query-DVJ0goAF.js";import{r as n}from"./c07c94932-WjZFrmIj.js";function r(r,i,a){let $=J9(5),o=t(),s=a||i!==void 0&&i!=="owner",c,l;J3($,0,r,s,o)?(c=()=>{r&&s&&n(o,r)},l=[r,s,o],K4($,0,r,s,o,c,l)):(c=$[3],l=$[4]),e(c,l)}export{r as t};

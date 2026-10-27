@@ -1,0 +1,1 @@
+import{Qx as e}from"./shared-0-DDOOdL6P.js";function t(t){let n=e(t),r=typeof t=="string"?t.indexOf("#"):-1;return r===-1?n:`${n}${t.slice(r)}`}export{t};

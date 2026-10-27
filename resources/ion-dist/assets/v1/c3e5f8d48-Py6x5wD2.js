@@ -1,0 +1,1 @@
+function e(e,t){let n=Date.parse(t);if(Number.isNaN(n))return!0;let r=e?Date.parse(e):NaN;return!Number.isNaN(r)&&r>=n}export{e as t};

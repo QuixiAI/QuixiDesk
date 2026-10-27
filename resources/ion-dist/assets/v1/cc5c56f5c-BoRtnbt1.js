@@ -1,0 +1,1 @@
+import{Ha as e}from"./vendor-frame-CnSY1sxv.js";var t={side:"bottom",align:"start",className:"max-w-[min(480px,var(--available-width))]"};function n(t){return e("span",{dir:"ltr",children:t.split(/(?<=[\\/])/).map((t,n)=>e("span",{className:"inline-block max-w-full whitespace-pre-wrap",children:t},n))})}export{n,t};

@@ -1,0 +1,1 @@
+import{f as e}from"./vendor-intl-DYfox5Co.js";var t=e({label:{defaultMessage:"Create a doc",id:"bX/Xs8XkwO"},prompt:{defaultMessage:"Create a QuixiDesk Doc from your last answer.",id:"+UUU0Qi+dV"}});export{t};

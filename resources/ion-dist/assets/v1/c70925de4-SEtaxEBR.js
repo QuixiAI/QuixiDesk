@@ -1,0 +1,1 @@
+import{ap as e}from"./shared-25-DOWZRSlq.js";function t(t){let n=e(t),r=n.activeElement;return r===null||r===n.body}export{t};

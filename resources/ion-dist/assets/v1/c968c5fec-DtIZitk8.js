@@ -1,0 +1,1 @@
+var e=globalThis["claude.engineSurface"]?.EngineSurface;export{e as t};

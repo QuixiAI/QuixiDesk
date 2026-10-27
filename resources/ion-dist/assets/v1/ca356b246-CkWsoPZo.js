@@ -1,0 +1,1 @@
+import{Ha as e}from"./vendor-frame-CnSY1sxv.js";import{Kf as I1,Qf as J1,ip as J9}from"./shared-frame-6jtSkIit.js";import{n as t,t as n}from"./c7fc299f5-68EY1Cre.js";function r(r){let $=J9(2);return n(r),J1($,0,r.boot)?I1($,0,e(t,{boot:r.boot}),r.boot):$[1]}export{r as EpitaxyArtifactPanelSendTo};import"./cd6016df4-BctDijcF.js";import"./c363f4872-kRTAfCeZ.js";
