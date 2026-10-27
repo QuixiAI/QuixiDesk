@@ -2881,6 +2881,244 @@ impl ProviderManager {
     }
 }
 
+/// One tool call requested by the model.
+#[derive(Debug, Clone)]
+pub struct ProviderToolCall {
+    pub id: String,
+    pub name: String,
+    pub arguments: String,
+}
+
+/// The full result of one assistant turn that was allowed to call tools.
+#[derive(Debug, Clone)]
+pub struct ProviderToolTurn {
+    pub text: String,
+    pub thinking: String,
+    pub tool_calls: Vec<ProviderToolCall>,
+    pub provider_name: String,
+    pub model_id: String,
+}
+
+impl ProviderManager {
+    /// Runs one streaming chat turn with OpenAI-style `tools` and returns the visible text
+    /// plus every tool call the model asked for. Only the OpenAI-compatible providers are
+    /// supported (DeepSeek, OpenRouter, Groq, Mistral, Together, Fireworks, Cerebras,
+    /// Perplexity, Cohere, Gemini, local Ollama/LM Studio, and custom endpoints);
+    /// Anthropic-format and Codex-OAuth providers fall back to the tool-less path.
+    pub fn complete_turn_with_tools<F>(
+        &self,
+        messages: &[Value],
+        tools: &Value,
+        model_override: Option<&str>,
+        mut on_chunk: F,
+    ) -> Option<ProviderToolTurn>
+    where
+        F: FnMut(StreamChunk),
+    {
+        use std::io::{BufRead, BufReader};
+
+        let resolved_model = self.resolve_connected_model(model_override);
+        let (provider_id, provider_name, model_id, base_url, api_format, auth_mode, credential) = {
+            let st = self.state.read();
+            let entry = st
+                .providers
+                .iter()
+                .find(|p| {
+                    p.configured
+                        && (p.selected_model == resolved_model
+                            || p.models.iter().any(|m| {
+                                m.id == resolved_model && Self::is_model_available_for_provider(p, m)
+                            }))
+                })
+                .or_else(|| {
+                    st.providers
+                        .iter()
+                        .find(|p| p.id == st.active_provider && p.configured)
+                })
+                .or_else(|| st.providers.iter().find(|p| p.configured))?;
+
+            let cred = if entry.auth_mode == "oauth" && !entry.oauth_access_token.is_empty() {
+                entry.oauth_access_token.clone()
+            } else {
+                entry.api_key_raw.clone()
+            };
+            let chosen_model = if entry.models.iter().any(|m| m.id == resolved_model)
+                || entry.selected_model == resolved_model
+            {
+                resolved_model
+            } else {
+                entry.selected_model.clone()
+            };
+            (
+                entry.id.clone(),
+                entry.name.clone(),
+                chosen_model,
+                entry.base_url.trim_end_matches('/').to_string(),
+                entry.api_format.clone(),
+                entry.auth_mode.clone(),
+                cred,
+            )
+        };
+
+        if api_format != "openai"
+            || base_url.is_empty()
+            || credential.starts_with("oauth_")
+            || (credential.is_empty() && auth_mode != "local" && provider_id != "custom")
+        {
+            return None;
+        }
+
+        let http = reqwest::blocking::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(15))
+            .timeout(std::time::Duration::from_secs(300))
+            .build()
+            .ok()?;
+
+        tracing::info!(
+            provider = %provider_id,
+            model = %model_id,
+            messages = messages.len(),
+            "agent tools: streaming tool-calling turn"
+        );
+        let url = format!("{}/chat/completions", base_url);
+        let mut req = http
+            .post(&url)
+            .header("content-type", "application/json")
+            .header("accept", "text/event-stream");
+        if !credential.is_empty() {
+            req = req.header("Authorization", format!("Bearer {}", credential));
+        }
+        if provider_id == "openrouter" {
+            req = req
+                .header("HTTP-Referer", "https://quixidesk.local")
+                .header("X-Title", "QuixiDesk");
+        }
+
+        let resp = match req
+            .json(&json!({
+                "model": model_id,
+                "messages": messages,
+                "tools": tools,
+                "tool_choice": "auto",
+                "stream": true
+            }))
+            .send()
+        {
+            Ok(resp) => resp,
+            Err(err) => {
+                on_chunk(StreamChunk::Text(format!(
+                    "\n\n⚠️ {} unreachable: {err}",
+                    provider_name
+                )));
+                return None;
+            }
+        };
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().unwrap_or_default();
+            on_chunk(StreamChunk::Text(format!(
+                "⚠️ {} returned HTTP {} for model `{}`: {}",
+                provider_name,
+                status.as_u16(),
+                model_id,
+                body.chars().take(400).collect::<String>()
+            )));
+            return None;
+        }
+
+        let mut text = String::new();
+        let mut thinking = String::new();
+        let mut calls: Vec<ProviderToolCall> = Vec::new();
+        let reader = BufReader::new(resp);
+        for line in reader.lines().map_while(Result::ok) {
+            let trimmed = line.trim();
+            let Some(data_str) = trimmed.strip_prefix("data:") else {
+                continue;
+            };
+            let data_str = data_str.trim();
+            if data_str.is_empty() || data_str == "[DONE]" {
+                continue;
+            }
+            let Ok(ev) = serde_json::from_str::<Value>(data_str) else {
+                continue;
+            };
+            let delta = ev.pointer("/choices/0/delta");
+
+            if let Some(th) = delta
+                .and_then(|d| d.get("reasoning_content").or_else(|| d.get("reasoning")))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+            {
+                thinking.push_str(th);
+                on_chunk(StreamChunk::Thinking(th.to_string()));
+            }
+            if let Some(t) = delta
+                .and_then(|d| d.get("content"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+            {
+                text.push_str(t);
+                on_chunk(StreamChunk::Text(t.to_string()));
+            }
+            if let Some(arr) = delta.and_then(|d| d.get("tool_calls")).and_then(|v| v.as_array()) {
+                for (idx, tc) in arr.iter().enumerate() {
+                    let index = tc
+                        .get("index")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(idx as u64) as usize;
+                    while calls.len() <= index {
+                        calls.push(ProviderToolCall {
+                            id: String::new(),
+                            name: String::new(),
+                            arguments: String::new(),
+                        });
+                    }
+                    let slot = &mut calls[index];
+                    if let Some(id) = tc.get("id").and_then(|v| v.as_str()) {
+                        if !id.is_empty() {
+                            slot.id = id.to_string();
+                        }
+                    }
+                    if let Some(fname) = tc.pointer("/function/name").and_then(|v| v.as_str()) {
+                        if !fname.is_empty() {
+                            slot.name = fname.to_string();
+                        }
+                    }
+                    if let Some(args) = tc.pointer("/function/arguments").and_then(|v| v.as_str()) {
+                        slot.arguments.push_str(args);
+                    }
+                }
+            }
+        }
+
+        let tool_calls: Vec<ProviderToolCall> = calls
+            .into_iter()
+            .filter(|c| !c.name.is_empty())
+            .map(|mut c| {
+                if c.id.is_empty() {
+                    c.id = format!("call_{}", &Uuid::new_v4().to_string().replace('-', "")[..16]);
+                }
+                c
+            })
+            .collect();
+
+        tracing::info!(
+            text_chars = text.len(),
+            thinking_chars = thinking.len(),
+            tool_calls = tool_calls.len(),
+            "agent tools: turn finished"
+        );
+        Some(ProviderToolTurn {
+            text,
+            thinking,
+            tool_calls,
+            provider_name,
+            model_id,
+        })
+    }
+}
+
 #[cfg(test)]
 mod provider_catalog_tests {
     use super::ProviderManager;
