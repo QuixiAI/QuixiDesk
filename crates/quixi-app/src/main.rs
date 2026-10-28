@@ -26,6 +26,14 @@ use tao::platform::macos::WindowBuilderExtMacOS;
 #[cfg(target_os = "macos")]
 use wry::WebViewExtMacOS;
 
+#[cfg(target_os = "macos")]
+static MENU_PROXY: std::sync::OnceLock<std::sync::Mutex<tao::event_loop::EventLoopProxy<UserEvent>>> = std::sync::OnceLock::new();
+
+#[cfg(target_os = "macos")]
+extern "C" fn open_settings_menu(_: &objc::runtime::Object, _: objc::runtime::Sel, _: cocoa::base::id) {
+    if let Some(proxy) = MENU_PROXY.get() { let _ = proxy.lock().unwrap().send_event(UserEvent::OpenSettings); }
+}
+
 /// Installs a native macOS `NSMenu` bar (`QuixiDesk`, `Edit`, `Window`) on `NSApp` so that
 /// standard AppKit responder selectors (`copy:` Cmd+C, `paste:` Cmd+V, `cut:` Cmd+X,
 /// `selectAll:` Cmd+A, `undo:` Cmd+Z, `redo:` Cmd+Shift+Z, `terminate:` Cmd+Q, `hide:` Cmd+H,
@@ -54,6 +62,23 @@ fn setup_macos_main_menu() {
         let app_menu = NSMenu::alloc(nil)
             .initWithTitle_(NSString::alloc(nil).init_str("QuixiDesk"))
             .autorelease();
+
+        let about = NSMenuItem::alloc(nil).initWithTitle_action_keyEquivalent_(
+            NSString::alloc(nil).init_str("About QuixiDesk"), sel!(orderFrontStandardAboutPanel:),
+            NSString::alloc(nil).init_str("")).autorelease();
+        app_menu.addItem_(about);
+        let cls = objc::runtime::Class::get("QuixiDeskMenuActions").unwrap_or_else(|| {
+            let mut decl = objc::declare::ClassDecl::new("QuixiDeskMenuActions", objc::class!(NSObject)).unwrap();
+            decl.add_method(sel!(openSettings:), open_settings_menu as extern "C" fn(&objc::runtime::Object, objc::runtime::Sel, id));
+            decl.register()
+        });
+        let target: id = msg_send![cls, new];
+        let settings = NSMenuItem::alloc(nil).initWithTitle_action_keyEquivalent_(
+            NSString::alloc(nil).init_str("Settings…"), sel!(openSettings:),
+            NSString::alloc(nil).init_str(",")).autorelease();
+        let _: () = msg_send![settings, setTarget: target];
+        app_menu.addItem_(settings);
+        app_menu.addItem_(NSMenuItem::separatorItem(nil));
 
         let hide_title = NSString::alloc(nil).init_str("Hide QuixiDesk");
         let hide_key = NSString::alloc(nil).init_str("h");
@@ -192,11 +217,59 @@ fn setup_macos_main_menu() {
     }
 }
 
+/// Present an app-owned sheet, without AppleScript/Finder automation permissions.
+#[cfg(target_os = "macos")]
+#[allow(deprecated, unexpected_cfgs)]
+fn show_folder_sheet(window: &tao::window::Window, prompt: &str, multiple: bool,
+    tx: std::sync::mpsc::Sender<Vec<String>>) {
+    use cocoa::appkit::{NSApp, NSApplication};
+    use cocoa::base::{id, nil, YES, NO};
+    use cocoa::foundation::NSString;
+    use objc::{class, msg_send, sel, sel_impl};
+    use tao::platform::macos::WindowExtMacOS;
+    unsafe {
+        let parent = window.ns_window() as id;
+        let existing: id = msg_send![parent, attachedSheet];
+        if existing != nil { let _ = tx.send(vec![]); return; }
+        let panel: id = msg_send![class!(NSOpenPanel), openPanel];
+        let _: () = msg_send![panel, setCanChooseDirectories: YES];
+        let _: () = msg_send![panel, setCanChooseFiles: NO];
+        let _: () = msg_send![panel, setAllowsMultipleSelection: if multiple { YES } else { NO }];
+        let _: () = msg_send![panel, setCanCreateDirectories: YES];
+        let message = NSString::alloc(nil).init_str(prompt);
+        let _: () = msg_send![panel, setMessage: message];
+        let _: () = msg_send![message, release];
+        NSApp().activateIgnoringOtherApps_(YES);
+        let panel_address = panel as usize;
+        let handler = block::ConcreteBlock::new(move |response: isize| {
+            let mut paths = vec![];
+            if response == 1 {
+                let urls: id = msg_send![panel_address as id, URLs];
+                let count: usize = msg_send![urls, count];
+                for index in 0..count {
+                    let url: id = msg_send![urls, objectAtIndex: index];
+                    let path: id = msg_send![url, path];
+                    let utf8: *const std::ffi::c_char = msg_send![path, UTF8String];
+                    if !utf8.is_null() { paths.push(std::ffi::CStr::from_ptr(utf8).to_string_lossy().into_owned()); }
+                }
+            }
+            let _ = tx.send(paths);
+        }).copy();
+        let _: () = msg_send![panel, beginSheetModalForWindow: parent completionHandler: &*handler];
+    }
+}
+
 #[derive(Debug, Clone)]
 enum UserEvent {
+    OpenSettings,
     EmitIpc {
         channel: String,
         payload: Value,
+    },
+    PickFolders {
+        prompt: String,
+        multiple: bool,
+        tx: std::sync::mpsc::Sender<Vec<String>>,
     },
     DragWindow,
     ToggleMaximize,
@@ -356,6 +429,11 @@ fn start_automation_http_server(proxy: tao::event_loop::EventLoopProxy<UserEvent
 
                 let hdr_end = header_end.unwrap_or(buf.len());
                 let req_header = String::from_utf8_lossy(&buf[..hdr_end]);
+                // The local automation bridge is for native clients, never web content.
+                if req_header.lines().any(|line| line.split_once(':').is_some_and(|(key, _)| key.trim().eq_ignore_ascii_case("origin"))) {
+                    let _ = stream.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                    return;
+                }
                 let first_line = req_header.lines().next().unwrap_or("");
                 let mut parts = first_line.split_whitespace();
                 let method = parts.next().unwrap_or("GET").to_uppercase();
@@ -534,7 +612,7 @@ fn build_http_response(
     Response::builder()
         .status(StatusCode::from_u16(status).unwrap_or(StatusCode::OK))
         .header(CONTENT_TYPE, content_type)
-        .header("Access-Control-Allow-Origin", "*")
+        .header("Access-Control-Allow-Origin", "app://localhost")
         .header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
         .header("Access-Control-Allow-Headers", "*")
         .header("Cache-Control", "no-cache")
@@ -623,6 +701,8 @@ fn main() -> anyhow::Result<()> {
     let router = Arc::new(EipcRouter::new(engine.clone()));
 
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
+    #[cfg(target_os = "macos")]
+    let _ = MENU_PROXY.set(std::sync::Mutex::new(event_loop.create_proxy()));
     let proxy = event_loop.create_proxy();
 
     #[cfg(target_os = "macos")]
@@ -1255,12 +1335,25 @@ fn main() -> anyhow::Result<()> {
     );
 
     init_script.push_str(include_str!("provider_ui.js"));
+    init_script.push_str(include_str!("local_artifacts_ui.js"));
 
     // The E2E harness needs the live workspace root, not a baked-in developer path.
     init_script = init_script.replace(
         "__QUIXI_WORKSPACE__",
         quixi_proto::paths::default_workspace_str(),
     );
+
+    #[cfg(target_os = "macos")]
+    {
+        let picker_proxy = proxy.clone();
+        quixi_platform::set_folder_picker(Arc::new(move |prompt, multiple| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            if picker_proxy.send_event(UserEvent::PickFolders {
+                prompt: prompt.unwrap_or("Choose a folder").to_string(), multiple, tx,
+            }).is_err() { return vec![]; }
+            rx.recv().unwrap_or_default()
+        }));
+    }
 
     let protocol_resources = resources_dir.clone();
     let protocol_engine = engine.clone();
@@ -1271,129 +1364,146 @@ fn main() -> anyhow::Result<()> {
 
     let webview = WebViewBuilder::new()
         .with_user_agent(user_agent)
-        .with_initialization_script(&init_script)
+        .with_initialization_script_for_main_only(&init_script, true)
         .with_devtools(true)
         .with_clipboard(true)
-        .with_custom_protocol("app".into(), move |_webview_id, request| {
-            let method = request.method().as_str().to_uppercase();
-            let uri = request.uri();
-            let path = uri.path();
-            let path_and_query = uri
-                .path_and_query()
-                .map(|pq| pq.as_str())
-                .unwrap_or(path);
-
-            if method == "OPTIONS" {
-                return build_http_response(204, "text/plain", Vec::new());
-            }
-
-            // 1. Native Window Actions, Clipboard & Diagnostics
-            if path == "/__eipc__/diag" {
-                if let Ok(val) = serde_json::from_slice::<Value>(request.body()) {
-                    tracing::info!("[WebView Diag] {}", val);
-                    let _ = std::io::Write::flush(&mut std::io::stdout());
+        .with_asynchronous_custom_protocol("app".into(), move |_webview_id, request, responder| {
+            let protocol_resources = protocol_resources.clone();
+            let protocol_engine = protocol_engine.clone();
+            let protocol_router = protocol_router.clone();
+            let protocol_proxy = protocol_proxy.clone();
+            let is_ipc = request.uri().path().starts_with("/__eipc__/");
+            let handle = move || {
+                let method = request.method().as_str().to_uppercase();
+                let uri = request.uri();
+                let path = uri.path();
+                // Opaque sandbox frames and remote websites must never invoke app APIs.
+                if request.headers().get("Origin").is_some_and(|v| v != "app://localhost") {
+                    return build_http_response(403, "text/plain", b"Untrusted origin".to_vec());
                 }
-                return build_http_response(200, "application/json", b"{\"ok\":true}".to_vec());
-            }
+                let path_and_query = uri
+                    .path_and_query()
+                    .map(|pq| pq.as_str())
+                    .unwrap_or(path);
 
-            if path == "/__eipc__/clipboard" {
-                if let Ok(body_val) = serde_json::from_slice::<Value>(request.body()) {
-                    match body_val.get("action").and_then(|v| v.as_str()).unwrap_or("") {
-                        "write" => {
-                            let text = body_val
-                                .get("text")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("");
-                            let _ = quixi_platform::ComputerUse::write_clipboard(text);
+                if method == "OPTIONS" {
+                    return build_http_response(204, "text/plain", Vec::new());
+                }
+
+                // 1. Native Window Actions, Clipboard & Diagnostics
+                if path == "/__eipc__/diag" {
+                    if let Ok(val) = serde_json::from_slice::<Value>(request.body()) {
+                        tracing::info!("[WebView Diag] {}", val);
+                        let _ = std::io::Write::flush(&mut std::io::stdout());
+                    }
+                    return build_http_response(200, "application/json", b"{\"ok\":true}".to_vec());
+                }
+
+                if path == "/__eipc__/clipboard" {
+                    if let Ok(body_val) = serde_json::from_slice::<Value>(request.body()) {
+                        match body_val.get("action").and_then(|v| v.as_str()).unwrap_or("") {
+                            "write" => {
+                                let text = body_val
+                                    .get("text")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                let _ = quixi_platform::ComputerUse::write_clipboard(text);
+                                return build_http_response(
+                                    200,
+                                    "application/json; charset=utf-8",
+                                    b"{\"ok\":true}".to_vec(),
+                                );
+                            }
+                            "read" => {
+                                let text = quixi_platform::ComputerUse::read_clipboard();
+                                let resp = serde_json::json!({ "ok": true, "text": text });
+                                return build_http_response(
+                                    200,
+                                    "application/json; charset=utf-8",
+                                    serde_json::to_vec(&resp).unwrap_or_else(|_| b"{}".to_vec()),
+                                );
+                            }
+                            _ => {}
+                        }
+                    }
+                    return build_http_response(200, "application/json", b"{\"ok\":true}".to_vec());
+                }
+
+                if path == "/__eipc__/window-action" {
+                    if let Ok(body_val) = serde_json::from_slice::<Value>(request.body()) {
+                        match body_val.get("action").and_then(|v| v.as_str()).unwrap_or("") {
+                            "drag" => {
+                                let _ = protocol_proxy.send_event(UserEvent::DragWindow);
+                            }
+                            "toggle_maximize" => {
+                                let _ = protocol_proxy.send_event(UserEvent::ToggleMaximize);
+                            }
+                            "minimize" => {
+                                let _ = protocol_proxy.send_event(UserEvent::MinimizeWindow);
+                            }
+                            "close" => {
+                                let _ = protocol_proxy.send_event(UserEvent::CloseWindow);
+                            }
+                            _ => {}
+                        }
+                    }
+                    return build_http_response(200, "application/json", b"{\"ok\":true}".to_vec());
+                }
+
+                // 2. `$eipc_message$` RPC & Sync Store Bridge (`/__eipc__/invoke`, `/__eipc__/sync`, `/__eipc__/send`)
+                if path.starts_with("/__eipc__/") {
+                    match serde_json::from_slice::<EipcInvokePayload>(request.body()) {
+                        Ok(payload) => {
+                            if payload.channel.contains("WindowControl_$_minimize") {
+                                let _ = protocol_proxy.send_event(UserEvent::MinimizeWindow);
+                            } else if payload.channel.contains("WindowControl_$_maximize") {
+                                let _ = protocol_proxy.send_event(UserEvent::ToggleMaximize);
+                            } else if payload.channel.contains("WindowControl_$_close") {
+                                let _ = protocol_proxy.send_event(UserEvent::CloseWindow);
+                            }
+                            let reply = protocol_router.dispatch(&payload);
+                            let bytes = serde_json::to_vec(&reply).unwrap_or_else(|_| b"{}".to_vec());
+                            return build_http_response(200, "application/json; charset=utf-8", bytes);
+                        }
+                        Err(err) => {
+                            let err_json = serde_json::json!({
+                                "error": { "message": format!("Invalid EIPC payload: {}", err) }
+                            });
                             return build_http_response(
-                                200,
+                                400,
                                 "application/json; charset=utf-8",
-                                b"{\"ok\":true}".to_vec(),
+                                serde_json::to_vec(&err_json).unwrap_or_default(),
                             );
                         }
-                        "read" => {
-                            let text = quixi_platform::ComputerUse::read_clipboard();
-                            let resp = serde_json::json!({ "ok": true, "text": text });
-                            return build_http_response(
-                                200,
-                                "application/json; charset=utf-8",
-                                serde_json::to_vec(&resp).unwrap_or_else(|_| b"{}".to_vec()),
-                            );
-                        }
-                        _ => {}
                     }
                 }
-                return build_http_response(200, "application/json", b"{\"ok\":true}".to_vec());
-            }
 
-            if path == "/__eipc__/window-action" {
-                if let Ok(body_val) = serde_json::from_slice::<Value>(request.body()) {
-                    match body_val.get("action").and_then(|v| v.as_str()).unwrap_or("") {
-                        "drag" => {
-                            let _ = protocol_proxy.send_event(UserEvent::DragWindow);
-                        }
-                        "toggle_maximize" => {
-                            let _ = protocol_proxy.send_event(UserEvent::ToggleMaximize);
-                        }
-                        "minimize" => {
-                            let _ = protocol_proxy.send_event(UserEvent::MinimizeWindow);
-                        }
-                        "close" => {
-                            let _ = protocol_proxy.send_event(UserEvent::CloseWindow);
-                        }
-                        _ => {}
-                    }
+                // 3. Local REST & SSE API (`/api/*`, `/edge-api/*`, `/plugins/*`, `/marketplaces/*`, `/v1/*`, `/v2/*`, `/dust/*`)
+                if path.starts_with("/api/")
+                    || path == "/api"
+                    || path.starts_with("/edge-api/")
+                    || path == "/edge-api"
+                    || path.starts_with("/plugins/")
+                    || path.starts_with("/marketplaces/")
+                    || path.starts_with("/v1/")
+                    || path.starts_with("/v2/")
+                    || path.starts_with("/dust")
+                {
+                    let (status, content_type, body) =
+                        protocol_engine.handle_api_request(&method, path_and_query, request.body());
+                    tracing::info!("[API] {} {} -> {}", method, path_and_query, status);
+                    return build_http_response(status, &content_type, body);
                 }
-                return build_http_response(200, "application/json", b"{\"ok\":true}".to_vec());
-            }
 
-            // 2. `$eipc_message$` RPC & Sync Store Bridge (`/__eipc__/invoke`, `/__eipc__/sync`, `/__eipc__/send`)
-            if path.starts_with("/__eipc__/") {
-                match serde_json::from_slice::<EipcInvokePayload>(request.body()) {
-                    Ok(payload) => {
-                        if payload.channel.contains("WindowControl_$_minimize") {
-                            let _ = protocol_proxy.send_event(UserEvent::MinimizeWindow);
-                        } else if payload.channel.contains("WindowControl_$_maximize") {
-                            let _ = protocol_proxy.send_event(UserEvent::ToggleMaximize);
-                        } else if payload.channel.contains("WindowControl_$_close") {
-                            let _ = protocol_proxy.send_event(UserEvent::CloseWindow);
-                        }
-                        let reply = protocol_router.dispatch(&payload);
-                        let bytes = serde_json::to_vec(&reply).unwrap_or_else(|_| b"{}".to_vec());
-                        return build_http_response(200, "application/json; charset=utf-8", bytes);
-                    }
-                    Err(err) => {
-                        let err_json = serde_json::json!({
-                            "error": { "message": format!("Invalid EIPC payload: {}", err) }
-                        });
-                        return build_http_response(
-                            400,
-                            "application/json; charset=utf-8",
-                            serde_json::to_vec(&err_json).unwrap_or_default(),
-                        );
-                    }
-                }
+                // 4. Static assets & SPA fallback (`ion-dist`, `renderer`, `fonts`)
+                serve_static_or_spa(&protocol_resources, path)
+            };
+            // Native pickers and other IPC work may block; asset delivery stays ordered.
+            if is_ipc {
+                std::thread::spawn(move || responder.respond(handle()));
+            } else {
+                responder.respond(handle());
             }
-
-            // 3. Local REST & SSE API (`/api/*`, `/edge-api/*`, `/plugins/*`, `/marketplaces/*`, `/v1/*`, `/v2/*`, `/dust/*`)
-            if path.starts_with("/api/")
-                || path == "/api"
-                || path.starts_with("/edge-api/")
-                || path == "/edge-api"
-                || path.starts_with("/plugins/")
-                || path.starts_with("/marketplaces/")
-                || path.starts_with("/v1/")
-                || path.starts_with("/v2/")
-                || path.starts_with("/dust")
-            {
-                let (status, content_type, body) =
-                    protocol_engine.handle_api_request(&method, path_and_query, request.body());
-                tracing::info!("[API] {} {} -> {}", method, path_and_query, status);
-                return build_http_response(status, &content_type, body);
-            }
-
-            // 4. Static assets & SPA fallback (`ion-dist`, `renderer`, `fonts`)
-            serve_static_or_spa(&protocol_resources, path)
         })
         .with_custom_protocol("cowork-artifact".into(), move |_webview_id, _request| {
             build_http_response(
@@ -1423,6 +1533,9 @@ fn main() -> anyhow::Result<()> {
                 *control_flow = ControlFlow::Exit;
             }
             Event::UserEvent(user_evt) => match user_evt {
+                UserEvent::OpenSettings => {
+                    let _ = webview.evaluate_script("location.hash='settings/general'; window.dispatchEvent(new PopStateEvent('popstate'));");
+                }
                 UserEvent::EmitIpc { channel, payload } => {
                     if let (Ok(ch_str), Ok(pay_str)) = (
                         serde_json::to_string(&channel),
@@ -1434,6 +1547,12 @@ fn main() -> anyhow::Result<()> {
                         );
                         let _ = webview.evaluate_script(&script);
                     }
+                }
+                UserEvent::PickFolders { prompt, multiple, tx } => {
+                    #[cfg(target_os = "macos")]
+                    show_folder_sheet(&window, &prompt, multiple, tx);
+                    #[cfg(not(target_os = "macos"))]
+                    { let _ = (prompt, multiple); let _ = tx.send(vec![]); }
                 }
                 UserEvent::DragWindow => {
                     let _ = window.drag_window();

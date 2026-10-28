@@ -86,6 +86,7 @@ function rebrandTextValue(str) {
   if (typeof str !== "string") return str;
   // Replace Claude with QuixiDesk while keeping ICU placeholders {name} intact
   return str
+    .replace('I want to make an artifact: a web page published with the Artifact tool. Ask me a few questions about what it should show, then build it and publish it.', 'I want to make a private local HTML artifact. Ask me a few questions about what it should show, then create it with the Artifact tool. Do not publish or upload anything.')
     .replace(/Claude Desktop/g, "QuixiDesk")
     .replace(/Claude for Mac/g, "QuixiDesk for Mac")
     .replace(/Claude for macOS/g, "QuixiDesk for macOS")
@@ -100,7 +101,7 @@ function rebrandJsonFile(filePath) {
   const raw = JSON.parse(fs.readFileSync(filePath, "utf8"));
   let count = 0;
   for (const k of Object.keys(raw)) {
-    if (typeof raw[k] === "string" && raw[k].includes("Claude")) {
+    if (typeof raw[k] === "string" && (raw[k].includes("Claude") || raw[k].includes("I want to make an artifact"))) {
       raw[k] = rebrandTextValue(raw[k]);
       count++;
     } else if (raw[k] && typeof raw[k] === "object" && typeof raw[k].message === "string") {
@@ -160,6 +161,16 @@ if (fs.existsSync(shared1Path)) {
 console.log("[4/6] Rebranding renderer & ion-dist JS defaultMessage strings...");
 function rebrandJsSource(code) {
   return code
+    // Local previews remain visible before/without a hosted artifact-page response.
+    .replace('K==="shared"||Xe===void 0&&!Ze&&!ht||M.length===0?u_:', 'K==="shared"||M.length===0?u_:')
+    .replace('y=De,b=u?"chat":"cowork",S=', 'y=De,b="cowork",S=')
+    .replace('H(s.considerEnabledForNonUI,!0)', 'H(!0,!0)')
+    // Local artifacts do not depend on hosted artifact rollout/account eligibility.
+    .replace('i=t?.enabled!==!1&&n&&r.considerEnabledForNonUI===!0,a=Rz', 'i=t?.enabled!==!1&&typeof Nt?.getAllArtifacts==="function",a=Rz')
+    // A global search must include the open session, in both title and content matches.
+    .replace('for(let t of m){if(t.sessionId===o)continue;let n=a.get(t.sessionId)', 'for(let t of m){let n=a.get(t.sessionId)')
+    .replace('function $l(e,t){return e.sessionId!==t&&!e.scheduledTaskId&&pa(e)}', 'function $l(e,t){return!e.scheduledTaskId&&pa(e)}')
+    .replace('I want to make an artifact: a web page published with the Artifact tool. Ask me a few questions about what it should show, then build it and publish it.', 'I want to make a private local HTML artifact. Ask me a few questions about what it should show, then create it with the Artifact tool. Do not publish or upload anything.')
     .replace(/defaultMessage:"([^"]*Claude[^"]*)"/g, (_, msg) => {
       return `defaultMessage:"${rebrandTextValue(msg)}"`;
     })
@@ -1110,3 +1121,29 @@ console.log(
 );
 console.log("Done! Resources prepared in /Users/eric/quixi-desk/resources");
 
+
+// Manual E2E regressions: failed tool requests must not be summarized as effects.
+{
+  const target = path.join(OUT_RES, "ion-dist/assets/v1/c05b96c7f-MPVkefMW.js");
+  if (fs.existsSync(target)) {
+    let text = fs.readFileSync(target, "utf8");
+    const start = text.indexOf("function B_(e,t,{");
+    const body = text.indexOf("let y=t.filter", start);
+    if (start < 0 || body < 0) throw new Error("Tool summary patch anchor changed");
+    if (!text.slice(start, body).includes("quixi.tools.failed")) {
+      text = text.slice(0, body) + "let failed=t.filter(b=>b.type===\"tool_use\"&&n?.(b.id)?.is_error===true);if(failed.length){let ids=new Set(failed.map(b=>b.id)),remaining=t.filter(b=>b.type!==\"tool_use\"||!ids.has(b.id)),label=e.formatMessage({defaultMessage:\"{count, plural, one {# tool failed} other {# tools failed}}\",id:\"quixi.tools.failed\"},{count:failed.length});if(!remaining.some(b=>b.type===\"tool_use\"))return label;let success=B_(e,remaining,{getToolResult:n,compact:u,turnActive:f,deniedToolIds:p,isExemptTool:m,connectorLookupState:h,subscribedConnectors:g,sharedTranscript:_,shellDescriptionAsLabel:v});return success?success+\"; \"+label:label;}" + text.slice(body);
+      fs.writeFileSync(target, text);
+    }
+  }
+}
+
+{
+  const p = path.join(OUT_RES, "ion-dist/assets/v1/ce8be540f-CkdtaDOw.js");
+  let s = fs.readFileSync(p, "utf8");
+  const before = 'else if(e.kind!==o)return!1';
+  const after = 'else if(e.kind!==o&&!(o==="chat"&&e.kind==="task"))return!1';
+  if (!s.includes(before) && !s.includes(after)) throw new Error("Session filter anchor changed");
+  fs.writeFileSync(p, s.replace(before, after));
+}
+
+{ const p=path.join(OUT_RES,"ion-dist/assets/v1/shared-1-BJhqMmkf.js"); let s=fs.readFileSync(p,"utf8"); const a=s.indexOf("function up(e,t){"), b=s.indexOf("function dp(",a); if(a<0||b<0)throw new Error("Project inference anchor changed"); s=s.slice(0,a)+"function up(e,t){if(t.length===0)return;let n=e.filter(e=>!of(e));for(let path of t){let match=n.find(e=>(lp(e)??e.folders[0]?.path)===path);if(match)return match}}"+s.slice(b); fs.writeFileSync(p,s); }

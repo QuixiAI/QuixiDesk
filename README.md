@@ -105,6 +105,9 @@ Verify all 10 workspace crates (`quixi-proto`, `quixi-workspace`, `quixi-platfor
 cargo test --workspace
 ```
 
+The [E2E test suite design](docs/testing/E2E_TEST_PLAN.md) defines the proposed packaged-app tests, fixtures, isolation requirements, and CI rollout. It is a design specification; the E2E runner is not implemented yet.
+The [Claude desktop UI exploration](docs/testing/CLAUDE_UI_EXPLORATION.md) records the reference controls inspected through computer use and the additional cases they informed.
+
 ### 3. Build & Package `QuixiDesk.app`
 Build the optimized release binaries and package a self-contained macOS application bundle into `dist/QuixiDesk.app`:
 ```bash

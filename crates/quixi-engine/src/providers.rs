@@ -1036,6 +1036,19 @@ impl ProviderManager {
     }
 
     pub fn save_provider(&self, body: &Value) -> Value {
+        if body.get("providerId").or_else(|| body.get("id")).and_then(Value::as_str) == Some("custom") {
+            let url = body.get("baseUrl").and_then(Value::as_str).unwrap_or("").trim();
+            let valid_url = reqwest::Url::parse(url).ok().is_some_and(|u|
+                matches!(u.scheme(), "http" | "https") && u.host_str().is_some()
+                && u.username().is_empty() && u.password().is_none());
+            if !valid_url { return json!({"error":"Enter a valid HTTP or HTTPS endpoint URL."}); }
+            if body.get("selectedModel").and_then(Value::as_str).unwrap_or("").trim().is_empty() {
+                return json!({"error":"Enter a model ID."});
+            }
+            if !matches!(body.get("apiFormat").and_then(Value::as_str), Some("openai" | "anthropic")) {
+                return json!({"error":"Select a supported API format."});
+            }
+        }
         let provider_id = body
             .get("providerId")
             .or_else(|| body.get("id"))
@@ -2450,6 +2463,21 @@ impl ProviderManager {
         cwd: &str,
         history: &[(String, String)],
         model_override: Option<&str>,
+        on_chunk: F,
+    ) -> Option<(String, String, String)>
+    where
+        F: FnMut(StreamChunk),
+    {
+        self.try_live_completion_with_context(prompt, cwd, history, model_override, "", on_chunk)
+    }
+
+    pub(crate) fn try_live_completion_with_context<F>(
+        &self,
+        prompt: &str,
+        cwd: &str,
+        history: &[(String, String)],
+        model_override: Option<&str>,
+        context: &str,
         mut on_chunk: F,
     ) -> Option<(String, String, String)>
     where
@@ -2522,6 +2550,8 @@ impl ProviderManager {
             "You are QuixiDesk, a native Rust AI desktop assistant and coding workspace agent. Active workspace: {}. You have direct access to the workspace filesystem, Git state, and project files provided in the prompt context. Always use the provided workspace files, directory tree, and source code to answer directly with concrete file and symbol references; never claim that you lack access to read {}.",
             cwd, cwd
         );
+
+        let sys_prompt = format!("{sys_prompt}{context}");
 
         // 1. OpenAI Codex OAuth (`chatgpt.com/backend-api/codex/responses` SSE stream)
         if provider_id == "openai"
@@ -3391,3 +3421,23 @@ mod tool_stream_regression_tests {
 }
 
 include!("provider_tool_responses.rs");
+
+#[cfg(test)]
+mod provider_validation_tests {
+    use super::*;
+    #[test]
+    fn invalid_custom_settings_do_not_mutate_or_persist_state() {
+        let root=std::env::temp_dir().join(format!("quixi-provider-validation-{}",uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let manager=ProviderManager::new(&root);
+        let valid=json!({"providerId":"custom","baseUrl":"http://127.0.0.1:12345/v1","apiFormat":"openai","selectedModel":"fixture"});
+        assert!(manager.save_provider(&valid).get("error").is_none());
+        let before=std::fs::read(root.join("providers.json")).unwrap();
+        for (key,value) in [("baseUrl","not-a-valid-url"),("baseUrl","file:///tmp"),("baseUrl","https://user:secret@example.com"),("selectedModel","  "),("apiFormat","unsupported")] {
+            let mut body=valid.clone(); body[key]=json!(value);
+            assert!(manager.save_provider(&body)["error"].is_string());
+            assert_eq!(std::fs::read(root.join("providers.json")).unwrap(),before);
+        }
+        drop(manager); std::fs::remove_dir_all(root).unwrap();
+    }
+}

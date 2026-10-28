@@ -110,6 +110,16 @@ pub fn tool_schemas() -> Value {
                     "required": ["server", "tool"]
                 }
             }
+        },
+        {
+            "type":"function",
+            "function":{
+                "name":"Artifact",
+                "description":"Create a private local HTML artifact and open its preview. Use self-contained HTML with inline CSS; no external resources. Does not publish, upload, or modify project files. Publishing is unavailable.",
+                "parameters":{"type":"object","properties":{
+                    "title":{"type":"string"},"html":{"type":"string"}
+                },"required":["title","html"],"additionalProperties":false}
+            }
         }
     ])
 }
@@ -181,8 +191,11 @@ pub fn validate_input(name: &str, input: &Value) -> Result<(), String> {
 #[derive(Default)]
 pub struct ToolResults(std::collections::HashMap<String, (String, bool)>);
 impl ToolResults {
-    pub fn contains(&self, name: &str, input: &Value) -> bool { self.0.contains_key(&format!("{name}|{input}")) }
+    fn cacheable(name: &str) -> bool { !matches!(name, TOOL_READ | TOOL_WEB_FETCH) }
+    pub fn contains(&self, name: &str, input: &Value) -> bool { Self::cacheable(name) && self.0.contains_key(&format!("{name}|{input}")) }
     pub fn run(&mut self, name: &str, input: &Value, action: impl FnOnce() -> (String, bool)) -> (String, bool) {
+        // Reads are observations, not effects: an intervening mutation may change them.
+        if !Self::cacheable(name) { return action(); }
         let key = format!("{name}|{input}");
         self.0.entry(key).or_insert_with(action).clone()
     }
@@ -500,6 +513,26 @@ mod regression_tests {
         assert_eq!(results.run("Bash", &input, || ("created".into(), false)), ("created".into(), false));
         assert_eq!(results.run("Bash", &input, || panic!("must not run twice")), ("created".into(), false));
         assert_eq!(results.run("Bash", &json!({"command":"different"}), || ("second".into(), false)).0, "second");
+    }
+    #[test]
+    fn reads_observe_changes_while_mutations_stay_deduplicated() {
+        let mut results = ToolResults::default();
+        let root = std::env::temp_dir().join(format!("quixi-read-cache-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("chain.txt");
+        let host = McpHost::new();
+        let cwd = root.to_str().unwrap();
+        let read = json!({"file_path":file});
+        let write = json!({"file_path":file,"content":"ALPHA"});
+        results.run("Write", &write, || execute("Write", &write, cwd, "auto", &host));
+        assert!(results.run("Read", &read, || execute("Read", &read, cwd, "auto", &host)).0.contains("ALPHA"));
+        let edit = json!({"file_path":file,"old_string":"ALPHA","new_string":"BETA"});
+        assert!(!results.run("Edit", &edit, || execute("Edit", &edit, cwd, "auto", &host)).1);
+        assert!(!results.contains("Read", &read));
+        assert!(results.run("Read", &read, || execute("Read", &read, cwd, "auto", &host)).0.contains("BETA"));
+        results.run("Write", &write, || panic!("do not repeat mutation"));
+        assert_eq!(std::fs::read_to_string(file).unwrap(), "BETA");
+        std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn invalid_arguments_are_rejected_before_execution() {

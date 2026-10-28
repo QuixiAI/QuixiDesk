@@ -9,6 +9,13 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 
+/// The desktop host supplies an AppKit sheet picker; CLI callers retain the fallback.
+type FolderPicker = std::sync::Arc<dyn Fn(Option<&str>, bool) -> Vec<String> + Send + Sync>;
+static FOLDER_PICKER: OnceLock<FolderPicker> = OnceLock::new();
+pub fn set_folder_picker(picker: FolderPicker) {
+    let _ = FOLDER_PICKER.set(picker);
+}
+
 /// 1. SafeFsProvider (replaces `claude-native-binding.node` *Beneath / CC-2885)
 /// Enforces O_NOFOLLOW component-by-component traversal beneath a trusted root directory.
 pub struct SafeFs;
@@ -708,6 +715,9 @@ impl ComputerUse {
         if Self::is_headless_test_env() {
             return Some(quixi_proto::paths::default_workspace_str().to_string());
         }
+        if let Some(picker) = FOLDER_PICKER.get() {
+            return picker(prompt, false).into_iter().next();
+        }
         #[cfg(target_os = "macos")]
         {
             let title = prompt
@@ -738,6 +748,9 @@ impl ComputerUse {
     pub fn pick_folders(prompt: Option<&str>) -> Vec<String> {
         if Self::is_headless_test_env() {
             return vec![quixi_proto::paths::default_workspace_str().to_string()];
+        }
+        if let Some(picker) = FOLDER_PICKER.get() {
+            return picker(prompt, true);
         }
         #[cfg(target_os = "macos")]
         {
@@ -1237,19 +1250,30 @@ impl BrowserUse {
             r#"<base href="{url}" />
 <script>
 (function() {{
+  function navigate(url) {{
+    try {{ var target = new URL(url, document.baseURI); if (!/^https?:$/.test(target.protocol)) return;
+      parent.postMessage({{type:'quixi-browser-navigate',url:target.href,tabId:{tid}}}, '*');
+    }} catch (_) {{}}
+  }}
   document.addEventListener('click', function(e) {{
     var a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
-    if (!a) return;
-    var href = a.href || a.getAttribute('href') || '';
-    if (!href || href.indexOf('javascript:') === 0 || href.indexOf('#') === 0) return;
+    if (!a || a.getAttribute('href').charAt(0) === '#') return;
+    e.preventDefault(); navigate(a.href);
+  }}, true);
+  document.addEventListener('submit', function(e) {{
     e.preventDefault();
-    try {{
-      window.parent.postMessage({{ type: 'quixi-browser-navigate', url: href, tabId: {tid} }}, '*');
-    }} catch (_) {{}}
+    var form = e.target;
+    if ((form.method || 'get').toLowerCase() !== 'get') {{
+      alert('POST forms are not supported in this browser preview. Open the site in your browser to submit.'); return;
+    }}
+    var url = new URL(form.getAttribute('action') || document.baseURI, document.baseURI);
+    url.search = new URLSearchParams(new FormData(form)).toString();
+    if (e.submitter && e.submitter.name) url.searchParams.append(e.submitter.name, e.submitter.value);
+    navigate(url.href);
   }}, true);
 }})();
 </script>"#,
-            url = url.replace('"', "&quot;"),
+            url = url.replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;").replace('>', "&gt;"),
             tid = tid
         );
 
@@ -1433,6 +1457,13 @@ impl BrowserUse {
             tab_id_opt.unwrap_or(mgr.selected_tab_id)
         };
 
+        let is_reload = url_raw.eq_ignore_ascii_case("reload");
+        let reload_url = if is_reload {
+            browser_state().lock().unwrap().tabs.get(&target_tab_id).map(|t| t.url.clone())
+        } else { None };
+        if is_reload && reload_url.is_none() { return Self::get_full_state(); }
+        let url_raw = reload_url.as_deref().unwrap_or(url_raw);
+
         if url_raw.eq_ignore_ascii_case("back") || url_raw.eq_ignore_ascii_case("forward") {
             let target_hist_url = {
                 let mut mgr = browser_state().lock().unwrap();
@@ -1474,6 +1505,10 @@ impl BrowserUse {
             }
         }
 
+        // A history boundary is a no-op, not a new URL.
+        if url_raw.eq_ignore_ascii_case("back") || url_raw.eq_ignore_ascii_case("forward") {
+            return Self::get_full_state();
+        }
         let normalized_url = if url_raw.starts_with("http://")
             || url_raw.starts_with("https://")
             || url_raw.starts_with("about:")
@@ -1518,8 +1553,11 @@ impl BrowserUse {
 
         tab.url = normalized_url.clone();
         tab.title = title.clone();
-        tab.history.push(normalized_url.clone());
-        tab.history_idx = tab.history.len().saturating_sub(1);
+        if !is_reload {
+            tab.history.truncate(if tab.history.is_empty() { 0 } else { tab.history_idx + 1 });
+            if tab.history.last() != Some(&normalized_url) { tab.history.push(normalized_url.clone()); }
+            tab.history_idx = tab.history.len().saturating_sub(1);
+        }
         tab.page_text = page_text;
         tab.raw_html = raw_html;
         tab.elements = elements;
@@ -1552,6 +1590,9 @@ impl BrowserUse {
         let out = Command::new("/usr/bin/curl")
             .args([
                 "-sL",
+                "--proto", "=http,https",
+                "--proto-redir", "=http,https",
+                "--write-out", "\nQUIXI_HTTP_STATUS:%{http_code}",
                 "--max-time",
                 "5",
                 "-A",
@@ -1560,52 +1601,22 @@ impl BrowserUse {
             ])
             .output();
 
+        let status_code;
         let html = match out {
             Ok(o) if o.status.success() && !o.stdout.is_empty() => {
-                String::from_utf8_lossy(&o.stdout).to_string()
+                let output = String::from_utf8_lossy(&o.stdout);
+                let (body, status) = output.rsplit_once("\nQUIXI_HTTP_STATUS:").unwrap_or((&output, "0"));
+                status_code = status.trim().parse().unwrap_or(0);
+                body.to_string()
             }
             _ => {
-                let fallback_html = format!(
-                    r#"<!doctype html><html><head><meta charset="utf-8"><title>{u}</title><style>body{{background:#0f141c;color:#e2e8f0;font-family:-apple-system,BlinkMacSystemFont,sans-serif;padding:36px 24px;}}.card{{max-width:560px;margin:0 auto;background:#161d2a;border:1px solid rgba(56,189,248,0.22);border-radius:12px;padding:28px;}}h1{{margin-top:0;font-size:22px;color:#f8fafc;}}p{{color:#94a3b8;line-height:1.5;}}</style></head><body><div class="card"><h1>{u}</h1><p>Loaded page in QuixiDesk In-App Browser.</p></div></body></html>"#,
-                    u = url
-                );
+                let safe_url = url.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;");
                 return (
-                    url.to_string(),
-                    format!("Loaded page at {}", url),
-                    fallback_html,
-                    vec![
-                        BrowserElementRef {
-                            ref_id: "ref_1".to_string(),
-                            role: "heading".to_string(),
-                            tag: "h1".to_string(),
-                            text: url.to_string(),
-                            href: None,
-                            value: String::new(),
-                            x: 400,
-                            y: 160,
-                        },
-                        BrowserElementRef {
-                            ref_id: "ref_2".to_string(),
-                            role: "textbox".to_string(),
-                            tag: "input".to_string(),
-                            text: "Search input".to_string(),
-                            href: None,
-                            value: String::new(),
-                            x: 400,
-                            y: 260,
-                        },
-                        BrowserElementRef {
-                            ref_id: "ref_3".to_string(),
-                            role: "button".to_string(),
-                            tag: "button".to_string(),
-                            text: "Continue".to_string(),
-                            href: None,
-                            value: String::new(),
-                            x: 400,
-                            y: 320,
-                        },
-                    ],
-                    200,
+                    "Unable to load page".to_string(),
+                    format!("Unable to load {url}. Check the address and connection, then retry."),
+                    format!("<!doctype html><title>Unable to load page</title><h1>Unable to load page</h1><p>{safe_url}</p><p>Check the address and connection, then retry.</p>"),
+                    vec![],
+                    0,
                 );
             }
         };
@@ -1712,7 +1723,7 @@ impl BrowserUse {
             visible_text.chars().take(20000).collect()
         };
 
-        (title, page_text, html, elements, 200)
+        (title, page_text, html, elements, status_code)
     }
 
     fn extract_between_ci(haystack: &str, start_pat: &str, end_pat: &str) -> Option<String> {
@@ -1944,6 +1955,44 @@ impl VmRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn browser_reload_history_and_network_errors_are_truthful() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            for _ in 0..6 {
+                let (mut socket, _) = listener.accept().unwrap();
+                let mut buf = [0; 4096]; let n = socket.read(&mut buf).unwrap();
+                let request = String::from_utf8_lossy(&buf[..n]);
+                let failure = request.starts_with("GET /error ");
+                let body = if failure { "<title>Service unavailable</title><h1>503 fixture</h1>" } else { "<title>Fixture</title><form action='/next'><input name='q'></form>" };
+                write!(socket,"HTTP/1.1 {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", if failure {"503 Service Unavailable"} else {"200 OK"},body.len(),body).unwrap();
+            }
+        });
+        let id = BrowserUse::tabs_create()["tabId"].as_u64().unwrap() as u32;
+        BrowserUse::navigate(&base, Some(id));
+        BrowserUse::navigate(&format!("{base}/next"), Some(id));
+        BrowserUse::navigate("back", Some(id));
+        BrowserUse::navigate("reload", Some(id));
+        {
+            let mgr = browser_state().lock().unwrap(); let tab = &mgr.tabs[&id];
+            assert_eq!(tab.url, base); assert_eq!(tab.history_idx, 1);
+            assert_eq!(tab.history.len(), 3);
+        }
+        BrowserUse::navigate(&format!("{base}/error"), Some(id));
+        {
+            let mgr = browser_state().lock().unwrap(); let tab = &mgr.tabs[&id];
+            assert_eq!(tab.network_requests.last().unwrap()["status"], 503);
+            assert!(!tab.history.iter().any(|u| u.ends_with("/next")));
+        }
+        BrowserUse::navigate("reload", Some(id)); server.join().unwrap();
+        BrowserUse::navigate("http://127.0.0.1:1/unreachable", Some(id));
+        let mgr = browser_state().lock().unwrap(); let tab = &mgr.tabs[&id];
+        assert_eq!(tab.title, "Unable to load page"); assert!(tab.elements.is_empty());
+        assert_eq!(tab.network_requests.last().unwrap()["status"], 0);
+    }
 
     #[test]
     fn test_safefs_containment_and_cow() {

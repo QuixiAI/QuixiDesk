@@ -772,7 +772,8 @@ impl EipcRouter {
                 Value::Null
             }
             ("LocalAgentModeSessions", "getDefaultWorkspaceFolders") => {
-                json!(*self.engine.trusted_folders.read())
+                // Trust is an access grant, not an implicit selection of every project.
+                json!([quixi_proto::paths::default_workspace_str()])
             }
             ("LocalAgentModeSessions", "isFolderTrusted") => json!(true),
             ("LocalAgentModeSessions", "getLocalMcpServers")
@@ -1016,9 +1017,7 @@ impl EipcRouter {
             }
             ("LocalAgentModeSessions", "searchSessions") => {
                 let q = args.first().and_then(|v| v.as_str()).unwrap_or("");
-                json!(quixi_workspace::TranscriptSearchEngine::search_transcripts(
-                    q, 25
-                ))
+                json!(self.engine.search_local_sessions(q, 50))
             }
             ("LocalAgentModeSessions", "getBridgeConsent") => json!(false),
             ("LocalAgentModeSessions", "getSessionsBridgeEnabled") => json!(true),
@@ -1653,9 +1652,7 @@ impl EipcRouter {
             }
             ("LocalSessions", "searchSessions") => {
                 let q = args.first().and_then(|v| v.as_str()).unwrap_or("");
-                json!(quixi_workspace::TranscriptSearchEngine::search_transcripts(
-                    q, 25
-                ))
+                json!(self.engine.search_local_sessions(q, 50))
             }
 
             // --- ClaudeCode ---
@@ -2107,35 +2104,28 @@ impl EipcRouter {
                 json!(self.engine.write_global_memory(content))
             }
             ("CoworkMemory", "listAccountMemories") => json!(self.engine.list_account_memories()),
+            ("CoworkArtifacts", "isSharingEnabled") | ("CoworkArtifacts", "isAutoPublishEnabled") => json!(false),
+            ("CoworkArtifacts", "getArtifactHtml") => {
+                let id = args.first().and_then(Value::as_str).unwrap_or("");
+                self.engine.artifacts.read().get(id).map(|a| a["html"].clone()).unwrap_or(Value::Null)
+            }
             ("CoworkArtifacts", "getAllArtifacts") => {
                 let list: Vec<Value> = self.engine.artifacts.read().values().cloned().collect();
                 json!(list)
             }
             ("CoworkArtifacts", "deleteArtifact") => {
                 let id = args.first().and_then(|v| v.as_str()).unwrap_or("");
-                self.engine.artifacts.write().remove(id);
-                json!(true)
+                json!(self.engine.delete_local_artifact(id))
             }
             ("CoworkArtifacts", "setArtifactName") => {
-                let id = args.first().and_then(|v| v.as_str()).unwrap_or("");
-                let name = args.get(1).and_then(|v| v.as_str()).unwrap_or("");
-                if let Some(art) = self.engine.artifacts.write().get_mut(id) {
-                    if let Some(obj) = art.as_object_mut() {
-                        obj.insert("name".to_string(), json!(name));
-                        obj.insert("title".to_string(), json!(name));
-                    }
-                }
-                json!(true)
+                let id = args.first().and_then(Value::as_str).unwrap_or("");
+                let name = args.get(1).and_then(Value::as_str).unwrap_or("");
+                json!(self.engine.update_local_artifact(id, "name", json!(name)))
             }
             ("CoworkArtifacts", "setArtifactStarred") => {
-                let id = args.first().and_then(|v| v.as_str()).unwrap_or("");
-                let starred = args.get(1).and_then(|v| v.as_bool()).unwrap_or(false);
-                if let Some(art) = self.engine.artifacts.write().get_mut(id) {
-                    if let Some(obj) = art.as_object_mut() {
-                        obj.insert("isStarred".to_string(), json!(starred));
-                    }
-                }
-                json!(true)
+                let id = args.first().and_then(Value::as_str).unwrap_or("");
+                let starred = args.get(1).and_then(Value::as_bool).unwrap_or(false);
+                json!(self.engine.update_local_artifact(id, "isStarred", json!(starred)))
             }
             ("CoworkScheduledTasks", "getAllScheduledTasks")
             | ("CCDScheduledTasks", "getAllScheduledTasks") => {
@@ -2502,7 +2492,7 @@ mod tests {
 
     fn make_router() -> (Arc<QuixiEngine>, EipcRouter) {
         let res = workspace_root().join("resources");
-        let engine = QuixiEngine::new(res);
+        let engine = QuixiEngine::new_with_data_dir(res, std::env::temp_dir().join(format!("quixi-ipc-test-{}", uuid::Uuid::new_v4())));
         *engine.user_locale.write() = "en-US".to_string();
         {
             let mut st = engine.provider_manager.state.write();
@@ -2602,7 +2592,7 @@ mod tests {
 
         // 2. /api/organizations/*/chat_conversations/*/completion SSE
         let req_body = serde_json::to_vec(&json!({
-            "prompt": "Check git status in workspace"
+            "prompt": "Give me a grocery list. Do not use tools or inspect files."
         }))
         .unwrap();
         let (status2, ct2, sse_bytes) = engine.handle_api_request(
@@ -2615,7 +2605,12 @@ mod tests {
         let sse_str = String::from_utf8(sse_bytes).unwrap();
         assert!(sse_str.contains("event: message_start"));
         assert!(sse_str.contains("event: content_block_delta"));
-        assert!(sse_str.contains("QuixiDesk Workspace Status"));
+        // An unavailable provider reports the failure; a word such as "list" must not
+        // silently inspect the workspace or substitute a fabricated status report.
+        assert!(sse_str.contains("No connected provider returned a response"));
+        assert!(!sse_str.contains("Contents of"));
+        assert!(!sse_str.contains("QuixiDesk Workspace Status"));
+        assert!(sse_str.contains("event: message_stop"));
     }
 
     #[test]

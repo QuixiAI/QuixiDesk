@@ -626,6 +626,8 @@
       '  opacity: 1 !important;',
       '  transform: none !important;',
       '}',
+      '/* Outgoing status phrases are aria-hidden; do not paint both labels during a swap. */',
+      '[data-testid="session-turn-status-row"] [data-morph-key][aria-hidden="true"], [data-cds="TurnStatus"] [data-morph-key][aria-hidden="true"] { visibility: hidden !important; }',
       '/* Stacked Home Hero with Static Quixi q. App Icon */',
       '[data-new-page-greeting-spark] {',
       '  position: static !important;',
@@ -1069,11 +1071,11 @@
       '#quixi-browser-pill:hover, #quixi-browser-pill.active {',
       '  border-color: #2DD4BF; background: linear-gradient(135deg, #0D9488 0%, #4F46E5 100%); color: #FFFFFF;',
       '}',
-      'body.quixi-browser-open .dframe-pane-scroller, body.quixi-browser-open [data-cds="Page"], body.quixi-browser-open .dframe-main {',
-      '  padding-right: 470px !important; box-sizing: border-box !important; transition: padding-right 0.14s ease;',
+      'body.quixi-browser-open .dframe-content-inner {',
+      '  padding-inline-end: calc(min(470px, 45vw) + var(--df-content-gutter, 8px)) !important; min-width: 0; box-sizing: border-box !important;',
       '}',
       '#quixi-browser-pane {',
-      '  position: fixed; top: 42px; right: 0; bottom: 0; width: 470px; z-index: 99985;',
+      '  position: fixed; top: 42px; right: 0; bottom: 0; width: min(470px, 45vw); z-index: 99985;',
       '  background: #0F172A; color: #F8FAFC; border-left: 1px solid #1E293B;',
       '  box-shadow: -10px 0 30px rgba(2, 6, 23, 0.28);',
       '  display: none; flex-direction: column; overflow: hidden;',
@@ -1425,7 +1427,7 @@
           '<button class="qb-go-btn" id="qb-go-btn">Go</button>' +
         '</div>' +
         '<div class="qb-viewport">' +
-          '<iframe id="qb-iframe" sandbox="allow-scripts allow-same-origin allow-forms"></iframe>' +
+          '<iframe id="qb-iframe" title="Browser page" sandbox="allow-scripts allow-forms"></iframe>' +
         '</div>' +
         '<div class="qb-inspector">' +
           '<div class="qb-inspector-hdr">' +
@@ -1436,20 +1438,20 @@
         '</div>';
 
       pane.querySelector('#qb-back-btn').addEventListener('click', function() {
-        browserAction({ action: 'back', tabId: activeTabId });
+        browserAction({ action: 'back', tabId: browserState.selectedTabId });
       });
       pane.querySelector('#qb-fwd-btn').addEventListener('click', function() {
-        browserAction({ action: 'forward', tabId: activeTabId });
+        browserAction({ action: 'forward', tabId: browserState.selectedTabId });
       });
       pane.querySelector('#qb-reload-btn').addEventListener('click', function() {
-        browserAction({ action: 'reload', tabId: activeTabId });
+        browserAction({ action: 'reload', tabId: browserState.selectedTabId });
       });
       var urlInput = pane.querySelector('#qb-url-input');
       var goBtn = pane.querySelector('#qb-go-btn');
       var triggerNav = function() {
         var u = (urlInput.value || '').trim();
         if (!u) return;
-        browserAction({ action: 'navigate', url: u, tabId: activeTabId });
+        browserAction({ action: 'navigate', url: u, tabId: browserState.selectedTabId });
       };
       goBtn.addEventListener('click', triggerNav);
       urlInput.addEventListener('keydown', function(ev) {
@@ -1865,7 +1867,7 @@
       baseUrl: urlEl ? urlEl.value : p.baseUrl,
       apiFormat: fmtEl ? fmtEl.value : p.apiFormat,
       authMode: p.authMode,
-      selectedModel: customModEl && customModEl.value ? customModEl.value : (modEl ? modEl.value : p.selectedModel),
+      selectedModel: customModEl ? customModEl.value : (modEl ? modEl.value : p.selectedModel),
       customModel: customModEl ? customModEl.value : '',
       setAsActive: true,
       completeOnboarding: !!completeOnboarding
@@ -1896,6 +1898,13 @@
       saveBtn.addEventListener('click', function() {
         var payload = collectFormPayload(p, false);
         api('/api/quixi/providers/save', 'POST', payload).then(function(newState) {
+          if (newState.error) {
+            statusBanner = { kind: 'err', text: newState.error };
+            var banner = root.querySelector('.qp-banner');
+            if (!banner) { banner = document.createElement('div'); root.querySelector('.qp-main').prepend(banner); }
+            banner.className = 'qp-banner err'; banner.textContent = newState.error;
+            return;
+          }
           state = newState;
           providersDirty = true;
           statusBanner = {
@@ -1910,9 +1919,9 @@
     var testBtn = document.getElementById('qp-test-btn');
     if (testBtn) {
       testBtn.addEventListener('click', function() {
+        var payload = collectFormPayload(p, false);
         statusBanner = { kind: 'info', text: 'Testing connection to ' + p.name + '…' };
         renderOverlay();
-        var payload = collectFormPayload(p, false);
         api('/api/quixi/providers/test', 'POST', payload).then(function(res) {
           statusBanner = {
             kind: res.ok ? 'ok' : 'err',
@@ -2082,6 +2091,13 @@
       continueBtn.addEventListener('click', function() {
         var payload = collectFormPayload(p, true);
         api('/api/quixi/providers/save', 'POST', payload).then(function(newState) {
+          if (newState.error) {
+            statusBanner = { kind: 'err', text: newState.error };
+            var banner = root.querySelector('.qp-banner');
+            if (!banner) { banner = document.createElement('div'); root.querySelector('.qp-main').prepend(banner); }
+            banner.className = 'qp-banner err'; banner.textContent = newState.error;
+            return null;
+          }
           state = newState;
           providersDirty = true;
           return api('/api/quixi/providers/complete-onboarding', 'POST', {
@@ -2089,6 +2105,7 @@
             activeModel: state.activeModel
           });
         }).then(function(finalState) {
+          if (!finalState) return;
           state = finalState;
           closeOverlay();
         });
@@ -2176,10 +2193,11 @@
       window.addEventListener('message', function(ev) {
         var d = ev && ev.data;
         if (!d || typeof d !== 'object') return;
+        var frame = document.getElementById('qb-iframe');
+        if (!frame || !browserState || ev.source !== frame.contentWindow || Number(d.tabId) !== browserState.selectedTabId) return;
         if (d.type === 'quixi-browser-navigate' && d.url) {
-          browserAction({ action: 'navigate', url: d.url });
-        } else if (d.type === 'quixi-browser-click-ref' && d.ref) {
-          browserAction({ action: 'click_ref', ref: d.ref });
+          try { var target = new URL(d.url); if (!/^https?:$/.test(target.protocol)) return; } catch (_) { return; }
+          browserAction({ action: 'navigate', url: d.url, tabId: d.tabId });
         }
       });
     } catch (_) {}
