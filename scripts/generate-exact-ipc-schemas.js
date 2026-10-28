@@ -1,8 +1,12 @@
 #!/usr/bin/env node
 const fs = require("fs");
 const vm = require("vm");
+const path = require("path");
 
-const code = fs.readFileSync("asar-extracted/.vite/build/index.chunk-jPKPzV-P.js", "utf8");
+const ROOT = path.resolve(__dirname, "..");
+const OUTPUT = path.join(ROOT, "crates/quixi-ipc/ipc-exact-schemas.json");
+
+const code = fs.readFileSync(path.join(ROOT, "asar-extracted/.vite/build/index.chunk-jPKPzV-P.js"), "utf8");
 
 // 1. Extract all function NAME(e){...} validator definitions
 const allFns = new Map();
@@ -286,7 +290,7 @@ function synth(expr, depth = 0) {
   return {};
 }
 
-const v = JSON.parse(fs.readFileSync("reference/ipc-return-validators.json", "utf8"));
+const v = JSON.parse(fs.readFileSync(path.join(ROOT, "reference/ipc-return-validators.json"), "utf8"));
 const methodsMap = {};
 let passed = 0;
 let failed = 0;
@@ -331,7 +335,7 @@ while ((gm = goRe.exec(code)) !== null) {
 }
 
 fs.writeFileSync(
-  "reference/ipc-exact-schemas.json",
+  OUTPUT,
   JSON.stringify({ methods: methodsMap, stores: storesMap }, null, 2)
 );
-console.log(`Generated reference/ipc-exact-schemas.json: ${passed} passed, ${failed} failed.`);
+console.log(`Generated ${OUTPUT}: ${passed} passed, ${failed} failed.`);

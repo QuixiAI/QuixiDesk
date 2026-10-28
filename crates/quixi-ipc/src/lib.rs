@@ -11,7 +11,7 @@ use std::path::Path;
 use std::sync::Arc;
 use uuid::Uuid;
 
-const EXACT_SCHEMAS_JSON: &str = include_str!("../../../reference/ipc-exact-schemas.json");
+const EXACT_SCHEMAS_JSON: &str = include_str!("../ipc-exact-schemas.json");
 
 pub struct EipcRouter {
     pub engine: Arc<QuixiEngine>,

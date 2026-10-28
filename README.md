@@ -83,6 +83,11 @@ QuixiDesk includes a built-in **Provider Manager** (`⌘⇧P` or click the top-r
 
 ## Installation & Build Instructions
 
+The IPC response defaults are checked in at `crates/quixi-ipc/ipc-exact-schemas.json`.
+Normal builds do not require the ignored `reference/` or `asar-extracted/` directories.
+`scripts/generate-exact-ipc-schemas.js` is a maintainer tool that updates this snapshot;
+it requires the extracted JavaScript bundle and `reference/ipc-return-validators.json`.
+
 ### Prerequisites
 - **macOS 14.0 (Sonoma) or later** (Apple Silicon or Intel)
 - **Rust Toolchain** (`rustup`, `cargo` 1.80+)
