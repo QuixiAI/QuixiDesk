@@ -820,12 +820,12 @@ impl ProviderManager {
             },
         ];
 
-        // Venice AI is a first-class provider in the "Primary providers" group.
-        // Shift the pre-existing cloud/local ranks so the priority order stays
-        // stable and insert it at 6.
+        // Venice AI, Routstr, and Routstr Confidential are first-class providers in the
+        // "Primary providers" group. Shift the pre-existing cloud/local ranks so the
+        // priority order stays stable and insert them at 6/7/8.
         for p in providers.iter_mut() {
             if p.priority_rank >= 6 {
-                p.priority_rank += 1;
+                p.priority_rank += 3;
             }
         }
 
@@ -868,6 +868,76 @@ impl ProviderManager {
             ],
             custom_models: vec![],
             context_window: 198_000,
+            last_tested_ok: None,
+            last_latency_ms: None,
+        });
+
+        providers.push(ProviderEntry {
+            id: "routstr".to_string(),
+            name: "Routstr".to_string(),
+            subtitle: "Pay-per-token inference over Cashu / Lightning with automatic cheapest-provider routing".to_string(),
+            badge: "Cashu · Lightning · #7".to_string(),
+            category: "priority".to_string(),
+            priority_rank: 7,
+            supports_oauth: false,
+            oauth_label: None,
+            auth_mode: "local".to_string(),
+            api_format: "openai".to_string(),
+            base_url: "http://127.0.0.1:8008/v1".to_string(),
+            api_key_masked: String::new(),
+            api_key_raw: String::new(),
+            oauth_access_token: String::new(),
+            oauth_refresh_token: String::new(),
+            oauth_account_label: None,
+            oauth_expires_ms: None,
+            key_placeholder: "Optional routstrd client API key".to_string(),
+            env_var: "ROUTSTRD_API_KEY".to_string(),
+            docs_url: "https://github.com/Routstr/routstrd".to_string(),
+            configured: false,
+            selected_model: "deepseek-v4.1-flash".to_string(),
+            models: vec![
+                Self::model("deepseek-v4.1-flash", "DeepSeek V4.1 Flash (Routstr)", 128_000, true, false),
+                Self::model("claude-opus-5.5", "Claude Opus 5.5 (Routstr)", 1_000_000, true, true),
+                Self::model("glm-5.3", "GLM-5.3 (Routstr)", 200_000, true, false),
+                Self::model("kimi-k2-6", "Kimi K2.6 (Routstr)", 256_000, true, true),
+                Self::model("gpt-5.5", "GPT-5.5 (Routstr)", 400_000, true, true),
+            ],
+            custom_models: vec![],
+            context_window: 128_000,
+            last_tested_ok: None,
+            last_latency_ms: None,
+        });
+
+        providers.push(ProviderEntry {
+            id: "routstr-confidential".to_string(),
+            name: "Routstr Confidential".to_string(),
+            subtitle: "End-to-end confidential inference: the node relays TLS but never sees your prompt or the response".to_string(),
+            badge: "Confidential · ZK · #8".to_string(),
+            category: "priority".to_string(),
+            priority_rank: 8,
+            supports_oauth: false,
+            oauth_label: None,
+            auth_mode: "local".to_string(),
+            api_format: "openai".to_string(),
+            base_url: "http://127.0.0.1:8008/v1".to_string(),
+            api_key_masked: String::new(),
+            api_key_raw: String::new(),
+            oauth_access_token: String::new(),
+            oauth_refresh_token: String::new(),
+            oauth_account_label: None,
+            oauth_expires_ms: None,
+            key_placeholder: "Optional routstrd client API key".to_string(),
+            env_var: "ROUTSTRD_API_KEY".to_string(),
+            docs_url: "https://github.com/jooray/routstrd/tree/confidential-upstream".to_string(),
+            configured: false,
+            selected_model: "deepseek-v4.1-flash".to_string(),
+            models: vec![
+                Self::model("deepseek-v4.1-flash", "DeepSeek V4.1 Flash (Confidential)", 128_000, true, false),
+                Self::model("venice-uncensored-1-2", "Venice Uncensored 1.2 (Confidential)", 128_000, false, true),
+                Self::model("glm-5.3", "GLM-5.3 (Confidential)", 200_000, true, false),
+            ],
+            custom_models: vec![],
+            context_window: 128_000,
             last_tested_ok: None,
             last_latency_ms: None,
         });
@@ -1423,8 +1493,8 @@ impl ProviderManager {
     }
 
     /// Fetches the provider's live model catalog (`GET {base_url}/models`) and merges it
-    /// into the persisted provider entry. Works for Venice, OpenAI-compatible cloud
-    /// endpoints, and local servers.
+    /// into the persisted provider entry. Works for Venice, Routstr, OpenAI-compatible
+    /// cloud endpoints, and local servers.
     pub fn discover_models(&self, body: &Value) -> Value {
         let provider_id = body
             .get("providerId")
@@ -1487,6 +1557,9 @@ impl ProviderManager {
                 req = req.header("Authorization", format!("Bearer {}", api_key));
             }
         }
+        if provider_id.starts_with("routstr") {
+            req = req.header("Accept", "application/json");
+        }
 
         let resp = match req.send() {
             Ok(r) => r,
@@ -1495,7 +1568,7 @@ impl ProviderManager {
                     "ok": false,
                     "providerId": provider_id,
                     "error": format!("Model discovery failed: {}", err),
-                    "hint": "Is the provider endpoint reachable?"
+                    "hint": "Is the provider endpoint (or local routstrd daemon) running?"
                 })
             }
         };
@@ -3060,6 +3133,11 @@ impl ProviderManager {
                     .header("HTTP-Referer", "https://quixidesk.local")
                     .header("X-Title", "QuixiDesk");
             }
+            if provider_id == "routstr-confidential" {
+                // routstrd only relays this request to nodes whose signed offer supports
+                // confidential mode, and refuses to silently downgrade to plaintext.
+                req = req.header("x-routstr-verify", "confidential");
+            }
             let mut msgs = vec![json!({ "role": "system", "content": sys_prompt })];
             for (role, text) in history {
                 if !text.trim().is_empty() {
@@ -3716,7 +3794,7 @@ mod venice_catalog_tests {
     use super::*;
 
     #[test]
-    fn catalog_includes_venice_priority_provider() {
+    fn catalog_includes_venice_and_routstr_priority_providers() {
         let catalog = ProviderManager::default_catalog();
         let venice = catalog.providers.iter().find(|p| p.id == "venice").unwrap();
         assert_eq!(venice.priority_rank, 6);
@@ -3724,7 +3802,23 @@ mod venice_catalog_tests {
         assert_eq!(venice.base_url, "https://api.venice.ai/api/v1");
         assert!(venice.models.iter().any(|m| m.id == "zai-org-glm-5"));
 
-        // Priority ranks stay unique after the insertion of the new provider.
+        let routstr = catalog
+            .providers
+            .iter()
+            .find(|p| p.id == "routstr")
+            .unwrap();
+        assert_eq!(routstr.priority_rank, 7);
+        assert_eq!(routstr.base_url, "http://127.0.0.1:8008/v1");
+
+        let conf = catalog
+            .providers
+            .iter()
+            .find(|p| p.id == "routstr-confidential")
+            .unwrap();
+        assert_eq!(conf.priority_rank, 8);
+        assert!(conf.base_url.contains("127.0.0.1:8008"));
+
+        // Priority ranks stay unique after the insertion of the three new providers.
         let mut ranks: Vec<usize> = catalog.providers.iter().map(|p| p.priority_rank).collect();
         ranks.sort_unstable();
         ranks.dedup();

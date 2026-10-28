@@ -14,7 +14,7 @@
 
 ---
 
-**QuixiDesk** is a fast, native Rust (`tao` + `wry`) open-source alternative to **Claude Desktop** that runs first-class on **macOS and Linux (Wayland or X11)**. It replaces the heavy Electron + Node.js runtime with a single-process native Rust workspace engine reusing the desktop workspace UI and adding **18 pluggable LLM providers**, **Venice AI**, **zero-configuration built-in MCPs (In-App Browser Use & Computer Use)**, a **unified task/chat workspace**, and **11 UI languages** out of the box.
+**QuixiDesk** is a fast, native Rust (`tao` + `wry`) open-source alternative to **Claude Desktop** that runs first-class on **macOS and Linux (Wayland or X11)**. It replaces the heavy Electron + Node.js runtime with a single-process native Rust workspace engine reusing the desktop workspace UI and adding **20 pluggable LLM providers**, **Venice AI**, **Cashu/Lightning-paid Routstr (including confidential inference)**, **zero-configuration built-in MCPs (In-App Browser Use & Computer Use)**, a **unified task/chat workspace**, and **11 UI languages** out of the box.
 
 ## Screenshots
 
@@ -48,7 +48,7 @@ QuixiDesk's architectural reconstruction—mapping 1,400+ IPC channels, native m
 
 ## Supported LLM Providers
 
-QuixiDesk includes a built-in **Provider Manager** (`⌘⇧P` / `Ctrl+Shift+P` or click the top-right **Providers** pill) supporting **18 cloud, OAuth, and local inference providers**. API keys are pasted directly into Settings, and **Discover Models** pulls the live catalog from any provider's `/models` endpoint.
+QuixiDesk includes a built-in **Provider Manager** (`⌘⇧P` / `Ctrl+Shift+P` or click the top-right **Providers** pill) supporting **20 cloud, OAuth, local, and Cashu-paid providers**. API keys are pasted directly into Settings, and **Discover Models** pulls the live catalog from any provider's `/models` endpoint.
 
 ### Priority Providers
 | # | Provider | Auth Modes | Default / Example Models |
@@ -59,6 +59,8 @@ QuixiDesk includes a built-in **Provider Manager** (`⌘⇧P` / `Ctrl+Shift+P` o
 | **4** | **xAI Grok (SuperGrok / X & API)** | **RFC 8628 Device OAuth** or API Key (`XAI_API_KEY`) | `grok-4`, `grok-3`, `grok-3-mini`, `grok-code-fast-1` |
 | **5** | **Anthropic (Claude Direct)** | API Key (`ANTHROPIC_API_KEY`) | `claude-sonnet-4-6`, `claude-opus-4-6`, `claude-haiku-4-5-20251001` |
 | **6** | **Venice AI** | API Key (`VENICE_API_KEY`) | `zai-org-glm-5`, `venice-uncensored-1-2`, `claude-opus-4-8`, `gemini-3-1-pro-preview`, `grok-4-5`, `qwen-3-8-max` |
+| **7** | **Routstr** | Cashu / Lightning via local `routstrd` (optional client key) | `deepseek-v4.1-flash`, `claude-opus-5.5`, `glm-5.3`, `kimi-k2-6`, `gpt-5.5` |
+| **8** | **Routstr Confidential** | Cashu / Lightning + `x-routstr-verify: confidential` | Same catalog, routed only to confidential-capable nodes |
 
 ### Cloud Providers
 | Provider | Environment Variable | Base Endpoint | Example Models |
@@ -265,6 +267,56 @@ AI**, then press **Discover Models** to pull the live 140+ model catalog from
 capabilities are read from `model_spec`). The key is stored only in
 `~/.quixi/providers.json`; nothing is sent anywhere except `api.venice.ai`.
 
+## Routstr, Cashu & Confidential Inference
+
+QuixiDesk integrates the official [Routstr](https://github.com/Routstr/routstrd)
+daemon as two providers:
+
+- **Routstr** (`#7`) — cheapest-provider routing over an OpenAI-compatible
+  `http://127.0.0.1:8008/v1` endpoint, paid per token from a Cashu wallet.
+- **Routstr Confidential** (`#8`) — the same endpoint with
+  `x-routstr-verify: confidential`. routstrd acts as the TLS client of the
+  node's upstream provider, so the node relays encrypted records and never sees
+  your prompt or the response. Requests fail rather than silently downgrading if
+  confidential mode is unavailable.
+
+Install the daemon (stable release or the confidential-upstream fork):
+```bash
+./scripts/install-routstrd.sh                 # ~/.local/bin/routstrd
+./scripts/install-routstrd.sh --bundle        # also resources/bin/routstrd (baked-in)
+./scripts/install-routstrd.sh --confidential  # build the confidential fork (requires bun)
+```
+
+In **Providers → Routstr** you can:
+
+1. **Start Daemon** — first run performs `routstrd onboard --skip-integration`
+   and creates a 12-word BIP39 seed plus an in-process Cashu wallet.
+2. **Create Invoice** — mints a Lightning invoice (`routstrd wallet receive
+   bolt11 <sats>`) for top-up; pay from any Lightning wallet.
+3. **Receive Token** — redeem an existing `cashuB...` token.
+4. **Back Up Seed Phrase** — reveals the wallet mnemonic after an explicit
+   confirmation, with copy/hide controls. Keep it offline.
+5. **Enable Confidential Mode** — writes `confidentialUpstream.enabled` (with
+   `api.venice.ai` and other upstream hosts trusted) and restarts the daemon.
+
+Confidential inference additionally needs the `cu-prover` and `cu-2pc` client
+binaries from [jooray/routstr-confidential](https://github.com/jooray/routstr-confidential):
+
+```bash
+git clone https://github.com/jooray/routstr-confidential
+cd routstr-confidential/crypto/zkbench
+cargo build --release --bin cu-prover --bin cu-2pc
+cp target/release/cu-prover target/release/cu-2pc ~/.local/bin/
+```
+
+QuixiDesk reports whether `routstrd`, `cu-prover`, and `cu-2pc` are present and
+surfaces a warning if confidential mode is enabled without them.
+
+> The confidential fork currently depends on an unreleased
+> `@routstr/sdk` commit; `scripts/install-routstrd.sh --confidential` is a
+> convenience wrapper, not a pinned reproducibility guarantee. Use the stable
+> release for normal Routstr inference.
+
 ## Workspace Architecture
 
 ```text
@@ -272,7 +324,7 @@ QuixiDesk/
 ├── crates/
 │   ├── quixi-app/        # Native tao + wry WKWebView shell, custom app:// protocol & UI overlay
 │   ├── quixi-ipc/        # EIPC router implementing 1,400+ desktop service & store channels
-│   ├── quixi-engine/     # Session orchestrator, multi-provider LLM router, streaming engine & model discovery
+│   ├── quixi-engine/     # Session orchestrator, multi-provider LLM router, streaming engine & Routstr manager
 │   ├── quixi-mcp/        # Built-in MCP host (Computer Use, Browser Use, Workspace, AppleScript, PDF, Memory)
 │   ├── quixi-platform/   # macOS CoreGraphics Computer Use, In-App Browser Use & SafeFS sandbox
 │   ├── quixi-workspace/  # Native file indexer, git pool engine, transcript search & PTY shell host
