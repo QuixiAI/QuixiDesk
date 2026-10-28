@@ -9,6 +9,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-14B8A6.svg)](LICENSE)
 [![Built with Rust](https://img.shields.io/badge/Built%20with-Rust-0F172A?logo=rust)](Cargo.toml)
 [![Engineered with REA](https://img.shields.io/badge/Reverse%20Engineered%20with-REA-4F46E5)](https://github.com/morluto/rea)
+[![Featured on Made with REA](https://madewithrea.com/badges/featured.svg)](https://madewithrea.com/builds/quixidesk-native-rust-rebuild-of-claude-desktop-mapped-with-rea)
 
 </div>
 
