@@ -16,6 +16,60 @@ pub fn set_folder_picker(picker: FolderPicker) {
     let _ = FOLDER_PICKER.set(picker);
 }
 
+/// Linux native picker. Uses zenity, then kdialog, then yad. Returns an empty
+/// vector (rather than a fake path) when no dialog helper is installed.
+#[cfg(not(target_os = "macos"))]
+fn linux_pick_paths(directory: bool, multiple: bool, title: &str) -> Vec<String> {
+    let mut attempts: Vec<(String, Vec<String>)> = Vec::new();
+    let mut zenity: Vec<String> = vec!["--file-selection".into(), format!("--title={title}")];
+    if directory {
+        zenity.push("--directory".into());
+    }
+    if multiple {
+        zenity.push("--multiple".into());
+        zenity.push("--separator=\n".into());
+    }
+    attempts.push(("zenity".to_string(), zenity));
+    let mut kdialog: Vec<String> = if directory {
+        vec!["--getexistingdirectory".into()]
+    } else {
+        vec!["--getopenfilename".into()]
+    };
+    kdialog.push(".".into());
+    if multiple {
+        kdialog.push("--multiple".into());
+        kdialog.push("--separate-output".into());
+    }
+    attempts.push(("kdialog".to_string(), kdialog));
+    attempts.push((
+        "yad".to_string(),
+        vec![
+            "--file".into(),
+            if directory { "--directory".into() } else { "--file-selection".into() },
+            if multiple { "--multiple".into() } else { "--single".into() },
+            format!("--title={title}"),
+        ],
+    ));
+
+    for (bin, args) in attempts {
+        if let Ok(out) = Command::new(&bin).args(&args).output() {
+            if out.status.success() {
+                let text = String::from_utf8_lossy(&out.stdout);
+                let paths: Vec<String> = text
+                    .lines()
+                    .map(|l| l.trim().to_string())
+                    .filter(|l| !l.is_empty())
+                    .collect();
+                if !paths.is_empty() {
+                    return paths;
+                }
+            }
+        }
+    }
+    Vec::new()
+}
+
+
 /// 1. SafeFsProvider (replaces `claude-native-binding.node` *Beneath / CC-2885)
 /// Enforces O_NOFOLLOW component-by-component traversal beneath a trusted root directory.
 pub struct SafeFs;
@@ -664,6 +718,22 @@ impl ComputerUse {
                 }
             }
         }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
+            let candidates: &[(&str, &[&str])] = if wayland {
+                &[("wl-paste", &["--no-newline"]), ("xclip", &["-selection", "clipboard", "-o"])]
+            } else {
+                &[("xclip", &["-selection", "clipboard", "-o"]), ("xsel", &["--clipboard", "--output"])]
+            };
+            for (bin, args) in candidates {
+                if let Ok(out) = Command::new(bin).args(*args).output() {
+                    if out.status.success() {
+                        return String::from_utf8_lossy(&out.stdout).to_string();
+                    }
+                }
+            }
+        }
         cu_state()
             .lock()
             .map(|s| s.clipboard_fallback.clone())
@@ -686,6 +756,31 @@ impl ComputerUse {
         }
         if let Ok(mut st) = cu_state().lock() {
             st.clipboard_fallback = text.to_string();
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            use std::process::Stdio;
+            let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
+            let candidates: &[(&str, &[&str])] = if wayland {
+                &[("wl-copy", &[]), ("xclip", &["-selection", "clipboard"])]
+            } else {
+                &[("xclip", &["-selection", "clipboard"]), ("xsel", &["--clipboard", "--input"])]
+            };
+            for (bin, args) in candidates {
+                if let Ok(mut child) = Command::new(bin)
+                    .args(*args)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                {
+                    if let Some(stdin) = child.stdin.as_mut() {
+                        let _ = stdin.write_all(text.as_bytes());
+                    }
+                    let _ = child.wait();
+                    return Ok(());
+                }
+            }
         }
         Ok(())
     }
@@ -873,6 +968,18 @@ impl ComputerUse {
                     .output();
             }
         }
+        #[cfg(not(target_os = "macos"))]
+        {
+            if !Self::is_headless_test_env() {
+                if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+                    let _ = Command::new("wtype").args(["--", text]).output();
+                } else {
+                    let _ = Command::new("xdotool")
+                        .args(["type", "--clearmodifiers", "--", text])
+                        .output();
+                }
+            }
+        }
         Ok(())
     }
 
@@ -924,6 +1031,45 @@ impl ComputerUse {
                     let _ = Command::new("/usr/bin/osascript")
                         .args(["-e", &script])
                         .output();
+                }
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            if !Self::is_headless_test_env() {
+                let lower = combo.to_lowercase();
+                let key = lower.split('+').last().unwrap_or("return").trim().to_string();
+                let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
+                for _ in 0..repeat.clamp(1, 20) {
+                    if wayland {
+                        if lower.contains('+') {
+                            let mut args: Vec<String> = Vec::new();
+                            if lower.contains("ctrl") || lower.contains("control") {
+                                args.extend(["-M".into(), "ctrl".into()]);
+                            }
+                            if lower.contains("shift") {
+                                args.extend(["-M".into(), "shift".into()]);
+                            }
+                            if lower.contains("alt") || lower.contains("opt") {
+                                args.extend(["-M".into(), "alt".into()]);
+                            }
+                            if lower.contains("cmd") || lower.contains("meta") {
+                                args.extend(["-M".into(), "logo".into()]);
+                            }
+                            args.extend(["-k".into(), key.clone()]);
+                            let _ = Command::new("wtype").args(&args).output();
+                        } else {
+                            let _ = Command::new("wtype").args(["-k", &key]).output();
+                        }
+                    } else {
+                        let combo_xdotool = lower
+                            .replace("cmd", "super")
+                            .replace("meta", "super")
+                            .replace("opt", "alt");
+                        let _ = Command::new("xdotool")
+                            .args(["key", "--clearmodifiers", &combo_xdotool])
+                            .output();
+                    }
                 }
             }
         }
