@@ -12,3 +12,4 @@ dirs.workspace = true
 tracing.workspace = true
 quixi-workspace.workspace = true
 quixi-platform.workspace = true
+quixi-proto.workspace = true

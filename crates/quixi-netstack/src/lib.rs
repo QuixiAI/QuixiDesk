@@ -35,7 +35,7 @@ pub struct NetstackPolicy {
 
 impl NetstackPolicy {
     pub fn new() -> Self {
-        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/Users/eric"));
+        let home = dirs::home_dir().unwrap_or_else(quixi_proto::paths::home_dir);
         let quixi_dir = home.join(".quixi");
         let _ = fs::create_dir_all(&quixi_dir);
         Self {

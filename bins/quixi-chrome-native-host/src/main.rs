@@ -63,7 +63,7 @@ pub fn handle_native_message(host: &McpHost, incoming: &Value) -> Value {
                     "claude-in-chrome",
                     tool,
                     &args,
-                    Path::new("/Users/eric/quixi-desk"),
+                    Path::new(quixi_proto::paths::default_workspace_str()),
                 )
                 .unwrap_or_else(|e| {
                     json!({

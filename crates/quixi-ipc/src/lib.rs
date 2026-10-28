@@ -270,7 +270,7 @@ impl EipcRouter {
                     json!([{
                         "id": "claude-cli-local",
                         "label": "Claude Code CLI (~/.claude/projects)",
-                        "rootPath": "/Users/eric/.claude/projects",
+                        "rootPath": format!("{}/.claude/projects", quixi_proto::paths::home_dir_str()),
                         "origin": "local",
                         "kind": "cli",
                         "sessionCount": cli_sessions.len()
@@ -353,7 +353,7 @@ impl EipcRouter {
                 let cwd = args
                     .first()
                     .and_then(|v| v.as_str())
-                    .unwrap_or("/Users/eric/quixi-desk");
+                    .unwrap_or(quixi_proto::paths::default_workspace_str());
                 json!(self.engine.detect_server_candidates(Path::new(cwd)))
             }
             ("Launch", "getPreviewTabs") => {
@@ -664,6 +664,8 @@ impl EipcRouter {
                     self.engine.persist_agent_session(sess);
                 }
                 if found {
+                    self.engine.emit_eipc("claude.web", "LocalAgentModeSessions", "onEvent",
+                        json!({"type":"permission_mode_changed","sessionId":sid,"permissionMode":mode}));
                     self.engine.emit_eipc(
                         "claude.web",
                         "LocalAgentModeSessions",
@@ -674,10 +676,11 @@ impl EipcRouter {
                         }),
                     );
                 }
-                Value::Null
+                json!(found)
             }
             ("LocalAgentModeSessions", "stop") | ("LocalAgentModeSessions", "stopTask") => {
                 let sid = args.first().and_then(|v| v.as_str()).unwrap_or("");
+                self.engine.cancel_turn(sid);
                 let mut found = false;
                 if let Some(sess) = self.engine.agent_sessions.write().get_mut(sid) {
                     found = true;
@@ -695,10 +698,15 @@ impl EipcRouter {
                         }),
                     );
                 }
+                if found {
+                    self.engine.emit_eipc("claude.web", "LocalAgentModeSessions", "onEvent",
+                        json!({"type":"close","sessionId":sid,"code":0}));
+                }
                 Value::Null
             }
             ("LocalAgentModeSessions", "archive") => {
                 let sid = args.first().and_then(|v| v.as_str()).unwrap_or("");
+                self.engine.cancel_turn(sid);
                 let mut found = false;
                 if let Some(sess) = self.engine.agent_sessions.write().get_mut(sid) {
                     found = true;
@@ -825,7 +833,7 @@ impl EipcRouter {
                                 server,
                                 tool,
                                 &tool_args,
-                                Path::new("/Users/eric/quixi-desk"),
+                                Path::new(quixi_proto::paths::default_workspace_str()),
                             )
                             .unwrap_or_else(|e| {
                                 json!({
@@ -880,7 +888,7 @@ impl EipcRouter {
                                 server,
                                 tool,
                                 &tool_args,
-                                Path::new("/Users/eric/quixi-desk"),
+                                Path::new(quixi_proto::paths::default_workspace_str()),
                             )
                             .unwrap_or_else(|e| {
                                 json!({
@@ -914,7 +922,7 @@ impl EipcRouter {
                                 server,
                                 tool,
                                 &tool_args,
-                                Path::new("/Users/eric/quixi-desk"),
+                                Path::new(quixi_proto::paths::default_workspace_str()),
                             )
                             .unwrap_or_else(|e| {
                                 json!({
@@ -1316,6 +1324,7 @@ impl EipcRouter {
             | ("LocalSessions", "interrupt")
             | ("LocalSessions", "stopTask") => {
                 let sid = args.first().and_then(|v| v.as_str()).unwrap_or("");
+                self.engine.cancel_turn(sid);
                 let mut updated_sess = None;
                 if let Some(sess) = self.engine.code_sessions.write().get_mut(sid) {
                     sess.turn_running = false;
@@ -1480,7 +1489,7 @@ impl EipcRouter {
                 let key = args.first().and_then(|v| v.as_str()).unwrap_or("default");
                 self.engine
                     .shell_host
-                    .start_pty(key, Path::new("/Users/eric/quixi-desk"))
+                    .start_pty(key, Path::new(quixi_proto::paths::default_workspace_str()))
             }
             ("LocalSessions", "writeShellPty") => {
                 let key = args.first().and_then(|v| v.as_str()).unwrap_or("default");
@@ -1549,7 +1558,7 @@ impl EipcRouter {
                 let dir_str = args
                     .first()
                     .and_then(|v| v.as_str())
-                    .unwrap_or("/Users/eric/quixi-desk");
+                    .unwrap_or(quixi_proto::paths::default_workspace_str());
                 let entries =
                     quixi_workspace::FileIndexEngine::list_directory_children(Path::new(dir_str));
                 json!(entries)
@@ -1565,7 +1574,7 @@ impl EipcRouter {
                 let cwd_str = args
                     .first()
                     .and_then(|v| v.as_str())
-                    .unwrap_or("/Users/eric/quixi-desk");
+                    .unwrap_or(quixi_proto::paths::default_workspace_str());
                 json!(quixi_workspace::GitPoolEngine::get_local_branches(
                     Path::new(cwd_str)
                 ))
@@ -1576,7 +1585,7 @@ impl EipcRouter {
                 let cwd_str = args
                     .first()
                     .and_then(|v| v.as_str())
-                    .unwrap_or("/Users/eric/quixi-desk");
+                    .unwrap_or(quixi_proto::paths::default_workspace_str());
                 let repo = quixi_workspace::GitPoolEngine::inspect_repo(Path::new(cwd_str));
                 json!({
                     "repo": repo.root_path.unwrap_or_else(|| cwd_str.to_string()),
@@ -1590,7 +1599,7 @@ impl EipcRouter {
                 let cwd_str = args
                     .first()
                     .and_then(|v| v.as_str())
-                    .unwrap_or("/Users/eric/quixi-desk");
+                    .unwrap_or(quixi_proto::paths::default_workspace_str());
                 quixi_workspace::GitPoolEngine::get_git_diff_structured(Path::new(cwd_str))
             }
             ("LocalSessions", "getGitDiffStats")
@@ -1599,7 +1608,7 @@ impl EipcRouter {
                 let cwd_str = args
                     .first()
                     .and_then(|v| v.as_str())
-                    .unwrap_or("/Users/eric/quixi-desk");
+                    .unwrap_or(quixi_proto::paths::default_workspace_str());
                 quixi_workspace::GitPoolEngine::get_git_diff_stats(Path::new(cwd_str))
             }
             ("LocalSessions", "getGitCommits")
@@ -1608,7 +1617,7 @@ impl EipcRouter {
                 let cwd_str = args
                     .first()
                     .and_then(|v| v.as_str())
-                    .unwrap_or("/Users/eric/quixi-desk");
+                    .unwrap_or(quixi_proto::paths::default_workspace_str());
                 json!(quixi_workspace::GitPoolEngine::get_git_commits(
                     Path::new(cwd_str),
                     25
@@ -1618,20 +1627,20 @@ impl EipcRouter {
                 let cwd_str = args
                     .first()
                     .and_then(|v| v.as_str())
-                    .unwrap_or("/Users/eric/quixi-desk");
+                    .unwrap_or(quixi_proto::paths::default_workspace_str());
                 quixi_workspace::GitPoolEngine::get_working_tree_status(Path::new(cwd_str))
             }
             ("LocalSessions", "getDiffFileContent") => {
                 let rel_path = args.get(1).and_then(|v| v.as_str()).unwrap_or("Cargo.toml");
                 quixi_workspace::GitPoolEngine::get_diff_file_content(
-                    Path::new("/Users/eric/quixi-desk"),
+                    Path::new(quixi_proto::paths::default_workspace_str()),
                     rel_path,
                 )
             }
             ("LocalSessions", "runBashCommand") => {
                 let cmd = args.first().and_then(|v| v.as_str()).unwrap_or("pwd");
                 quixi_workspace::ShellHostEngine::run_bash_command(
-                    Path::new("/Users/eric/quixi-desk"),
+                    Path::new(quixi_proto::paths::default_workspace_str()),
                     cmd,
                 )
                 .unwrap_or_else(|_| json!({ "stdout": "", "stderr": "", "exitCode": 1 }))
@@ -1686,7 +1695,7 @@ impl EipcRouter {
                     .first()
                     .and_then(|v| v.as_str())
                     .filter(|s| !s.trim().is_empty())
-                    .unwrap_or("/Users/eric/Documents/QuixiDesk/Projects");
+                    .unwrap_or(quixi_proto::paths::default_workspace_str());
                 let raw_name = args
                     .get(1)
                     .and_then(|v| v.as_str())
@@ -1830,7 +1839,7 @@ impl EipcRouter {
                     .get(1)
                     .and_then(|v| v.as_str())
                     .filter(|s| !s.trim().is_empty())
-                    .unwrap_or("/Users/eric/quixi-desk");
+                    .unwrap_or(quixi_proto::paths::default_workspace_str());
                 {
                     let mut trusted = self.engine.trusted_folders.write();
                     if !trusted.contains(&folder_path.to_string()) {
@@ -2051,11 +2060,11 @@ impl EipcRouter {
                         .read()
                         .get(arg0)
                         .and_then(|sp| sp.folders.first().map(|f| f.path.clone()))
-                        .unwrap_or_else(|| "/Users/eric/quixi-desk".to_string())
+                        .unwrap_or_else(|| quixi_proto::paths::default_workspace_str().to_string())
                 } else if !arg0.is_empty() {
                     arg0.to_string()
                 } else {
-                    "/Users/eric/quixi-desk".to_string()
+                    quixi_proto::paths::default_workspace_str().to_string()
                 };
                 let entries = quixi_workspace::FileIndexEngine::list_directory_children(Path::new(
                     &resolved_path,
@@ -2368,7 +2377,7 @@ impl EipcRouter {
                     .and_then(|v| v.as_str())
                     .unwrap_or("documents")
                     .to_lowercase();
-                let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/Users/eric"));
+                let home = dirs::home_dir().unwrap_or_else(quixi_proto::paths::home_dir);
                 let resolved = match kind.as_str() {
                     "documents" => dirs::document_dir().unwrap_or_else(|| home.join("Documents")),
                     "downloads" => dirs::download_dir().unwrap_or_else(|| home.join("Downloads")),
@@ -2383,7 +2392,7 @@ impl EipcRouter {
                     .get(1)
                     .and_then(|v| v.as_str())
                     .or_else(|| args.first().and_then(|v| v.as_str()))
-                    .unwrap_or("/Users/eric/quixi-desk");
+                    .unwrap_or(quixi_proto::paths::default_workspace_str());
                 let dir_str = Self::percent_decode(raw_dir);
                 let entries =
                     quixi_workspace::FileIndexEngine::list_directory_children(Path::new(&dir_str));
@@ -2404,7 +2413,7 @@ impl EipcRouter {
                             .and_then(|v| v.as_str())
                             .filter(|s| !s.starts_with("local_"))
                     })
-                    .unwrap_or("/Users/eric/quixi-desk");
+                    .unwrap_or(quixi_proto::paths::default_workspace_str());
                 let dir_str = Self::percent_decode(raw_dir);
                 let entries =
                     quixi_workspace::FileIndexEngine::list_directory_children(Path::new(&dir_str));
@@ -2429,7 +2438,7 @@ impl EipcRouter {
                         .read()
                         .get(sid)
                         .map(|s| s.cwd.clone())
-                        .unwrap_or_else(|| "/Users/eric/quixi-desk".to_string());
+                        .unwrap_or_else(|| quixi_proto::paths::default_workspace_str().to_string());
                     Path::new(&base).join(&decoded)
                 };
                 let content = fs::read_to_string(&path_buf).unwrap_or_default();
@@ -2469,7 +2478,7 @@ impl EipcRouter {
             ("Resources", "findFiles") => {
                 let q = args.first().and_then(|v| v.as_str());
                 let entries = quixi_workspace::FileIndexEngine::list_files(
-                    Path::new("/Users/eric/quixi-desk"),
+                    Path::new(quixi_proto::paths::default_workspace_str()),
                     q,
                     100,
                 );
@@ -2671,7 +2680,10 @@ mod tests {
         let agent_sid = start_agent["sessionId"].as_str().unwrap().to_string();
         assert!(agent_sid.starts_with("local_"));
 
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        for _ in 0..100 {
+            if _engine.agent_sessions.read().get(&agent_sid).is_some_and(|session| !session.is_running) { break; }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
 
         let transcript = router
             .dispatch(&EipcInvokePayload {
@@ -2703,7 +2715,10 @@ mod tests {
         assert!(code_sid.starts_with("local_"));
         assert!(!code_sid.starts_with("local_cli_"));
 
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        for _ in 0..100 {
+            if _engine.code_sessions.read().get(&code_sid).is_some_and(|session| !session.turn_running) { break; }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
 
         let code_transcript = router
             .dispatch(&EipcInvokePayload {
@@ -3098,5 +3113,29 @@ mod tests {
             ),
             args: vec![json!(sid)],
         });
+    }
+}
+
+#[cfg(test)]
+mod session_control_regression_tests {
+    use super::*;
+    #[test]
+    fn permission_changes_and_stop_publish_renderer_events() {
+        let engine = QuixiEngine::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../resources"));
+        let router = EipcRouter::new(engine.clone());
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = events.clone();
+        engine.set_emitter(Arc::new(move |_, event| recorded.lock().unwrap().push(event)));
+        let sid = engine.start_agent_session(&json!({"permissionMode":"auto"}));
+        let call = |method: &str, args: Vec<Value>| router.dispatch(&EipcInvokePayload {
+            channel: format!("$eipc_message$_{}_$_claude.web_$_LocalAgentModeSessions_$_{}", quixi_proto::EIPC_UUID_MAIN, method), args,
+        });
+        assert_eq!(call("setPermissionMode",vec![json!(sid),json!("default")]).result,Some(json!(true)));
+        call("stop",vec![json!(sid)]);
+        let events = events.lock().unwrap();
+        assert!(events.iter().any(|event| event["type"] == "permission_mode_changed" && event["permissionMode"] == "default"));
+        assert!(events.iter().any(|event| event["type"] == "close" && event["code"] == 0));
+        drop(events);
+        call("delete",vec![json!(sid)]);
     }
 }

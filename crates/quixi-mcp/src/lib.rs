@@ -31,7 +31,7 @@ pub struct McpHost {
 
 impl McpHost {
     pub fn new() -> Self {
-        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/Users/eric"));
+        let home = dirs::home_dir().unwrap_or_else(quixi_proto::paths::home_dir);
         let quixi_dir = home.join(".quixi");
         let _ = fs::create_dir_all(&quixi_dir);
         let config_path = quixi_dir.join("quixi_desktop_config.json");
@@ -1055,7 +1055,7 @@ impl McpHost {
                     "id": id,
                     "displayName": display_name,
                     "installSource": "builtin",
-                    "path": format!("/Users/eric/.quixi/extensions/{}", id),
+                    "path": format!("{}/.quixi/extensions/{}", quixi_proto::paths::home_dir_str(), id),
                     "settings": {
                         "isEnabled": true,
                         "userConfig": {}
@@ -2410,7 +2410,7 @@ impl McpHost {
                 }))
             }
             "store_memory" | "recall_memory" => {
-                let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/Users/eric"));
+                let home = dirs::home_dir().unwrap_or_else(quixi_proto::paths::home_dir);
                 let mem_file = home.join(".quixi/memory/CLAUDE.md");
                 if tool_name == "store_memory" {
                     let k = args.get("key").and_then(|v| v.as_str()).unwrap_or("note");

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let host = McpHost::new();
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/Users/eric/quixi-desk"));
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from(quixi_proto::paths::default_workspace_str()));
 
     // Support direct CLI testing: `quixi-mcp-builtin --cli <tool_name> [json_args]`
     if let Some(pos) = args.iter().position(|a| a == "--cli") {

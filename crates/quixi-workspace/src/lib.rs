@@ -593,7 +593,7 @@ impl TranscriptSearchEngine {
                     let cwd = if candidate_cwd.is_dir() {
                         candidate_cwd.to_string_lossy().to_string()
                     } else {
-                        "/Users/eric/quixi-desk".to_string()
+                        quixi_proto::paths::default_workspace_str().to_string()
                     };
 
                     let mut extracted_title: Option<String> = None;

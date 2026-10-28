@@ -1,3 +1,4 @@
+use std::io::BufRead;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use parking_lot::RwLock;
@@ -25,6 +26,18 @@ const XAI_OAUTH_SCOPE: &str =
     "openid profile email offline_access grok-cli:access api:access";
 const XAI_OAUTH_DISCOVERY_URL: &str = "https://auth.x.ai/.well-known/openid-configuration";
 const XAI_DEVICE_GRANT_TYPE: &str = "urn:ietf:params:oauth:grant-type:device_code";
+
+/// One incremental chunk of a streaming completion.
+///
+/// Reasoning-capable providers (DeepSeek `deepseek-flash`, Anthropic extended thinking, …)
+/// stream a private chain of thought *before* the visible answer. Dropping those chunks
+/// makes the UI look frozen while the model thinks, so they are surfaced separately and
+/// rendered as a "Thinking" block instead of being merged into the answer text.
+#[derive(Debug, Clone)]
+pub enum StreamChunk {
+    Text(String),
+    Thinking(String),
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -182,7 +195,8 @@ impl ProviderManager {
                     Self::model("openai/gpt-5.4", "GPT-5.4 (via OpenRouter)", 256_000, true, true),
                     Self::model("x-ai/grok-4", "Grok 4 (via OpenRouter)", 256_000, true, true),
                     Self::model("google/gemini-3.1-pro-preview", "Gemini 3.1 Pro (via OpenRouter)", 1_000_000, true, true),
-                    Self::model("deepseek/deepseek-r1", "DeepSeek R1 (via OpenRouter)", 128_000, true, false),
+                    Self::model("deepseek/deepseek-v4.1-flash", "DeepSeek V4.1 Flash (via OpenRouter)", 1_048_576, true, true),
+                    Self::model("deepseek/deepseek-v4-pro", "DeepSeek V4 Pro (via OpenRouter)", 1_048_576, true, false),
                     Self::model("qwen/qwen3-coder-480b", "Qwen 3 Coder 480B (via OpenRouter)", 128_000, true, false),
                 ],
                 custom_models: vec![],
@@ -372,7 +386,7 @@ impl ProviderManager {
             ProviderEntry {
                 id: "deepseek".to_string(),
                 name: "DeepSeek".to_string(),
-                subtitle: "DeepSeek V3 (chat) and DeepSeek R1 (reasoner)".to_string(),
+                subtitle: "DeepSeek V4.1 Flash (thinking + native vision) and V4 Pro — 1M context".to_string(),
                 badge: "Reasoning".to_string(),
                 category: "cloud".to_string(),
                 priority_rank: 7,
@@ -391,13 +405,21 @@ impl ProviderManager {
                 env_var: "DEEPSEEK_API_KEY".to_string(),
                 docs_url: "https://platform.deepseek.com/api_keys".to_string(),
                 configured: false,
-                selected_model: "deepseek-chat".to_string(),
+                // DeepSeek's API exposes exactly two model ids since V4:
+                // "deepseek-flash" (V4.1-Flash, text+vision, thinking on by default with
+                // low/high/max effort) and "deepseek-v4-pro" (V4-Pro, text only).
+                // "deepseek-chat" / "deepseek-reasoner" are legacy aliases: both are served
+                // by deepseek-flash today (verified against api.deepseek.com/models), and
+                // the R1 naming was retired back in 2025.
+                selected_model: "deepseek-flash".to_string(),
                 models: vec![
-                    Self::model("deepseek-chat", "DeepSeek V3 (Chat)", 128_000, false, false),
-                    Self::model("deepseek-reasoner", "DeepSeek R1 (Reasoner)", 128_000, true, false),
+                    Self::model("deepseek-flash", "DeepSeek V4.1 Flash · thinking + vision", 1_048_576, true, true),
+                    Self::model("deepseek-v4-pro", "DeepSeek V4 Pro", 1_048_576, true, false),
+                    Self::model("deepseek-chat", "Legacy alias · non-thinking · served by V4.1 Flash", 1_048_576, false, true),
+                    Self::model("deepseek-reasoner", "Legacy alias · thinking · served by V4.1 Flash", 1_048_576, true, true),
                 ],
                 custom_models: vec![],
-                context_window: 128_000,
+                context_window: 1_048_576,
                 last_tested_ok: None,
                 last_latency_ms: None,
             },
@@ -872,6 +894,8 @@ impl ProviderManager {
                         if !sm.trim().is_empty() {
                             if id == "openai" && sm.trim() == "gpt-5.3-codex" {
                                 entry.selected_model = "gpt-6.1-sol".to_string();
+                            } else if let Some(current) = Self::migrate_legacy_model_id(id, sm.trim()) {
+                                entry.selected_model = current;
                             } else {
                                 entry.selected_model = sm.to_string();
                             }
@@ -929,7 +953,43 @@ impl ProviderManager {
                 }
             }
         }
+        // DeepSeek moved from R1-era ids to V4 (deepseek-flash / deepseek-v4-pro, 1M ctx).
+        if let Some(ds) = catalog.providers.iter_mut().find(|p| p.id == "deepseek") {
+            if let Some(current) = Self::migrate_legacy_model_id("deepseek", &ds.selected_model) {
+                ds.selected_model = current;
+            }
+            if ds.context_window < 1_048_576 {
+                ds.context_window = 1_048_576;
+            }
+        }
+        if let Some(current) = Self::migrate_legacy_model_id("deepseek", &catalog.active_model) {
+            catalog.active_model = current;
+        }
+        if let Some(current) = Self::migrate_legacy_model_id("deepseek", &catalog.subagent_model) {
+            catalog.subagent_model = current;
+        }
+
         Some(catalog)
+    }
+
+    /// Maps retired provider-specific model ids onto the ids the provider serves today.
+    ///
+    /// DeepSeek retired the R1-era aliases: `deepseek-chat` (non-thinking) and
+    /// `deepseek-reasoner` (thinking) are both served by `deepseek-flash` now, so a
+    /// persisted selection keeps working while showing the real model.
+    pub fn migrate_legacy_model_id(provider_id: &str, model_id: &str) -> Option<String> {
+        match (provider_id, model_id) {
+            ("deepseek", "deepseek-chat")
+            | ("deepseek", "deepseek-reasoner")
+            | ("deepseek", "deepseek-v4-flash")
+            | ("deepseek", "deepseek-v4-flash-0731") => Some("deepseek-flash".to_string()),
+            ("deepseek", "deepseek-v4-pro-preview") => Some("deepseek-v4-pro".to_string()),
+            ("openrouter", "deepseek/deepseek-r1")
+            | ("openrouter", "deepseek/deepseek-r1-0528") => {
+                Some("deepseek/deepseek-v4.1-flash".to_string())
+            }
+            _ => None,
+        }
     }
 
     pub fn persist(&self) {
@@ -1976,7 +2036,7 @@ impl ProviderManager {
     where
         F: FnMut(&str),
     {
-        use std::io::{BufRead, BufReader};
+        use std::io::BufReader;
 
         let mut input_items = Vec::new();
         for (role, text) in history {
@@ -2390,12 +2450,19 @@ impl ProviderManager {
         cwd: &str,
         history: &[(String, String)],
         model_override: Option<&str>,
-        mut on_delta: F,
+        mut on_chunk: F,
     ) -> Option<(String, String, String)>
     where
-        F: FnMut(&str),
+        F: FnMut(StreamChunk),
     {
-        use std::io::{BufRead, BufReader};
+        // Adapter for the text-only SSE readers below.
+        macro_rules! on_delta {
+            () => {};
+            ($text:expr) => {
+                on_chunk(StreamChunk::Text(($text).to_string()))
+            };
+        }
+        use std::io::BufReader;
 
         let resolved_model = self.resolve_connected_model(model_override);
         let (provider_id, provider_name, mut model_id, base_url, api_format, auth_mode, mut credential) = {
@@ -2442,8 +2509,12 @@ impl ProviderManager {
             )
         };
 
+        // NOTE: a total request timeout used to cut long answers (and DeepSeek thinking
+        // turns) off mid-stream, which then fell through to the canned fallback reply.
+        // Bound the connect phase and keep a generous outer cap instead.
         let http = reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(60))
+            .connect_timeout(std::time::Duration::from_secs(15))
+            .timeout(std::time::Duration::from_secs(300))
             .build()
             .ok()?;
 
@@ -2466,7 +2537,7 @@ impl ProviderManager {
                     &sys_prompt,
                     history,
                     prompt,
-                    &mut on_delta,
+                    &mut |t: &str| on_chunk(StreamChunk::Text(t.to_string())),
                 ) {
                     Ok(reply) if !reply.trim().is_empty() => {
                         return Some((reply, provider_name, model_id));
@@ -2487,7 +2558,7 @@ impl ProviderManager {
                                         &sys_prompt,
                                         history,
                                         prompt,
-                                        &mut on_delta,
+                                        &mut |t: &str| on_chunk(StreamChunk::Text(t.to_string())),
                                     ) {
                                         if !reply.trim().is_empty() {
                                             return Some((reply, provider_name, model_id));
@@ -2541,7 +2612,7 @@ impl ProviderManager {
                                 &sys_prompt,
                                 history,
                                 prompt,
-                                &mut on_delta,
+                                &mut |t: &str| on_chunk(StreamChunk::Text(t.to_string())),
                             ) {
                                 if !reply.trim().is_empty() {
                                     return Some((reply, provider_name, model_id));
@@ -2593,8 +2664,33 @@ impl ProviderManager {
                     "messages": msgs,
                     "stream": true
                 }))
-                .send()
-                .ok()?;
+                .send();
+
+            let resp = match resp {
+                Ok(resp) => resp,
+                Err(err) => {
+                    let msg = format!(
+                        "⚠️ {} request to `{}` failed before any data arrived: {}",
+                        provider_name, url, err
+                    );
+                    tracing::warn!("{msg}");
+                    return Some((msg, provider_name, model_id));
+                }
+            };
+
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().unwrap_or_default();
+                let msg = format!(
+                    "⚠️ {} returned HTTP {} for model `{}`: {}",
+                    provider_name,
+                    status.as_u16(),
+                    model_id,
+                    body.chars().take(400).collect::<String>()
+                );
+                tracing::warn!("{msg}");
+                return Some((msg, provider_name, model_id));
+            }
 
             if resp.status().is_success() {
                 let mut acc = String::new();
@@ -2610,19 +2706,26 @@ impl ProviderManager {
                             if ev.get("type").and_then(|v| v.as_str())
                                 == Some("content_block_delta")
                             {
+                                if let Some(th) = ev
+                                    .pointer("/delta/thinking")
+                                    .and_then(|v| v.as_str())
+                                    .filter(|s| !s.is_empty())
+                                {
+                                    on_chunk(StreamChunk::Thinking(th.to_string()));
+                                }
                                 if let Some(d) = ev
                                     .pointer("/delta/text")
                                     .and_then(|v| v.as_str())
                                     .filter(|s| !s.is_empty())
                                 {
                                     acc.push_str(d);
-                                    on_delta(d);
+                                    on_delta!(d);
                                 }
                             } else if let Some(text) =
                                 ev.pointer("/content/0/text").and_then(|v| v.as_str())
                             {
                                 acc.push_str(text);
-                                on_delta(text);
+                                on_delta!(text);
                             }
                         }
                     } else if trimmed.starts_with('{') {
@@ -2631,7 +2734,7 @@ impl ProviderManager {
                                 body.pointer("/content/0/text").and_then(|t| t.as_str())
                             {
                                 acc.push_str(text);
-                                on_delta(text);
+                                on_delta!(text);
                             }
                         }
                     }
@@ -2675,16 +2778,44 @@ impl ProviderManager {
             {
                 msgs.push(json!({ "role": "user", "content": prompt }));
             }
-            if let Ok(resp) = req
+            let sent = req
                 .json(&json!({
                     "model": model_id,
                     "messages": msgs,
                     "stream": true
                 }))
-                .send()
+                .send();
+
+            let resp = match sent {
+                Ok(resp) => resp,
+                Err(err) => {
+                    let msg = format!(
+                        "⚠️ {} request to `{}` failed before any data arrived: {}",
+                        provider_name, url, err
+                    );
+                    tracing::warn!("{msg}");
+                    return Some((msg, provider_name, model_id));
+                }
+            };
+
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().unwrap_or_default();
+                let msg = format!(
+                    "⚠️ {} returned HTTP {} for model `{}`: {}",
+                    provider_name,
+                    status.as_u16(),
+                    model_id,
+                    body.chars().take(400).collect::<String>()
+                );
+                tracing::warn!("{msg}");
+                return Some((msg, provider_name, model_id));
+            }
+
             {
-                if resp.status().is_success() {
+                {
                     let mut acc = String::new();
+                    let mut reasoning_acc = String::new();
                     let reader = BufReader::new(resp);
                     for line in reader.lines().map_while(Result::ok) {
                         let trimmed = line.trim();
@@ -2694,20 +2825,32 @@ impl ProviderManager {
                                 continue;
                             }
                             if let Ok(ev) = serde_json::from_str::<Value>(data_str) {
+                                // Reasoning models (DeepSeek deepseek-flash, o-series, …) stream
+                                // their chain of thought before the answer. Forward it as a
+                                // thinking chunk so the UI can show progress instead of freezing.
+                                let thinking_delta = ev
+                                    .pointer("/choices/0/delta/reasoning_content")
+                                    .or_else(|| ev.pointer("/choices/0/delta/reasoning"))
+                                    .and_then(|v| v.as_str())
+                                    .filter(|s| !s.is_empty());
+                                if let Some(th) = thinking_delta {
+                                    reasoning_acc.push_str(th);
+                                    on_chunk(StreamChunk::Thinking(th.to_string()));
+                                }
                                 if let Some(d) = ev
                                     .pointer("/choices/0/delta/content")
                                     .and_then(|v| v.as_str())
                                     .filter(|s| !s.is_empty())
                                 {
                                     acc.push_str(d);
-                                    on_delta(d);
+                                    on_delta!(d);
                                 } else if let Some(t) = ev
                                     .pointer("/choices/0/message/content")
                                     .and_then(|v| v.as_str())
                                     .filter(|s| !s.is_empty())
                                 {
                                     acc.push_str(t);
-                                    on_delta(t);
+                                    on_delta!(t);
                                 }
                             }
                         } else if trimmed.starts_with('{') {
@@ -2718,13 +2861,18 @@ impl ProviderManager {
                                     .filter(|s| !s.is_empty())
                                 {
                                     acc.push_str(t);
-                                    on_delta(t);
+                                    on_delta!(t);
                                 }
                             }
                         }
                     }
                     if !acc.trim().is_empty() {
                         return Some((acc, provider_name, model_id));
+                    }
+                    if !reasoning_acc.trim().is_empty() {
+                        // Only reasoning came back (e.g. the stream ended right after thinking):
+                        // surface it instead of silently falling back to the canned reply.
+                        return Some((reasoning_acc, provider_name, model_id));
                     }
                 }
             }
@@ -2733,3 +2881,513 @@ impl ProviderManager {
         Some((String::new(), provider_name, model_id))
     }
 }
+
+/// One tool call requested by the model.
+#[derive(Debug, Clone)]
+pub struct ProviderToolCall {
+    pub id: String,
+    pub name: String,
+    pub arguments: String,
+}
+
+/// The full result of one assistant turn that was allowed to call tools.
+#[derive(Debug, Clone)]
+pub struct ProviderToolTurn {
+    pub response_items: Vec<Value>,
+    pub text: String,
+    pub thinking: String,
+    pub tool_calls: Vec<ProviderToolCall>,
+    pub provider_name: String,
+    pub model_id: String,
+}
+
+impl ProviderManager {
+    /// Runs one streaming chat turn with OpenAI-style `tools` and returns the visible text
+    /// plus every tool call the model asked for. Only the OpenAI-compatible providers are
+    /// supported (DeepSeek, OpenRouter, Groq, Mistral, Together, Fireworks, Cerebras,
+    /// Perplexity, Cohere, Gemini, local Ollama/LM Studio, and custom endpoints);
+    /// Anthropic-format and Codex-OAuth providers fall back to the tool-less path.
+    pub fn complete_turn_with_tools<F>(
+        &self,
+        messages: &[Value],
+        tools: &Value,
+        model_override: Option<&str>,
+        mut on_chunk: F,
+    ) -> Option<ProviderToolTurn>
+    where
+        F: FnMut(StreamChunk),
+    {
+        use std::io::BufReader;
+
+        let resolved_model = self.resolve_connected_model(model_override);
+        let (provider_id, provider_name, model_id, base_url, api_format, auth_mode, credential) = {
+            let st = self.state.read();
+            let entry = st
+                .providers
+                .iter()
+                .find(|p| {
+                    p.configured
+                        && (p.selected_model == resolved_model
+                            || p.models.iter().any(|m| {
+                                m.id == resolved_model && Self::is_model_available_for_provider(p, m)
+                            }))
+                })
+                .or_else(|| {
+                    st.providers
+                        .iter()
+                        .find(|p| p.id == st.active_provider && p.configured)
+                })
+                .or_else(|| st.providers.iter().find(|p| p.configured))?;
+
+            let cred = if entry.auth_mode == "oauth" && !entry.oauth_access_token.is_empty() {
+                entry.oauth_access_token.clone()
+            } else {
+                entry.api_key_raw.clone()
+            };
+            let chosen_model = if entry.models.iter().any(|m| m.id == resolved_model)
+                || entry.selected_model == resolved_model
+            {
+                resolved_model
+            } else {
+                entry.selected_model.clone()
+            };
+            (
+                entry.id.clone(),
+                entry.name.clone(),
+                chosen_model,
+                entry.base_url.trim_end_matches('/').to_string(),
+                entry.api_format.clone(),
+                entry.auth_mode.clone(),
+                cred,
+            )
+        };
+
+        if provider_id == "openai" && auth_mode == "oauth" {
+            return Some(self.complete_codex_tool_turn(messages, tools, &model_id, &credential, &mut on_chunk));
+        }
+        if api_format != "openai"
+            || base_url.is_empty()
+            || credential.starts_with("oauth_")
+            || (credential.is_empty() && auth_mode != "local" && provider_id != "custom")
+        {
+            return None;
+        }
+
+        let http = reqwest::blocking::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(15))
+            .timeout(std::time::Duration::from_secs(300))
+            .build()
+            .ok()?;
+
+        tracing::info!(
+            provider = %provider_id,
+            model = %model_id,
+            messages = messages.len(),
+            "agent tools: streaming tool-calling turn"
+        );
+        let url = format!("{}/chat/completions", base_url);
+        let mut req = http
+            .post(&url)
+            .header("content-type", "application/json")
+            .header("accept", "text/event-stream");
+        if !credential.is_empty() {
+            req = req.header("Authorization", format!("Bearer {}", credential));
+        }
+        if provider_id == "openrouter" {
+            req = req
+                .header("HTTP-Referer", "https://quixidesk.local")
+                .header("X-Title", "QuixiDesk");
+        }
+
+        let resp = match req
+            .json(&json!({
+                "model": model_id,
+                "messages": messages,
+                "tools": tools,
+                "tool_choice": "auto",
+                "stream": true
+            }))
+            .send()
+        {
+            Ok(resp) => resp,
+            Err(err) => return Some(tool_failure(format!("{provider_name} unreachable: {err}"), &provider_name, &model_id)),
+        };
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().unwrap_or_default();
+            return Some(tool_failure(format!("{provider_name} returned HTTP {} for model `{model_id}`: {}", status.as_u16(), body.chars().take(400).collect::<String>()), &provider_name, &model_id));
+        }
+
+        let (text, thinking, tool_calls) = match parse_tool_stream(BufReader::new(resp), &mut on_chunk) {
+            Ok(turn) => turn,
+            Err(error) => {
+                let text = format!("Provider turn failed: {error}");
+                return Some(ProviderToolTurn {
+                    text, thinking: String::new(), tool_calls: Vec::new(), response_items: Vec::new(), provider_name, model_id,
+                });
+            }
+        };
+
+        tracing::info!(
+            text_chars = text.len(),
+            thinking_chars = thinking.len(),
+            tool_calls = tool_calls.len(),
+            "agent tools: turn finished"
+        );
+        Some(ProviderToolTurn {
+            response_items: Vec::new(),
+            text,
+            thinking,
+            tool_calls,
+            provider_name,
+            model_id,
+        })
+    }
+}
+
+fn parse_tool_stream<R: std::io::BufRead, F: FnMut(StreamChunk)>(reader: R, mut on_chunk: F)
+    -> Result<(String, String, Vec<ProviderToolCall>), String> {
+        let mut text = String::new();
+        let mut thinking = String::new();
+        let mut calls: Vec<ProviderToolCall> = Vec::new();
+        let mut finish_reason = None;
+        for line in reader.lines() {
+            let line = line.map_err(|error| format!("Interrupted provider stream: {error}"))?;
+            let trimmed = line.trim();
+            let Some(data_str) = trimmed.strip_prefix("data:") else {
+                continue;
+            };
+            let data_str = data_str.trim();
+            if data_str.is_empty() || data_str == "[DONE]" {
+                continue;
+            }
+            let ev: Value = serde_json::from_str(data_str)
+                .map_err(|error| format!("Invalid provider event: {error}"))?;
+            if ev.get("error").is_some() { return Err(format!("Provider stream error: {}", ev["error"])); }
+            if let Some(reason) = ev.pointer("/choices/0/finish_reason").and_then(Value::as_str) {
+                finish_reason = Some(reason.to_string());
+            }
+            let delta = ev.pointer("/choices/0/delta");
+
+            if let Some(th) = delta
+                .and_then(|d| d.get("reasoning_content").or_else(|| d.get("reasoning")))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+            {
+                thinking.push_str(th);
+                on_chunk(StreamChunk::Thinking(th.to_string()));
+            }
+            if let Some(t) = delta
+                .and_then(|d| d.get("content"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+            {
+                text.push_str(t);
+                on_chunk(StreamChunk::Text(t.to_string()));
+            }
+            if let Some(arr) = delta.and_then(|d| d.get("tool_calls")).and_then(|v| v.as_array()) {
+                for (idx, tc) in arr.iter().enumerate() {
+                    let index = tc
+                        .get("index")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(idx as u64) as usize;
+                    while calls.len() <= index {
+                        calls.push(ProviderToolCall {
+                            id: String::new(),
+                            name: String::new(),
+                            arguments: String::new(),
+                        });
+                    }
+                    let slot = &mut calls[index];
+                    if let Some(id) = tc.get("id").and_then(|v| v.as_str()) {
+                        if !id.is_empty() {
+                            slot.id = id.to_string();
+                        }
+                    }
+                    if let Some(fname) = tc.pointer("/function/name").and_then(|v| v.as_str()) {
+                        if !fname.is_empty() {
+                            slot.name = fname.to_string();
+                        }
+                    }
+                    if let Some(args) = tc.pointer("/function/arguments").and_then(|v| v.as_str()) {
+                        slot.arguments.push_str(args);
+                    }
+                }
+            }
+        }
+
+        if !matches!(finish_reason.as_deref(), Some("stop" | "tool_calls")) {
+            return Err("Provider stream did not complete successfully; no tools were executed.".to_string());
+        }
+        for call in &calls {
+            if call.name.is_empty() || call.id.is_empty() {
+                return Err("Incomplete tool call in provider stream.".to_string());
+            }
+            let input: Value = serde_json::from_str(&call.arguments)
+                .map_err(|error| format!("Invalid tool arguments: {error}"))?;
+            crate::agent_tools::validate_input(&call.name, &input)?;
+        }
+        let tool_calls: Vec<ProviderToolCall> = calls
+            .into_iter()
+            .filter(|c| !c.name.is_empty())
+            .map(|mut c| {
+                if c.id.is_empty() {
+                    c.id = format!("call_{}", &Uuid::new_v4().to_string().replace('-', "")[..16]);
+                }
+                c
+            })
+            .collect();
+
+        Ok((text, thinking, tool_calls))
+}
+
+#[cfg(test)]
+mod provider_catalog_tests {
+    use super::ProviderManager;
+
+    fn entry(id: &str) -> super::ProviderEntry {
+        ProviderManager::default_catalog()
+            .providers
+            .into_iter()
+            .find(|p| p.id == id)
+            .unwrap_or_else(|| panic!("provider {id} missing from catalog"))
+    }
+
+    /// DeepSeek retired the R1 naming in 2025. Their live API
+    /// (`GET https://api.deepseek.com/models`) exposes exactly two ids:
+    /// `deepseek-flash` (V4.1-Flash, 1M ctx, text+vision) and `deepseek-v4-pro`.
+    /// `deepseek-chat` / `deepseek-reasoner` are legacy aliases served by `deepseek-flash`.
+    #[test]
+    fn deepseek_catalog_matches_live_api() {
+        let ds = entry("deepseek");
+        assert_eq!(ds.selected_model, "deepseek-flash");
+        assert_eq!(ds.context_window, 1_048_576);
+
+        let ids: Vec<&str> = ds.models.iter().map(|m| m.id.as_str()).collect();
+        assert!(ids.contains(&"deepseek-flash"), "ids: {ids:?}");
+        assert!(ids.contains(&"deepseek-v4-pro"), "ids: {ids:?}");
+
+        let labels: Vec<&str> = ds.models.iter().map(|m| m.label.as_str()).collect();
+        assert!(
+            !labels.iter().any(|l| l.contains("R1")),
+            "R1 is retired and must not be advertised: {labels:?}"
+        );
+
+        let flash = ds.models.iter().find(|m| m.id == "deepseek-flash").unwrap();
+        assert!(flash.supports_thinking && flash.supports_vision);
+        assert_eq!(flash.context_window, 1_048_576);
+    }
+
+    #[test]
+    fn openrouter_deepseek_entries_are_current() {
+        let or = entry("openrouter");
+        let ids: Vec<&str> = or.models.iter().map(|m| m.id.as_str()).collect();
+        assert!(!ids.contains(&"deepseek/deepseek-r1"), "ids: {ids:?}");
+        assert!(ids.contains(&"deepseek/deepseek-v4.1-flash"), "ids: {ids:?}");
+        assert!(ids.contains(&"deepseek/deepseek-v4-pro"), "ids: {ids:?}");
+    }
+}
+
+#[cfg(test)]
+mod legacy_model_migration_tests {
+    use super::ProviderManager;
+
+    #[test]
+    fn r1_era_deepseek_ids_migrate_to_current_models() {
+        assert_eq!(
+            ProviderManager::migrate_legacy_model_id("deepseek", "deepseek-reasoner").as_deref(),
+            Some("deepseek-flash")
+        );
+        assert_eq!(
+            ProviderManager::migrate_legacy_model_id("deepseek", "deepseek-chat").as_deref(),
+            Some("deepseek-flash")
+        );
+        assert_eq!(
+            ProviderManager::migrate_legacy_model_id("openrouter", "deepseek/deepseek-r1")
+                .as_deref(),
+            Some("deepseek/deepseek-v4.1-flash")
+        );
+        // Current ids stay untouched.
+        assert!(ProviderManager::migrate_legacy_model_id("deepseek", "deepseek-flash").is_none());
+        assert!(ProviderManager::migrate_legacy_model_id("deepseek", "deepseek-v4-pro").is_none());
+    }
+}
+
+#[cfg(test)]
+mod streaming_chunk_tests {
+    use super::{ProviderManager, StreamChunk};
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+    use std::path::PathBuf;
+
+    /// Spins up a fake OpenAI-compatible SSE endpoint that answers every request with `body`.
+    fn fake_provider(body: &'static str) -> (String, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            if let Ok((stream, _)) = listener.accept() {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                // Consume the request headers so the client is not blocked writing the body.
+                while reader.read_line(&mut line).map(|n| n > 0).unwrap_or(false) {
+                    if line == "\r\n" {
+                        break;
+                    }
+                    line.clear();
+                }
+                let mut stream = stream;
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{}",
+                    body
+                );
+                let _ = stream.flush();
+            }
+        });
+        (format!("http://127.0.0.1:{}/v1", port), handle)
+    }
+
+    fn manager_pointing_at(base_url: &str) -> (ProviderManager, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("quixi-stream-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let state = serde_json::json!({
+            "onboardingCompleted": true,
+            "activeProvider": "custom",
+            "activeModel": "stream-test-model",
+            "providers": [{
+                "id": "custom",
+                "name": "Custom Endpoint",
+                "configured": true,
+                "baseUrl": base_url,
+                "apiFormat": "openai",
+                "authMode": "api_key",
+                "selectedModel": "stream-test-model",
+                "apiKeyRaw": "test-key"
+            }]
+        });
+        std::fs::write(
+            dir.join("providers.json"),
+            serde_json::to_vec_pretty(&state).unwrap(),
+        )
+        .unwrap();
+        (ProviderManager::new(&dir), dir)
+    }
+
+    /// Reasoning deltas must reach the UI as thinking chunks, and the visible answer must
+    /// still be assembled — dropping the reasoning was what made the window look frozen
+    /// while DeepSeek's `deepseek-flash` (thinking on by default) was thinking.
+    #[test]
+    fn reasoning_deltas_are_streamed_as_thinking_chunks() {
+        let (base_url, server) = fake_provider(concat!(
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"thinking...\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Hallo \"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Welt\"}}]}\n\n",
+            "data: [DONE]\n\n"
+        ));
+        let (mgr, dir) = manager_pointing_at(&base_url);
+
+        let mut thinking = String::new();
+        let mut text = String::new();
+        let out = mgr.try_live_completion_streaming(
+            "hi",
+            &dir.to_string_lossy(),
+            &[],
+            Some("stream-test-model"),
+            |chunk| match chunk {
+                StreamChunk::Thinking(t) => thinking.push_str(&t),
+                StreamChunk::Text(t) => text.push_str(&t),
+            },
+        );
+        server.join().ok();
+        let (reply, _, _) = out.expect("live completion should return");
+
+        assert_eq!(thinking, "thinking...");
+        assert_eq!(text, "Hallo Welt");
+        assert_eq!(reply, "Hallo Welt");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A provider error must be surfaced to the user, not swallowed into the canned
+    /// "Hello from QuixiDesk" fallback reply.
+    #[test]
+    fn provider_http_errors_are_surfaced() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            if let Ok((stream, _)) = listener.accept() {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                while reader.read_line(&mut line).map(|n| n > 0).unwrap_or(false) {
+                    if line == "\r\n" {
+                        break;
+                    }
+                    line.clear();
+                }
+                let body = "{\"error\":{\"message\":\"Insufficient Balance\"}}";
+                let mut stream = stream;
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 402 Payment Required\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.flush();
+            }
+        });
+        let (mgr, dir) = manager_pointing_at(&format!("http://127.0.0.1:{}/v1", port));
+
+        let out = mgr.try_live_completion_streaming(
+            "hi",
+            &dir.to_string_lossy(),
+            &[],
+            Some("stream-test-model"),
+            |_| {},
+        );
+        server.join().ok();
+        let (reply, _, _) = out.expect("error must be reported, not silently dropped");
+        assert!(reply.contains("402"), "reply was: {reply}");
+        assert!(reply.contains("Insufficient Balance"), "reply was: {reply}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod tool_stream_regression_tests {
+    use super::*;
+    use std::io::{self, Cursor, Read, BufReader};
+    fn stream(args: &str, finish: Option<&str>) -> String {
+        let delta = json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"Bash","arguments":args}}]}}]});
+        let mut output = format!("data: {delta}\n\n");
+        if let Some(reason) = finish {
+            output.push_str(&format!("data: {}\n\ndata: [DONE]\n\n", json!({"choices":[{"delta":{},"finish_reason":reason}]})));
+        }
+        output
+    }
+    #[test]
+    fn complete_stream_returns_valid_calls() {
+        let (_, _, calls) = parse_tool_stream(Cursor::new(stream(r#"{"command":"pwd"}"#, Some("tool_calls"))), |_| {}).unwrap();
+        assert_eq!(calls.len(), 1);
+    }
+    #[test]
+    fn truncated_and_invalid_turns_return_no_calls() {
+        for body in [stream(r#"{"command":"pwd"}"#, None), stream(r#"{"command":"pwd"}"#, Some("length")), stream(r#"{"command":"# , Some("tool_calls")), stream("{}", Some("tool_calls"))] {
+            assert!(parse_tool_stream(Cursor::new(body), |_| {}).is_err());
+        }
+    }
+    struct BrokenStream(Cursor<Vec<u8>>);
+    impl Read for BrokenStream {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.0.position() as usize == self.0.get_ref().len() {
+                Err(io::Error::new(io::ErrorKind::ConnectionReset, "disconnected"))
+            } else { self.0.read(buf) }
+        }
+    }
+    #[test]
+    fn transport_failure_rejects_accumulated_calls() {
+        let input = BrokenStream(Cursor::new(stream(r#"{"command":"pwd"}"#, None).into_bytes()));
+        assert!(parse_tool_stream(BufReader::new(input), |_| {}).is_err());
+    }
+}
+
+include!("provider_tool_responses.rs");

@@ -487,7 +487,7 @@ fn locate_resources_dir() -> PathBuf {
         }
     }
 
-    let fallback = PathBuf::from("/Users/eric/quixi-desk/resources");
+    let fallback = PathBuf::from(quixi_proto::paths::workspace_join("resources"));
     if fallback.exists() {
         return fallback;
     }
@@ -797,13 +797,13 @@ fn main() -> anyhow::Result<()> {
       var sidObj = await cw.LocalAgentModeSessions.start({
         message: 'Check git status in workspace',
         sessionType: 'cowork',
-        userSelectedFolders: ['/Users/eric/quixi-desk']
+        userSelectedFolders: ['__QUIXI_WORKSPACE__']
       });
       var sid = (sidObj && sidObj.sessionId) ? sidObj.sessionId : String(sidObj);
       nav('/cowork/' + sid, 'route_cowork_session');
       var cidObj = await cw.LocalSessions.start({
         prompt: 'List files in workspace',
-        cwd: '/Users/eric/quixi-desk'
+        cwd: '__QUIXI_WORKSPACE__'
       });
       var cid = (cidObj && cidObj.sessionId) ? cidObj.sessionId : String(cidObj);
       setTimeout(async function() {
@@ -811,12 +811,12 @@ fn main() -> anyhow::Result<()> {
         var codeTranscript = await cw.LocalSessions.getTranscript(cid);
         var skills = await cw.LocalAgentModeSessions.listLocalSkills();
         var docxFiles = await cw.LocalAgentModeSessions.getLocalSkillFiles('docx');
-        var gitInfo = await cw.LocalSessions.getGitInfo('/Users/eric/quixi-desk');
-        var gitCommits = await cw.LocalSessions.getGitCommits('/Users/eric/quixi-desk');
+        var gitInfo = await cw.LocalSessions.getGitInfo('__QUIXI_WORKSPACE__');
+        var gitCommits = await cw.LocalSessions.getGitCommits('__QUIXI_WORKSPACE__');
         var shells = await cw.LocalSessions.getTerminalShells();
         var csim = window['claude.simulator'] || (window.claude && window.claude.simulator);
         var simDevices = (csim && csim.Simulator) ? await csim.Simulator.listDevices() : [];
-        var serverCandidates = await cw.Launch.detectServerCandidates('/Users/eric/quixi-desk');
+        var serverCandidates = await cw.Launch.detectServerCandidates('__QUIXI_WORKSPACE__');
         await cw.CoworkMemory.writeGlobalMemory('# QuixiDesk Global Memory\n');
         var mem = await cw.CoworkMemory.readGlobalMemory();
         var cs = window['claude.settings'] || (window.claude && window.claude.settings);
@@ -1255,6 +1255,12 @@ fn main() -> anyhow::Result<()> {
     );
 
     init_script.push_str(include_str!("provider_ui.js"));
+
+    // The E2E harness needs the live workspace root, not a baked-in developer path.
+    init_script = init_script.replace(
+        "__QUIXI_WORKSPACE__",
+        quixi_proto::paths::default_workspace_str(),
+    );
 
     let protocol_resources = resources_dir.clone();
     let protocol_engine = engine.clone();

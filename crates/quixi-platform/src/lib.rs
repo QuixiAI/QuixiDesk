@@ -706,7 +706,7 @@ impl ComputerUse {
     /// Opens a native OS folder selection dialog and returns the selected directory path.
     pub fn pick_folder(prompt: Option<&str>) -> Option<String> {
         if Self::is_headless_test_env() {
-            return Some("/Users/eric/quixi-desk".to_string());
+            return Some(quixi_proto::paths::default_workspace_str().to_string());
         }
         #[cfg(target_os = "macos")]
         {
@@ -730,14 +730,14 @@ impl ComputerUse {
         #[cfg(not(target_os = "macos"))]
         {
             let _ = prompt;
-            Some("/Users/eric/quixi-desk".to_string())
+            Some(quixi_proto::paths::default_workspace_str().to_string())
         }
     }
 
     /// Opens a native OS multi-folder selection dialog and returns the selected directory paths.
     pub fn pick_folders(prompt: Option<&str>) -> Vec<String> {
         if Self::is_headless_test_env() {
-            return vec!["/Users/eric/quixi-desk".to_string()];
+            return vec![quixi_proto::paths::default_workspace_str().to_string()];
         }
         #[cfg(target_os = "macos")]
         {
@@ -767,14 +767,14 @@ impl ComputerUse {
         #[cfg(not(target_os = "macos"))]
         {
             let _ = prompt;
-            vec!["/Users/eric/quixi-desk".to_string()]
+            vec![quixi_proto::paths::default_workspace_str().to_string()]
         }
     }
 
     /// Opens a native OS file selection dialog and returns the selected file path.
     pub fn pick_file(prompt: Option<&str>) -> Option<String> {
         if Self::is_headless_test_env() {
-            return Some("/Users/eric/quixi-desk/Cargo.toml".to_string());
+            return Some(quixi_proto::paths::workspace_join("Cargo.toml"));
         }
         #[cfg(target_os = "macos")]
         {
@@ -798,14 +798,14 @@ impl ComputerUse {
         #[cfg(not(target_os = "macos"))]
         {
             let _ = prompt;
-            Some("/Users/eric/quixi-desk/Cargo.toml".to_string())
+            Some(quixi_proto::paths::workspace_join("Cargo.toml"))
         }
     }
 
     /// Opens a native OS multi-file selection dialog and returns the selected file paths.
     pub fn pick_files(prompt: Option<&str>) -> Vec<String> {
         if Self::is_headless_test_env() {
-            return vec!["/Users/eric/quixi-desk/Cargo.toml".to_string()];
+            return vec![quixi_proto::paths::workspace_join("Cargo.toml")];
         }
         #[cfg(target_os = "macos")]
         {
@@ -835,7 +835,7 @@ impl ComputerUse {
         #[cfg(not(target_os = "macos"))]
         {
             let _ = prompt;
-            vec!["/Users/eric/quixi-desk/Cargo.toml".to_string()]
+            vec![quixi_proto::paths::workspace_join("Cargo.toml")]
         }
     }
 

@@ -9,3 +9,4 @@ quixi-platform = { path = "../../crates/quixi-platform" }
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
+quixi-proto.workspace = true
