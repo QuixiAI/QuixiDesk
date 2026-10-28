@@ -1,3 +1,4 @@
+use base64::Engine as _;
 use chrono::Utc;
 use quixi_engine::QuixiEngine;
 use quixi_proto::{
@@ -160,6 +161,113 @@ impl EipcRouter {
             i += 1;
         }
         String::from_utf8(out).unwrap_or_else(|_| s.to_string())
+    }
+
+    fn ext_of(name: &str) -> String {
+        name.rsplit_once('.')
+            .map(|(_, e)| e.to_ascii_lowercase())
+            .unwrap_or_default()
+    }
+
+    /// MIME type for a file, based on its extension.
+    fn mime_for(name: &str) -> &'static str {
+        let ext = Self::ext_of(name);
+        let ext = if ext.is_empty() {
+            // handle extension-less names like Makefile / Dockerfile
+            name.to_ascii_lowercase()
+        } else {
+            ext
+        };
+        match ext.as_str() {
+            "html" | "htm" | "xhtml" => "text/html",
+            "css" | "scss" | "sass" | "less" => "text/css",
+            "js" | "mjs" | "cjs" | "jsx" => "text/javascript",
+            "ts" | "tsx" => "text/typescript",
+            "json" | "map" => "application/json",
+            "jsonl" | "ndjson" => "application/x-ndjson",
+            "txt" | "text" | "log" => "text/plain",
+            "md" | "markdown" | "mdx" | "mdown" => "text/markdown",
+            "csv" => "text/csv",
+            "tsv" => "text/tab-separated-values",
+            "xml" => "application/xml",
+            "svg" => "image/svg+xml",
+            "yaml" | "yml" => "application/yaml",
+            "toml" => "application/toml",
+            "ini" | "conf" | "cfg" | "properties" | "env" => "text/plain",
+            "png" => "image/png",
+            "jpg" | "jpeg" | "jfif" => "image/jpeg",
+            "gif" => "image/gif",
+            "webp" => "image/webp",
+            "bmp" | "dib" => "image/bmp",
+            "ico" => "image/x-icon",
+            "avif" => "image/avif",
+            "tiff" | "tif" => "image/tiff",
+            "pdf" => "application/pdf",
+            "mp4" | "m4v" => "video/mp4",
+            "webm" => "video/webm",
+            "mov" => "video/quicktime",
+            "mkv" => "video/x-matroska",
+            "mp3" | "mpga" => "audio/mpeg",
+            "wav" => "audio/wav",
+            "ogg" | "oga" => "audio/ogg",
+            "flac" => "audio/flac",
+            "m4a" => "audio/mp4",
+            "aac" => "audio/aac",
+            "zip" => "application/zip",
+            "gz" => "application/gzip",
+            "tar" => "application/x-tar",
+            "wasm" => "application/wasm",
+            _ => {
+                // Source/code extensions we serve as plain text
+                if Self::is_code_ext(&ext) {
+                    "text/plain"
+                } else {
+                    "application/octet-stream"
+                }
+            }
+        }
+    }
+
+    fn is_code_ext(ext: &str) -> bool {
+        matches!(
+            ext,
+            "py" | "rb" | "rs" | "go" | "c" | "h" | "cpp" | "hpp" | "cc" | "hh" | "cxx"
+                | "hxx" | "cs" | "java" | "kt" | "kts" | "swift" | "m" | "mm" | "sh"
+                | "bash" | "zsh" | "fish" | "ps1" | "bat" | "cmd" | "sql" | "r" | "pl"
+                | "php" | "lua" | "vim" | "elm" | "clj" | "ex" | "exs" | "erl" | "hs"
+                | "ml" | "fs" | "fsi" | "dart" | "groovy" | "gradle" | "scala" | "jl"
+                | "pro" | "v" | "sv" | "vhd" | "asm" | "s" | "nix" | "tf" | "hcl"
+                | "dockerfile" | "makefile" | "cmake" | "gitignore" | "gitattributes"
+                | "editorconfig" | "npmrc" | "babelrc" | "eslintrc" | "prettierrc"
+        )
+    }
+
+    /// Extensions the in-page preview surface renders as UTF-8 text.
+    fn is_text_ext(name: &str) -> bool {
+        let lower = name.to_ascii_lowercase();
+        let ext = Self::ext_of(&lower);
+        matches!(
+            ext.as_str(),
+            "txt" | "text" | "log" | "md" | "markdown" | "mdx" | "json" | "jsonl" | "ndjson"
+                | "csv" | "tsv" | "xml" | "yaml" | "yml" | "toml" | "ini" | "conf" | "cfg"
+                | "env" | "properties" | "html" | "htm" | "xhtml" | "css" | "scss" | "sass"
+                | "less" | "js" | "mjs" | "cjs" | "jsx" | "ts" | "tsx" | "map" | "svg"
+        ) || Self::is_code_ext(&lower)
+    }
+
+    /// Which file kinds the Linux in-page viewer can render itself. Files we
+    /// cannot render (Office docs, PDFs needing external helpers, …) return
+    /// false so the UI offers "Open file" instead of a broken preview.
+    fn builtin_viewer_supports(ext: &str) -> bool {
+        let ext = ext.trim_start_matches('.');
+        matches!(
+            ext,
+            "html" | "htm" | "xhtml" | "png" | "jpg" | "jpeg" | "jfif" | "gif" | "webp"
+                | "bmp" | "ico" | "avif" | "svg" | "md" | "markdown" | "txt" | "text" | "log"
+                | "json" | "jsonl" | "ndjson" | "csv" | "tsv" | "xml" | "yaml" | "yml"
+                | "toml" | "ini" | "conf" | "cfg" | "env" | "css" | "scss" | "sass" | "less"
+                | "js" | "mjs" | "cjs" | "jsx" | "ts" | "tsx"
+        ) || Self::is_code_ext(ext)
     }
 
     fn merge_with_exact_schema(actual: Value, schema: &Value) -> Value {
@@ -367,10 +475,97 @@ impl EipcRouter {
             }
             ("ClaudeAiImport", "getAuthState") => json!({ "status": "signed-out" }),
             ("CoworkFilePreview", "isEnabled")
-            | ("CoworkFilePreview", "isBuiltInViewerAvailable")
             | ("CoworkFilePreview", "isEpitaxyPreviewEnabled")
             | ("CoworkFilePreview", "isOpenInDefaultAppEnabled")
             | ("CoworkFilePreview", "isVmReady") => json!(true),
+            ("CoworkFilePreview", "isBuiltInViewerAvailable") => {
+                let ext = args
+                    .first()
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                json!(Self::builtin_viewer_supports(&ext))
+            }
+            ("CoworkFilePreview", "vmReadiness") => json!("connected"),
+            ("CoworkFilePreview", "focus") => json!(true),
+            // show(sessionId, encodedPath, rect, opts): register the preview in
+            // the engine and tell the in-page preview surface to render it.
+            ("CoworkFilePreview", "show") => {
+                let sid = args.first().and_then(|v| v.as_str()).unwrap_or("");
+                let raw_path = args.get(1).and_then(|v| v.as_str()).unwrap_or("");
+                let path = Self::percent_decode(raw_path)
+                    .trim()
+                    .trim_start_matches("computer://")
+                    .to_string();
+                if path.is_empty() {
+                    json!({ "ok": false, "declineReason": "viewer_invalid_file" })
+                } else {
+                    let (load_seq, is_new) = self.engine.preview_show(sid, &path);
+                    if is_new {
+                        self.engine.emit_eipc(
+                            "claude.web",
+                            "QuixiPreviewHost",
+                            "onShow",
+                            json!({
+                                "sessionId": sid,
+                                "path": path,
+                                "loadSeq": load_seq,
+                                "rect": args.get(2).cloned().unwrap_or(json!({})),
+                                "opts": args.get(3).cloned().unwrap_or(json!({})),
+                            }),
+                        );
+                    }
+                    json!({ "ok": true, "loadSeq": load_seq })
+                }
+            }
+            ("CoworkFilePreview", "hide") => {
+                self.engine.preview_hide();
+                self.engine.emit_eipc(
+                    "claude.web",
+                    "QuixiPreviewHost",
+                    "onHide",
+                    json!({}),
+                );
+                json!(true)
+            }
+            // whenContentReady(loadSeq, sessionId): resolve once the surface
+            // reports drawn; the signal must start with "drawn".
+            ("CoworkFilePreview", "whenContentReady") => {
+                let load_seq = args.first().and_then(|v| v.as_u64()).unwrap_or(0);
+                match self
+                    .engine
+                    .preview_wait_ready(std::time::Duration::from_secs(12))
+                {
+                    Some(cur) if cur == load_seq => {
+                        json!({ "ready": true, "signal": "drawn_iframe" })
+                    }
+                    _ => json!({ "ready": false, "reason": "viewer_timeout" }),
+                }
+            }
+            // whenContentLost(loadSeq, sessionId): block until this preview
+            // generation is hidden or superseded. The renderer treats any
+            // truthy reply as "content lost" and re-shows as needed.
+            ("CoworkFilePreview", "whenContentLost") => {
+                let load_seq = args.first().and_then(|v| v.as_u64()).unwrap_or(0);
+                self.engine
+                    .preview_wait_lost(load_seq, std::time::Duration::from_secs(600));
+                json!({})
+            }
+            // parkAndCapture: we cannot capture an occlusion screenshot on
+            // Linux; replying "" makes the renderer re-show the surface.
+            ("CoworkFilePreview", "parkAndCapture") => json!(""),
+
+            // --- QuixiPreviewHost (internal: in-page preview surface -> host) ---
+            ("QuixiPreviewHost", "drawn") => {
+                let path = args.first().and_then(|v| v.as_str()).unwrap_or("");
+                self.engine.preview_mark_ready(path);
+                json!(true)
+            }
+            ("QuixiPreviewHost", "reset") => {
+                let path = args.first().and_then(|v| v.as_str()).unwrap_or("");
+                self.engine.preview_mark_reset(path);
+                json!(true)
+            }
 
             // --- Launch (Dev Servers & Preview Tabs) ---
             ("Launch", "isAvailable") => json!(true),
@@ -2443,7 +2638,11 @@ impl EipcRouter {
                     .filter(|s| !s.trim().is_empty())
                     .or_else(|| args.first().and_then(|v| v.as_str()))
                     .unwrap_or("");
-                let decoded = Self::percent_decode(raw_path);
+                let decoded = Self::percent_decode(raw_path)
+                    .trim()
+                    .trim_start_matches("computer://")
+                    .trim_start_matches("file://")
+                    .to_string();
                 let path_buf = if Path::new(&decoded).is_absolute() {
                     std::path::PathBuf::from(&decoded)
                 } else {
@@ -2457,17 +2656,63 @@ impl EipcRouter {
                         .unwrap_or_else(|| quixi_proto::paths::default_workspace_str().to_string());
                     Path::new(&base).join(&decoded)
                 };
-                let content = fs::read_to_string(&path_buf).unwrap_or_default();
                 let name = path_buf
                     .file_name()
                     .and_then(|s| s.to_str())
                     .unwrap_or("file.txt");
-                json!({
-                    "content": content,
-                    "encoding": "utf8",
-                    "mimeType": "text/plain",
-                    "fileName": name
-                })
+                let mime = Self::mime_for(name);
+                if std::env::var_os("QUIXI_DEBUG_EIPC").is_some() {
+                    tracing::info!(
+                        "[readLocalFile] raw={} decoded={} resolved={} exists={}",
+                        raw_path,
+                        decoded,
+                        path_buf.display(),
+                        path_buf.exists()
+                    );
+                }
+                match fs::read(&path_buf) {
+                    Ok(bytes) => {
+                        // Text-ish files stay utf8 (the renderer's text/code
+                        // viewers reject base64); everything else (images,
+                        // pdf, …) must be base64 so the byte-level viewers
+                        // can rebuild a File/Blob from it.
+                        if Self::is_text_ext(name) {
+                            match String::from_utf8(bytes) {
+                                Ok(text) => json!({
+                                    "content": text,
+                                    "encoding": "utf8",
+                                    "mimeType": mime,
+                                    "fileName": name
+                                }),
+                                Err(err) => {
+                                    let b64 = base64::engine::general_purpose::STANDARD
+                                        .encode(err.into_bytes());
+                                    json!({
+                                        "content": b64,
+                                        "encoding": "base64",
+                                        "mimeType": mime,
+                                        "fileName": name
+                                    })
+                                }
+                            }
+                        } else {
+                            let b64 =
+                                base64::engine::general_purpose::STANDARD.encode(&bytes);
+                            json!({
+                                "content": b64,
+                                "encoding": "base64",
+                                "mimeType": mime,
+                                "fileName": name
+                            })
+                        }
+                    }
+                    Err(_) => json!({
+                        "content": "",
+                        "encoding": "utf8",
+                        "mimeType": mime,
+                        "fileName": name
+                    }),
+                }
             }
             ("FileSystem", "writeLocalFile") => {
                 let (raw_path, content) = if args.len() >= 3 {

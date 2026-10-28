@@ -5,7 +5,7 @@ mod storage;
 pub mod routstr;
 
 use chrono::Utc;
-use parking_lot::RwLock;
+use parking_lot::{Condvar, Mutex, RwLock};
 use providers::{ProviderManager, StreamChunk};
 use quixi_mcp::McpHost;
 use quixi_netstack::NetstackPolicy;
@@ -51,8 +51,36 @@ pub struct QuixiEngine {
     pub provider_manager: ProviderManager,
     pub user_locale: RwLock<String>,
     pub emitter: RwLock<Option<EventCallback>>,
+    pub file_preview: Mutex<FilePreviewState>,
+    pub file_preview_cv: Condvar,
     turn_cancellations: RwLock<HashMap<String, Arc<AtomicBool>>>,
     storage: storage::SessionStorage,
+}
+
+/// Tracks the currently-shown native file preview surface (Linux implementation
+/// of `CoworkFilePreview.*`, rendered as an in-page sandboxed iframe instead of
+/// a native overlay window).
+#[derive(Debug, Clone)]
+pub struct FilePreviewState {
+    pub session_id: String,
+    pub path: String,
+    pub load_seq: u64,
+    pub ready: bool,
+    pub lost: bool,
+    pub last_show: std::time::Instant,
+}
+
+impl Default for FilePreviewState {
+    fn default() -> Self {
+        Self {
+            session_id: String::new(),
+            path: String::new(),
+            load_seq: 0,
+            ready: false,
+            lost: false,
+            last_show: std::time::Instant::now(),
+        }
+    }
 }
 
 impl QuixiEngine {
@@ -230,6 +258,8 @@ impl QuixiEngine {
             provider_manager,
             user_locale: RwLock::new(initial_locale),
             emitter: RwLock::new(None),
+            file_preview: Mutex::new(FilePreviewState::default()),
+            file_preview_cv: Condvar::new(),
             turn_cancellations: RwLock::new(HashMap::new()),
         });
 
@@ -255,6 +285,95 @@ impl QuixiEngine {
             EIPC_UUID_MAIN, namespace, service, member
         );
         self.emit(&ch, payload);
+    }
+
+    // --- Native file preview surface (CoworkFilePreview backing state) ---
+
+    /// Begin a new preview: registers the path, bumps the load sequence, and
+    /// returns the new load_seq (mirrors the renderer's per-show counter).
+    /// Begin a new preview: registers the path, bumps the load sequence, and
+    /// returns (load_seq, is_new). Rapid re-shows of the same file (the
+    /// renderer calls show() twice per preview as its layout settles) dedupe
+    /// to the same load_seq so an already-blocked whenContentReady still
+    /// matches when the surface reports drawn.
+    pub fn preview_show(&self, session_id: &str, path: &str) -> (u64, bool) {
+        let mut st = self.file_preview.lock();
+        let now = std::time::Instant::now();
+        if st.path == path
+            && st.session_id == session_id
+            && !st.lost
+            && now.duration_since(st.last_show) < std::time::Duration::from_millis(250)
+        {
+            st.last_show = now;
+            return (st.load_seq, false);
+        }
+        st.session_id = session_id.to_string();
+        st.path = path.to_string();
+        st.load_seq = st.load_seq.wrapping_add(1);
+        st.ready = false;
+        st.lost = false;
+        st.last_show = now;
+        self.file_preview_cv.notify_all();
+        (st.load_seq, true)
+    }
+
+    /// The preview was hidden/closed: wake pending whenContentLost waiters.
+    pub fn preview_hide(&self) {
+        let mut st = self.file_preview.lock();
+        st.lost = true;
+        st.path.clear();
+        st.ready = false;
+        self.file_preview_cv.notify_all();
+    }
+
+    /// The in-page surface finished rendering the file (drawn POST).
+    pub fn preview_mark_ready(&self, path: &str) {
+        let mut st = self.file_preview.lock();
+        if !st.path.is_empty() && st.path == path {
+            st.ready = true;
+            self.file_preview_cv.notify_all();
+        }
+    }
+
+    /// The surface failed to render or was replaced; back to not-ready.
+    pub fn preview_mark_reset(&self, path: &str) {
+        let mut st = self.file_preview.lock();
+        if !st.path.is_empty() && st.path == path {
+            st.ready = false;
+            self.file_preview_cv.notify_all();
+        }
+    }
+
+    /// Block until the active preview reports drawn (or timeout).
+    /// Returns Some(current_load_seq) when ready.
+    pub fn preview_wait_ready(&self, timeout: std::time::Duration) -> Option<u64> {
+        let deadline = std::time::Instant::now() + timeout;
+        let mut st = self.file_preview.lock();
+        loop {
+            if st.ready && !st.path.is_empty() {
+                return Some(st.load_seq);
+            }
+            if std::time::Instant::now() >= deadline {
+                return None;
+            }
+            let _ = self.file_preview_cv.wait_until(&mut st, deadline);
+        }
+    }
+
+    /// Block until the preview generation seen by the caller is gone
+    /// (hidden or superseded by a newer show), or timeout.
+    pub fn preview_wait_lost(&self, load_seq: u64, timeout: std::time::Duration) {
+        let deadline = std::time::Instant::now() + timeout;
+        let mut st = self.file_preview.lock();
+        loop {
+            if st.lost || st.load_seq != load_seq || st.path.is_empty() {
+                return;
+            }
+            if std::time::Instant::now() >= deadline {
+                return;
+            }
+            let _ = self.file_preview_cv.wait_until(&mut st, deadline);
+        }
     }
 
     fn load_persisted_sessions(&self) {

@@ -2297,6 +2297,7 @@ name = "quixi-ipc"
 version = "3.6556.2"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "chrono",
  "dirs",
  "quixi-engine",

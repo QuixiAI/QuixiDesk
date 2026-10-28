@@ -1363,6 +1363,213 @@ fn main() -> anyhow::Result<()> {
         ));
     }
 
+    // Linux implementation of the native file preview surface. The renderer's
+    // CoworkFilePreview.show()/hide() calls are answered by the EIPC router,
+    // which emits QuixiPreviewHost onShow/onHide events; this helper renders
+    // the previewed file into a fixed-position sandboxed surface anchored to
+    // the preview pane and reports drawn/reset back through EIPC.
+    #[cfg(target_os = "linux")]
+    init_script.push_str(&format!(
+        r#"
+;(function() {{
+  if (window.__QUIXI_PREVIEW_HELPER__) return;
+  window.__QUIXI_PREVIEW_HELPER__ = true;
+  var PRE = "$eipc_message$_{uuid}_$_claude.web_$_";
+
+  function eipcCall(member, args) {{
+    try {{
+      return fetch("/__eipc__/invoke", {{
+        method: "POST",
+        headers: {{ "Content-Type": "application/json" }},
+        body: JSON.stringify({{ channel: PRE + "QuixiPreviewHost_$_" + member, args: args }})
+      }}).catch(function() {{}});
+    }} catch (_) {{
+      return Promise.resolve();
+    }}
+  }}
+
+  function onChannel(member, fn) {{
+    try {{
+      var m = window.__QUIXI_LISTENERS__ || (window.__QUIXI_LISTENERS__ = new Map());
+      var ch = PRE + "QuixiPreviewHost_$_" + member;
+      var set = m.get(ch);
+      if (!set) {{ set = new Set(); m.set(ch, set); }}
+      set.add(function(ev) {{
+        var args = Array.prototype.slice.call(arguments, 1);
+        try {{ fn.apply(null, args); }} catch (err) {{ console.warn("[quixi-preview]", err); }}
+      }});
+    }} catch (_) {{}}
+  }}
+
+  var surface = null;
+
+  function removeSurface(notifyReset) {{
+    var s = surface;
+    if (!s) return;
+    surface = null;
+    try {{ if (s.unbind) s.unbind(); }} catch (_) {{}}
+    try {{ s.root.remove(); }} catch (_) {{}}
+    if (notifyReset && s.path) eipcCall("reset", [s.path]);
+  }}
+
+  function findAnchor(rect) {{
+    try {{
+      var cx = Math.min(Math.max(rect.x + rect.width / 2, 1), window.innerWidth - 1);
+      var cy = Math.min(Math.max(rect.y + rect.height / 2, 1), window.innerHeight - 1);
+      var el = document.elementFromPoint(cx, cy);
+      var best = null, bestErr = Infinity;
+      for (var cur = el; cur; cur = cur.parentElement) {{
+        var r = cur.getBoundingClientRect();
+        var err = Math.abs(r.x - rect.x) + Math.abs(r.y - rect.y)
+          + Math.abs(r.width - rect.width) + Math.abs(r.height - rect.height);
+        if (err < bestErr) {{ bestErr = err; best = cur; }}
+        if (err <= 2) break;
+      }}
+      if (best && bestErr <= 8) return best;
+    }} catch (_) {{}}
+    return null;
+  }}
+
+  function place(s) {{
+    try {{
+      var r = (s.anchor && s.anchor.isConnected)
+        ? s.anchor.getBoundingClientRect()
+        : s.rect;
+      var hidden = !r || r.width < 4 || r.height < 4;
+      s.root.style.opacity = hidden ? "0" : "1";
+      s.root.style.pointerEvents = hidden ? "none" : "auto";
+      if (!hidden) {{
+        s.root.style.left = r.x + "px";
+        s.root.style.top = r.y + "px";
+        s.root.style.width = r.width + "px";
+        s.root.style.height = r.height + "px";
+      }}
+    }} catch (_) {{}}
+  }}
+
+  function b64ToBlobUrl(b64, mime) {{
+    try {{
+      var bin = atob(b64);
+      var arr = new Uint8Array(bin.length);
+      for (var i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+      return URL.createObjectURL(new Blob([arr], {{ type: mime || "application/octet-stream" }}));
+    }} catch (_) {{
+      return null;
+    }}
+  }}
+
+  function showPreview(payload) {{
+    if (!payload || typeof payload !== "object") return;
+    var path = String(payload.path || "");
+    var sid = String(payload.sessionId || "");
+    var rect = (payload.rect && typeof payload.rect === "object") ? payload.rect
+      : {{ x: 0, y: 0, width: window.innerWidth, height: window.innerHeight }};
+    removeSurface(false);
+
+    var root = document.createElement("div");
+    root.setAttribute("data-quixi-preview-surface", "1");
+    root.style.cssText = "position:fixed;z-index:2147483000;background:#ffffff;"
+      + "overflow:hidden;border-radius:10px;box-shadow:0 12px 48px rgba(0,0,0,0.28);";
+
+    var extM = path.match(/\.([A-Za-z0-9]+)$/);
+    var ext = extM ? extM[1].toLowerCase() : "";
+    var isHtml = ext === "html" || ext === "htm";
+    var isImage = ["png","jpg","jpeg","jfif","gif","webp","bmp","ico","avif","svg"].indexOf(ext) >= 0;
+
+    var s = {{ root: root, path: path, rect: rect, anchor: findAnchor(rect), unbind: null, blobUrl: null }};
+    surface = s;
+    var ready = false;
+    function markDrawn() {{
+      if (surface === s && !ready) {{ ready = true; eipcCall("drawn", [path]); }}
+    }}
+    function markReset() {{
+      if (surface === s) eipcCall("reset", [path]);
+    }}
+
+    fetch("/__eipc__/invoke", {{
+      method: "POST",
+      headers: {{ "Content-Type": "application/json" }},
+      body: JSON.stringify({{
+        channel: PRE + "FileSystem_$_readLocalFile",
+        args: [sid, encodeURIComponent(path)]
+      }})
+    }}).then(function(r) {{ return r.ok ? r.json() : null; }})
+      .then(function(d) {{ return (d && d.result) || null; }})
+      .catch(function() {{ return null; }})
+      .then(function(res) {{
+        if (surface !== s) return;
+        if (!res || typeof res.content !== "string") {{ markReset(); return; }}
+        var mime = res.mimeType || "application/octet-stream";
+        if (isHtml) {{
+          var frame = document.createElement("iframe");
+          frame.setAttribute("sandbox", "allow-scripts allow-forms allow-popups allow-modals");
+          frame.setAttribute("referrerpolicy", "no-referrer");
+          frame.style.cssText = "border:0;width:100%;height:100%;display:block;background:#ffffff;";
+          root.appendChild(frame);
+          frame.addEventListener("load", markDrawn);
+          frame.addEventListener("error", markReset);
+          frame.srcdoc = res.encoding === "base64" ? atob(res.content) : res.content;
+        }} else if (isImage) {{
+          var img = document.createElement("img");
+          img.alt = "";
+          img.style.cssText = "width:100%;height:100%;object-fit:contain;display:block;background:#141414;";
+          root.appendChild(img);
+          img.addEventListener("load", markDrawn);
+          img.addEventListener("error", markReset);
+          var url = null;
+          if (res.encoding === "base64") url = b64ToBlobUrl(res.content, mime);
+          else {{
+            try {{ url = URL.createObjectURL(new Blob([res.content], {{ type: mime }})); }}
+            catch (_) {{ url = null; }}
+          }}
+          if (url) {{ s.blobUrl = url; img.src = url; }} else {{ markReset(); }}
+        }} else {{
+          var pre = document.createElement("pre");
+          pre.style.cssText = "margin:0;padding:16px;color:#e8e8e8;"
+            + "font:12px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace;"
+            + "white-space:pre-wrap;word-break:break-word;";
+          if (res.encoding === "base64") {{
+            pre.textContent = "(binary file)";
+            root.style.background = '#141414';
+          }} else {{
+            pre.textContent = res.content;
+            root.style.background = '#141414';
+          }}
+          root.style.overflow = "auto";
+          root.appendChild(pre);
+          markDrawn();
+        }}
+        place(s);
+      }});
+
+    document.documentElement.appendChild(root);
+    place(s);
+
+    var raf = 0;
+    var onMove = function() {{
+      if (surface !== s || raf) return;
+      raf = requestAnimationFrame(function() {{
+        raf = 0;
+        if (surface === s) place(s);
+      }});
+    }};
+    window.addEventListener("resize", onMove, true);
+    window.addEventListener("scroll", onMove, true);
+    s.unbind = function() {{
+      window.removeEventListener("resize", onMove, true);
+      window.removeEventListener("scroll", onMove, true);
+      if (raf) {{ try {{ cancelAnimationFrame(raf); }} catch (_) {{}} raf = 0; }}
+      if (s.blobUrl) {{ try {{ URL.revokeObjectURL(s.blobUrl); }} catch (_) {{}} s.blobUrl = null; }}
+    }};
+  }}
+
+  onChannel("onShow", showPreview);
+  onChannel("onHide", function() {{ removeSurface(true); }});
+}})();
+"#,
+        uuid = quixi_proto::EIPC_UUID_MAIN,
+    ));
+
     // Append native window drag, titlebar double-click, and diagnostic telemetry bridge
     init_script.push_str(
         r#"
