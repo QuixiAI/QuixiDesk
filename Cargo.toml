@@ -17,7 +17,7 @@ members = [
 ]
 
 [workspace.package]
-version = "3.6556.2"
+version = "3.6556.3"
 edition = "2021"
 authors = ["QuixiDesk Team"]
 license = "MIT"

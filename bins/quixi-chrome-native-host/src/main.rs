@@ -19,7 +19,7 @@ pub fn handle_native_message(host: &McpHost, incoming: &Value) -> Value {
         "ping" | "get_status" => json!({
             "type": "pong",
             "host": "quixi-chrome-native-host",
-            "version": "3.6556.2",
+            "version": "3.6556.3",
             "connected": true,
             "tabs": BrowserUse::tabs_context(false)["tabs"],
             "echo": incoming,
@@ -80,7 +80,7 @@ pub fn handle_native_message(host: &McpHost, incoming: &Value) -> Value {
         _ => json!({
             "type": "pong",
             "host": "quixi-chrome-native-host",
-            "version": "3.6556.2",
+            "version": "3.6556.3",
             "echo": incoming,
         }),
     }

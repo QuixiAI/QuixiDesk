@@ -69,7 +69,7 @@ fn main() -> anyhow::Result<()> {
                     },
                     "serverInfo": {
                         "name": format!("quixi-{}", mode),
-                        "version": "3.6556.2"
+                        "version": "3.6556.3"
                     }
                 })
             }
