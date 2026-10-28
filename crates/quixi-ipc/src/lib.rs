@@ -664,6 +664,8 @@ impl EipcRouter {
                     self.engine.persist_agent_session(sess);
                 }
                 if found {
+                    self.engine.emit_eipc("claude.web", "LocalAgentModeSessions", "onEvent",
+                        json!({"type":"permission_mode_changed","sessionId":sid,"permissionMode":mode}));
                     self.engine.emit_eipc(
                         "claude.web",
                         "LocalAgentModeSessions",
@@ -674,10 +676,11 @@ impl EipcRouter {
                         }),
                     );
                 }
-                Value::Null
+                json!(found)
             }
             ("LocalAgentModeSessions", "stop") | ("LocalAgentModeSessions", "stopTask") => {
                 let sid = args.first().and_then(|v| v.as_str()).unwrap_or("");
+                self.engine.cancel_turn(sid);
                 let mut found = false;
                 if let Some(sess) = self.engine.agent_sessions.write().get_mut(sid) {
                     found = true;
@@ -695,10 +698,15 @@ impl EipcRouter {
                         }),
                     );
                 }
+                if found {
+                    self.engine.emit_eipc("claude.web", "LocalAgentModeSessions", "onEvent",
+                        json!({"type":"close","sessionId":sid,"code":0}));
+                }
                 Value::Null
             }
             ("LocalAgentModeSessions", "archive") => {
                 let sid = args.first().and_then(|v| v.as_str()).unwrap_or("");
+                self.engine.cancel_turn(sid);
                 let mut found = false;
                 if let Some(sess) = self.engine.agent_sessions.write().get_mut(sid) {
                     found = true;
@@ -1316,6 +1324,7 @@ impl EipcRouter {
             | ("LocalSessions", "interrupt")
             | ("LocalSessions", "stopTask") => {
                 let sid = args.first().and_then(|v| v.as_str()).unwrap_or("");
+                self.engine.cancel_turn(sid);
                 let mut updated_sess = None;
                 if let Some(sess) = self.engine.code_sessions.write().get_mut(sid) {
                     sess.turn_running = false;
@@ -2671,7 +2680,10 @@ mod tests {
         let agent_sid = start_agent["sessionId"].as_str().unwrap().to_string();
         assert!(agent_sid.starts_with("local_"));
 
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        for _ in 0..100 {
+            if _engine.agent_sessions.read().get(&agent_sid).is_some_and(|session| !session.is_running) { break; }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
 
         let transcript = router
             .dispatch(&EipcInvokePayload {
@@ -2703,7 +2715,10 @@ mod tests {
         assert!(code_sid.starts_with("local_"));
         assert!(!code_sid.starts_with("local_cli_"));
 
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        for _ in 0..100 {
+            if _engine.code_sessions.read().get(&code_sid).is_some_and(|session| !session.turn_running) { break; }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
 
         let code_transcript = router
             .dispatch(&EipcInvokePayload {
@@ -3098,5 +3113,29 @@ mod tests {
             ),
             args: vec![json!(sid)],
         });
+    }
+}
+
+#[cfg(test)]
+mod session_control_regression_tests {
+    use super::*;
+    #[test]
+    fn permission_changes_and_stop_publish_renderer_events() {
+        let engine = QuixiEngine::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../resources"));
+        let router = EipcRouter::new(engine.clone());
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = events.clone();
+        engine.set_emitter(Arc::new(move |_, event| recorded.lock().unwrap().push(event)));
+        let sid = engine.start_agent_session(&json!({"permissionMode":"auto"}));
+        let call = |method: &str, args: Vec<Value>| router.dispatch(&EipcInvokePayload {
+            channel: format!("$eipc_message$_{}_$_claude.web_$_LocalAgentModeSessions_$_{}", quixi_proto::EIPC_UUID_MAIN, method), args,
+        });
+        assert_eq!(call("setPermissionMode",vec![json!(sid),json!("default")]).result,Some(json!(true)));
+        call("stop",vec![json!(sid)]);
+        let events = events.lock().unwrap();
+        assert!(events.iter().any(|event| event["type"] == "permission_mode_changed" && event["permissionMode"] == "default"));
+        assert!(events.iter().any(|event| event["type"] == "close" && event["code"] == 0));
+        drop(events);
+        call("delete",vec![json!(sid)]);
     }
 }

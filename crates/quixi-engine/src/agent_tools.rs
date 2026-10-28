@@ -181,6 +181,7 @@ pub fn validate_input(name: &str, input: &Value) -> Result<(), String> {
 #[derive(Default)]
 pub struct ToolResults(std::collections::HashMap<String, (String, bool)>);
 impl ToolResults {
+    pub fn contains(&self, name: &str, input: &Value) -> bool { self.0.contains_key(&format!("{name}|{input}")) }
     pub fn run(&mut self, name: &str, input: &Value, action: impl FnOnce() -> (String, bool)) -> (String, bool) {
         let key = format!("{name}|{input}");
         self.0.entry(key).or_insert_with(action).clone()
@@ -200,9 +201,12 @@ pub fn execute(
     }
     let auto_ok = matches!(
         permission_mode,
-        "auto" | "bypassPermissions" | "acceptEdits"
+        "auto" | "bypassPermissions"
     );
 
+    if !auto_ok && !(permission_mode == "acceptEdits" && matches!(name, TOOL_WRITE | TOOL_EDIT)) && matches!(name, TOOL_BASH | TOOL_WRITE | TOOL_EDIT | TOOL_WEB_FETCH) {
+        return (format!("Approval required for {name}. Switch this session to Auto to allow actions."), true);
+    }
     match name {
         TOOL_BASH => {
             let command = input.get("command").and_then(|v| v.as_str()).unwrap_or("");
@@ -385,7 +389,8 @@ fn mcp_tool_needs_confirm(server: &str, tool: &str) -> bool {
                 .is_some_and(|uuid| server == uuid.to_ascii_lowercase())
     });
     if !server_is_gui {
-        return false;
+        return !matches!(tool.to_ascii_lowercase().as_str(),
+            "read_file" | "list_files" | "list_directory" | "git_status" | "git_diff" | "git_log" | "recall_memory");
     }
     // Only known observational tools are exempt. Unknown actions require consent.
     !matches!(tool.to_ascii_lowercase().as_str(),
@@ -454,10 +459,11 @@ mod gate_tests {
     }
 
     #[test]
-    fn other_servers_are_not_gated_here() {
-        // filesystem/git/fetch servers are ordinary tool calls, not GUI actions.
-        assert!(!mcp_tool_needs_confirm("filesystem", "write_file"));
-        assert!(!mcp_tool_needs_confirm("git", "commit"));
+    fn mutations_on_other_servers_also_require_confirmation() {
+        // Manual mode also protects mutations through non-GUI servers.
+        assert!(mcp_tool_needs_confirm("filesystem", "write_file"));
+        assert!(mcp_tool_needs_confirm("git", "commit"));
+        assert!(!mcp_tool_needs_confirm("filesystem", "read_file"));
     }
 
     #[test]
@@ -501,5 +507,18 @@ mod regression_tests {
         assert!(validate_input("Write", &json!({"file_path":"a", "content":null})).is_err());
         assert!(validate_input("Bash", &json!([])).is_err());
         assert!(validate_input("Write", &json!({"file_path":"a", "content":""})).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod permission_regression_tests {
+    use super::*;
+    #[test]
+    fn manual_blocks_shell_and_file_changes() {
+        let host = McpHost::new();
+        for (name, input) in [(TOOL_BASH,json!({"command":"printf SHOULD_NOT_RUN"})),(TOOL_WRITE,json!({"file_path":"/tmp/quixi-must-not-write","content":"x"})),(TOOL_EDIT,json!({"file_path":"a","old_string":"x","new_string":"y"}))] {
+            let (message, error) = execute(name,&input,"/tmp","default",&host);
+            assert!(error); assert!(message.contains("Approval required"));
+        }
     }
 }

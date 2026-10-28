@@ -2893,6 +2893,7 @@ pub struct ProviderToolCall {
 /// The full result of one assistant turn that was allowed to call tools.
 #[derive(Debug, Clone)]
 pub struct ProviderToolTurn {
+    pub response_items: Vec<Value>,
     pub text: String,
     pub thinking: String,
     pub tool_calls: Vec<ProviderToolCall>,
@@ -2961,6 +2962,9 @@ impl ProviderManager {
             )
         };
 
+        if provider_id == "openai" && auth_mode == "oauth" {
+            return Some(self.complete_codex_tool_turn(messages, tools, &model_id, &credential, &mut on_chunk));
+        }
         if api_format != "openai"
             || base_url.is_empty()
             || credential.starts_with("oauth_")
@@ -3006,35 +3010,21 @@ impl ProviderManager {
             .send()
         {
             Ok(resp) => resp,
-            Err(err) => {
-                on_chunk(StreamChunk::Text(format!(
-                    "\n\n⚠️ {} unreachable: {err}",
-                    provider_name
-                )));
-                return None;
-            }
+            Err(err) => return Some(tool_failure(format!("{provider_name} unreachable: {err}"), &provider_name, &model_id)),
         };
 
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().unwrap_or_default();
-            on_chunk(StreamChunk::Text(format!(
-                "⚠️ {} returned HTTP {} for model `{}`: {}",
-                provider_name,
-                status.as_u16(),
-                model_id,
-                body.chars().take(400).collect::<String>()
-            )));
-            return None;
+            return Some(tool_failure(format!("{provider_name} returned HTTP {} for model `{model_id}`: {}", status.as_u16(), body.chars().take(400).collect::<String>()), &provider_name, &model_id));
         }
 
         let (text, thinking, tool_calls) = match parse_tool_stream(BufReader::new(resp), &mut on_chunk) {
             Ok(turn) => turn,
             Err(error) => {
                 let text = format!("Provider turn failed: {error}");
-                on_chunk(StreamChunk::Text(text.clone()));
                 return Some(ProviderToolTurn {
-                    text, thinking: String::new(), tool_calls: Vec::new(), provider_name, model_id,
+                    text, thinking: String::new(), tool_calls: Vec::new(), response_items: Vec::new(), provider_name, model_id,
                 });
             }
         };
@@ -3046,6 +3036,7 @@ impl ProviderManager {
             "agent tools: turn finished"
         );
         Some(ProviderToolTurn {
+            response_items: Vec::new(),
             text,
             thinking,
             tool_calls,
@@ -3398,3 +3389,5 @@ mod tool_stream_regression_tests {
         assert!(parse_tool_stream(BufReader::new(input), |_| {}).is_err());
     }
 }
+
+include!("provider_tool_responses.rs");
