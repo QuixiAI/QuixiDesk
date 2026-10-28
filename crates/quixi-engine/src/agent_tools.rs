@@ -151,6 +151,42 @@ fn looks_destructive(command: &str) -> bool {
     patterns.iter().any(|p| c.contains(p)) || (c.contains("curl") && c.contains("| sh"))
 }
 
+/// Validate required arguments before any side effect, including truncated model output.
+pub fn validate_input(name: &str, input: &Value) -> Result<(), String> {
+    let schemas = tool_schemas();
+    let schema = schemas.as_array().unwrap().iter()
+        .find(|s| s["function"]["name"] == name)
+        .ok_or_else(|| format!("Unknown tool `{name}`."))?;
+    let object = input.as_object().ok_or("Tool arguments must be an object.")?;
+    let params = &schema["function"]["parameters"];
+    for key in params["required"].as_array().unwrap() {
+        let key = key.as_str().unwrap();
+        if !object.contains_key(key) {
+            return Err(format!("Missing required argument `{key}`."));
+        }
+    }
+    for (key, value) in object {
+        let valid = match params["properties"][key]["type"].as_str() {
+            Some("string") => value.is_string(),
+            Some("object") => value.is_object(),
+            Some("integer") => value.as_u64().is_some(),
+            _ => true,
+        };
+        if !valid { return Err(format!("Invalid argument `{key}`.")); }
+    }
+    Ok(())
+}
+
+/// Cache results so repeated calls (including calls in the same batch) cannot act twice.
+#[derive(Default)]
+pub struct ToolResults(std::collections::HashMap<String, (String, bool)>);
+impl ToolResults {
+    pub fn run(&mut self, name: &str, input: &Value, action: impl FnOnce() -> (String, bool)) -> (String, bool) {
+        let key = format!("{name}|{input}");
+        self.0.entry(key).or_insert_with(action).clone()
+    }
+}
+
 /// Executes one tool call. Returns `(text_result, is_error)`.
 pub fn execute(
     name: &str,
@@ -159,6 +195,9 @@ pub fn execute(
     permission_mode: &str,
     mcp_host: &McpHost,
 ) -> (String, bool) {
+    if let Err(error) = validate_input(name, input) {
+        return (error, true);
+    }
     let auto_ok = matches!(
         permission_mode,
         "auto" | "bypassPermissions" | "acceptEdits"
@@ -334,47 +373,25 @@ pub fn execute(
 }
 
 /// Tools that act on the machine (mouse, keyboard, app/window lifecycle, tab control).
-/// Read-only tools — `screenshot`, `get_*`, `list_*`, `read_*`, `keywords` — stay available
-/// in every permission mode, so the agent can always look before it asks to touch anything.
+/// Known observational tools stay available in every permission mode. GUI server
+/// aliases and UUIDs share the same gate; unknown tools require confirmation.
 fn mcp_tool_needs_confirm(server: &str, tool: &str) -> bool {
-    let server_is_gui = matches!(
-        server.to_ascii_lowercase().as_str(),
-        "computer-use" | "browser-use"
-    );
+    let server = server.to_ascii_lowercase();
+    let gui_names = ["computer-use", "browser-use", "claude-in-chrome",
+        "Claude Browser", "Claude Preview", "Framebuffer", "Window Halo"];
+    let server_is_gui = gui_names.iter().any(|name| {
+        server == name.to_ascii_lowercase()
+            || McpHost::internal_server_uuid(name)
+                .is_some_and(|uuid| server == uuid.to_ascii_lowercase())
+    });
     if !server_is_gui {
         return false;
     }
-    let t = tool.to_ascii_lowercase();
-    if t.starts_with("get_")
-        || t.starts_with("list_")
-        || t.starts_with("read_")
-        || t == "keywords"
-        || t == "screenshot"
-    {
-        return false;
-    }
-    matches!(
-        t.as_str(),
-        "click"
-            | "double_click"
-            | "right_click"
-            | "move"
-            | "drag"
-            | "scroll"
-            | "type"
-            | "type_text"
-            | "key"
-            | "press_key"
-            | "hotkey"
-            | "navigate"
-            | "open_url"
-            | "launch"
-            | "launch_app"
-            | "focus"
-            | "activate"
-            | "close"
-            | "quit"
-    )
+    // Only known observational tools are exempt. Unknown actions require consent.
+    !matches!(tool.to_ascii_lowercase().as_str(),
+        "screenshot" | "zoom" | "get_window_layout" | "get_page_text"
+        | "read_page" | "list_connected_browsers" | "keywords")
+
 }
 
 /// Screenshots come back as base64 PNGs. They are useless to the model and would blow up
@@ -455,5 +472,34 @@ mod gate_tests {
             "osascript -e 'tell application \"Mail\" to activate'"
         ));
         assert!(!looks_destructive("git status"));
+    }
+}
+
+#[cfg(test)]
+mod regression_tests {
+    use super::*;
+    #[test]
+    fn gui_actions_and_aliases_require_permission() {
+        for server in ["computer-use", "COMPUTER-USE", "b0a3b6e5-7ca0-462a-8e6f-bac087408b17", "Claude Browser", "Framebuffer"] {
+            for tool in ["left_click", "triple_click", "middle_click", "left_click_drag", "new_action"] {
+                assert!(mcp_tool_needs_confirm(server, tool), "{server}/{tool}");
+            }
+            assert!(!mcp_tool_needs_confirm(server, "screenshot"));
+        }
+    }
+    #[test]
+    fn repeated_calls_reuse_result_without_running_again() {
+        let mut results = ToolResults::default();
+        let input = json!({"command": "create-draft"});
+        assert_eq!(results.run("Bash", &input, || ("created".into(), false)), ("created".into(), false));
+        assert_eq!(results.run("Bash", &input, || panic!("must not run twice")), ("created".into(), false));
+        assert_eq!(results.run("Bash", &json!({"command":"different"}), || ("second".into(), false)).0, "second");
+    }
+    #[test]
+    fn invalid_arguments_are_rejected_before_execution() {
+        assert!(validate_input("Write", &json!({"file_path":"a"})).is_err());
+        assert!(validate_input("Write", &json!({"file_path":"a", "content":null})).is_err());
+        assert!(validate_input("Bash", &json!([])).is_err());
+        assert!(validate_input("Write", &json!({"file_path":"a", "content":""})).is_ok());
     }
 }

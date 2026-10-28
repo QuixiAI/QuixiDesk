@@ -1,3 +1,4 @@
+use std::io::BufRead;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use parking_lot::RwLock;
@@ -2035,7 +2036,7 @@ impl ProviderManager {
     where
         F: FnMut(&str),
     {
-        use std::io::{BufRead, BufReader};
+        use std::io::BufReader;
 
         let mut input_items = Vec::new();
         for (role, text) in history {
@@ -2461,7 +2462,7 @@ impl ProviderManager {
                 on_chunk(StreamChunk::Text(($text).to_string()))
             };
         }
-        use std::io::{BufRead, BufReader};
+        use std::io::BufReader;
 
         let resolved_model = self.resolve_connected_model(model_override);
         let (provider_id, provider_name, mut model_id, base_url, api_format, auth_mode, mut credential) = {
@@ -2915,7 +2916,7 @@ impl ProviderManager {
     where
         F: FnMut(StreamChunk),
     {
-        use std::io::{BufRead, BufReader};
+        use std::io::BufReader;
 
         let resolved_model = self.resolve_connected_model(model_override);
         let (provider_id, provider_name, model_id, base_url, api_format, auth_mode, credential) = {
@@ -3027,11 +3028,41 @@ impl ProviderManager {
             return None;
         }
 
+        let (text, thinking, tool_calls) = match parse_tool_stream(BufReader::new(resp), &mut on_chunk) {
+            Ok(turn) => turn,
+            Err(error) => {
+                let text = format!("Provider turn failed: {error}");
+                on_chunk(StreamChunk::Text(text.clone()));
+                return Some(ProviderToolTurn {
+                    text, thinking: String::new(), tool_calls: Vec::new(), provider_name, model_id,
+                });
+            }
+        };
+
+        tracing::info!(
+            text_chars = text.len(),
+            thinking_chars = thinking.len(),
+            tool_calls = tool_calls.len(),
+            "agent tools: turn finished"
+        );
+        Some(ProviderToolTurn {
+            text,
+            thinking,
+            tool_calls,
+            provider_name,
+            model_id,
+        })
+    }
+}
+
+fn parse_tool_stream<R: std::io::BufRead, F: FnMut(StreamChunk)>(reader: R, mut on_chunk: F)
+    -> Result<(String, String, Vec<ProviderToolCall>), String> {
         let mut text = String::new();
         let mut thinking = String::new();
         let mut calls: Vec<ProviderToolCall> = Vec::new();
-        let reader = BufReader::new(resp);
-        for line in reader.lines().map_while(Result::ok) {
+        let mut finish_reason = None;
+        for line in reader.lines() {
+            let line = line.map_err(|error| format!("Interrupted provider stream: {error}"))?;
             let trimmed = line.trim();
             let Some(data_str) = trimmed.strip_prefix("data:") else {
                 continue;
@@ -3040,9 +3071,12 @@ impl ProviderManager {
             if data_str.is_empty() || data_str == "[DONE]" {
                 continue;
             }
-            let Ok(ev) = serde_json::from_str::<Value>(data_str) else {
-                continue;
-            };
+            let ev: Value = serde_json::from_str(data_str)
+                .map_err(|error| format!("Invalid provider event: {error}"))?;
+            if ev.get("error").is_some() { return Err(format!("Provider stream error: {}", ev["error"])); }
+            if let Some(reason) = ev.pointer("/choices/0/finish_reason").and_then(Value::as_str) {
+                finish_reason = Some(reason.to_string());
+            }
             let delta = ev.pointer("/choices/0/delta");
 
             if let Some(th) = delta
@@ -3092,6 +3126,17 @@ impl ProviderManager {
             }
         }
 
+        if !matches!(finish_reason.as_deref(), Some("stop" | "tool_calls")) {
+            return Err("Provider stream did not complete successfully; no tools were executed.".to_string());
+        }
+        for call in &calls {
+            if call.name.is_empty() || call.id.is_empty() {
+                return Err("Incomplete tool call in provider stream.".to_string());
+            }
+            let input: Value = serde_json::from_str(&call.arguments)
+                .map_err(|error| format!("Invalid tool arguments: {error}"))?;
+            crate::agent_tools::validate_input(&call.name, &input)?;
+        }
         let tool_calls: Vec<ProviderToolCall> = calls
             .into_iter()
             .filter(|c| !c.name.is_empty())
@@ -3103,20 +3148,7 @@ impl ProviderManager {
             })
             .collect();
 
-        tracing::info!(
-            text_chars = text.len(),
-            thinking_chars = thinking.len(),
-            tool_calls = tool_calls.len(),
-            "agent tools: turn finished"
-        );
-        Some(ProviderToolTurn {
-            text,
-            thinking,
-            tool_calls,
-            provider_name,
-            model_id,
-        })
-    }
+        Ok((text, thinking, tool_calls))
 }
 
 #[cfg(test)]
@@ -3326,5 +3358,43 @@ mod streaming_chunk_tests {
         assert!(reply.contains("402"), "reply was: {reply}");
         assert!(reply.contains("Insufficient Balance"), "reply was: {reply}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod tool_stream_regression_tests {
+    use super::*;
+    use std::io::{self, Cursor, Read, BufReader};
+    fn stream(args: &str, finish: Option<&str>) -> String {
+        let delta = json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"Bash","arguments":args}}]}}]});
+        let mut output = format!("data: {delta}\n\n");
+        if let Some(reason) = finish {
+            output.push_str(&format!("data: {}\n\ndata: [DONE]\n\n", json!({"choices":[{"delta":{},"finish_reason":reason}]})));
+        }
+        output
+    }
+    #[test]
+    fn complete_stream_returns_valid_calls() {
+        let (_, _, calls) = parse_tool_stream(Cursor::new(stream(r#"{"command":"pwd"}"#, Some("tool_calls"))), |_| {}).unwrap();
+        assert_eq!(calls.len(), 1);
+    }
+    #[test]
+    fn truncated_and_invalid_turns_return_no_calls() {
+        for body in [stream(r#"{"command":"pwd"}"#, None), stream(r#"{"command":"pwd"}"#, Some("length")), stream(r#"{"command":"# , Some("tool_calls")), stream("{}", Some("tool_calls"))] {
+            assert!(parse_tool_stream(Cursor::new(body), |_| {}).is_err());
+        }
+    }
+    struct BrokenStream(Cursor<Vec<u8>>);
+    impl Read for BrokenStream {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.0.position() as usize == self.0.get_ref().len() {
+                Err(io::Error::new(io::ErrorKind::ConnectionReset, "disconnected"))
+            } else { self.0.read(buf) }
+        }
+    }
+    #[test]
+    fn transport_failure_rejects_accumulated_calls() {
+        let input = BrokenStream(Cursor::new(stream(r#"{"command":"pwd"}"#, None).into_bytes()));
+        assert!(parse_tool_stream(BufReader::new(input), |_| {}).is_err());
     }
 }

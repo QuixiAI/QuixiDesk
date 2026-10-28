@@ -115,7 +115,6 @@ The bundle is relocatable (resources are copied, not symlinked), ad-hoc codesign
 
 > **Workspace folder:** the engine opens the source checkout by default. Point it anywhere else with `QUIXI_WORKSPACE=/path/to/folder`. All path defaults live in `crates/quixi-proto/src/paths.rs` — no machine-specific paths are baked in.
 >
-> **Note:** the `reference/` directory (1,400-channel EIPC catalogue and exact schemas) is a reverse-engineering artifact and is *not* part of the repository. Builds fall back to `crates/quixi-ipc/assets/ipc-exact-schemas.json`, and the 1,400-channel parity sweep test self-skips when the catalogue is missing.
 
 Or run the desktop app directly in release mode:
 ```bash

@@ -2639,6 +2639,7 @@ impl QuixiEngine {
         let mut used_tools = false;
         let mut seen_calls: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut repeats = 0usize;
+        let mut tool_results = agent_tools::ToolResults::default();
 
         for round in 0..MAX_ROUNDS {
             let turn = match self.provider_manager.complete_turn_with_tools(
@@ -2748,14 +2749,12 @@ impl QuixiEngine {
             // 2. Execute each requested tool and report the result back.
             let mut result_blocks: Vec<Value> = Vec::new();
             for call in &turn.tool_calls {
-                let input: Value = serde_json::from_str(&call.arguments).unwrap_or_else(|_| json!({}));
-                let (output, is_error) = agent_tools::execute(
-                    &call.name,
-                    &input,
-                    cwd,
-                    permission_mode,
-                    &self.mcp_host,
-                );
+                let (output, is_error) = match serde_json::from_str::<Value>(&call.arguments) {
+                    Ok(input) => tool_results.run(&call.name, &input, || agent_tools::execute(
+                        &call.name, &input, cwd, permission_mode, &self.mcp_host,
+                    )),
+                    Err(error) => (format!("Invalid tool arguments: {error}"), true),
+                };
                 result_blocks.push(json!({
                     "type": "tool_result",
                     "tool_use_id": call.id,
