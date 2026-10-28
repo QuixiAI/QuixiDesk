@@ -84,6 +84,17 @@ impl EipcRouter {
             } else if val.is_null() {
                 val = json!({});
             }
+            if std::env::var_os("QUIXI_DEBUG_STORES").is_some() {
+                tracing::info!(
+                    "[store] {} -> {}",
+                    sk,
+                    serde_json::to_string(&val)
+                        .unwrap_or_default()
+                        .chars()
+                        .take(120)
+                        .collect::<String>()
+                );
+            }
             return EipcReplyPayload::ok(val);
         }
 

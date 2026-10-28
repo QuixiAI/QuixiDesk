@@ -2,6 +2,7 @@ pub mod agent_tools;
 pub mod providers;
 mod local_ui;
 mod storage;
+pub mod routstr;
 
 use chrono::Utc;
 use parking_lot::RwLock;
@@ -1046,6 +1047,11 @@ impl QuixiEngine {
             self.sync_sessions_to_connected_models();
             return Self::json_resp(200, &res);
         }
+        if clean_path == "/api/quixi/providers/discover-models" {
+            let res = self.provider_manager.discover_models(&body_json);
+            self.sync_sessions_to_connected_models();
+            return Self::json_resp(200, &res);
+        }
         if clean_path == "/api/quixi/providers/oauth/start" {
             return Self::json_resp(200, &self.provider_manager.start_oauth(&body_json));
         }
@@ -1058,6 +1064,50 @@ impl QuixiEngine {
             let res = self.provider_manager.complete_onboarding(&body_json);
             self.sync_sessions_to_connected_models();
             return Self::json_resp(200, &res);
+        }
+
+        // 0a. /api/quixi/routstr/* (Cashu wallet + routstrd daemon management)
+        if clean_path == "/api/quixi/routstr/status" {
+            return Self::json_resp(200, &crate::routstr::RoutstrManager::status());
+        }
+        if clean_path == "/api/quixi/routstr/start" {
+            return Self::json_resp(200, &crate::routstr::RoutstrManager::start());
+        }
+        if clean_path == "/api/quixi/routstr/stop" {
+            return Self::json_resp(200, &crate::routstr::RoutstrManager::stop());
+        }
+        if clean_path == "/api/quixi/routstr/receive" {
+            let amount = body_json
+                .get("amountSats")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            return Self::json_resp(
+                200,
+                &crate::routstr::RoutstrManager::receive_lightning(amount),
+            );
+        }
+        if clean_path == "/api/quixi/routstr/receive-cashu" {
+            let token = body_json
+                .get("token")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            return Self::json_resp(
+                200,
+                &crate::routstr::RoutstrManager::receive_cashu(token),
+            );
+        }
+        if clean_path == "/api/quixi/routstr/seed" {
+            let confirm = body_json
+                .get("confirm")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            return Self::json_resp(200, &crate::routstr::RoutstrManager::seed_phrase(confirm));
+        }
+        if clean_path == "/api/quixi/routstr/npc" {
+            return Self::json_resp(200, &crate::routstr::RoutstrManager::npc_address());
+        }
+        if clean_path == "/api/quixi/routstr/confidential/enable" {
+            return Self::json_resp(200, &crate::routstr::RoutstrManager::enable_confidential());
         }
 
         // 0b. /api/quixi/browser & /api/quixi/browser/render (In-App Browser Side Pane)

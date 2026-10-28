@@ -77,6 +77,10 @@
   var oauthSession = null;
   var oauthPollTimer = null;
   var statusBanner = null; // { kind: 'ok' | 'err' | 'info', text: string }
+  var routstrStatus = null;
+  var routstrInvoice = null;
+  var routstrSeed = null;
+  var routstrNpc = null;
 
   // Clear stale React Query IndexedDB cache & stale claude-sonnet-4-6 localStorage entries,
   // and lock the unified workspace surface to full-featured ('cowork') mode so folder picking,
@@ -1581,6 +1585,12 @@
     isOverlayOpen = true;
     renderOverlay();
     renderPill();
+    if (selectedProviderId === 'routstr' || selectedProviderId === 'routstr-confidential') {
+      api('/api/quixi/routstr/status', 'GET').then(function(st) {
+        routstrStatus = st;
+        if (isOverlayOpen) renderOverlay();
+      }).catch(function() {});
+    }
   }
 
   function closeOverlay() {
@@ -1628,6 +1638,117 @@
     );
   }
 
+  function renderRoutstrPanel(p) {
+    var isConfidential = p.id === 'routstr-confidential';
+    var st = routstrStatus;
+    if (!st) {
+      return '<div class="qp-card" style="margin-top:14px;"><div class="qp-muted">Loading Routstr daemon status…</div></div>';
+    }
+    var installed = !!st.installed;
+    var running = !!st.running;
+    var statusColor = running ? '#10b981' : (installed ? '#f59e0b' : '#ef4444');
+    var statusText = running ? 'Daemon running' : (installed ? 'Daemon stopped' : 'routstrd not installed');
+    var html = '<div class="qp-card" style="margin-top:14px;border-color:' + statusColor + '44;">' +
+      '<div class="qp-card-hdr" style="margin-bottom:10px;flex-wrap:wrap;">' +
+        '<div style="min-width:0;">' +
+          '<div class="qp-card-title" style="font-size:15px;">' +
+            '<span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:' + statusColor + ';margin-right:8px;"></span>' +
+            'Routstr Cashu Wallet & Daemon' +
+          '</div>' +
+          '<div class="qp-muted" style="font-size:12px;overflow-wrap:anywhere;">' + escapeHtml(statusText) +
+            (st.version ? ' · v' + escapeHtml(st.version) : '') +
+            (installed ? ' · ' + escapeHtml(st.binary || '') : '') +
+          '</div>' +
+        '</div>' +
+        '<div class="qp-badge ' + (running ? 'ok' : 'rec') + '">' +
+          (st.balanceSats === null || st.balanceSats === undefined ? 'balance unknown' : st.balanceSats + ' sats') +
+        '</div>' +
+      '</div>';
+
+    if (!installed) {
+      html += '<div class="qp-banner err">Routstr requires the <code>routstrd</code> daemon. Install it with:</div>' +
+        '<div class="qp-code-pill" id="qp-routstr-install-cmd" style="font-size:11px;user-select:all;white-space:normal;line-height:1.5;">' +
+          escapeHtml(st.installHint || 'curl -fsSL https://github.com/Routstr/routstrd/releases/latest/download/install.sh | sh') +
+        '</div>' +
+        '<div class="qp-btn-row" style="margin-top:8px;">' +
+          '<button id="qp-routstr-copy-install" class="qp-btn draggable-none">Copy install command</button>' +
+          '<button id="qp-routstr-refresh-btn" class="qp-btn draggable-none">Re-check</button>' +
+        '</div>';
+      return html + '</div>';
+    }
+
+    html += '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">' +
+      '<button id="qp-routstr-' + (running ? 'stop' : 'start') + '-btn" class="qp-btn ' + (running ? '' : 'primary') + ' draggable-none">' +
+        (running ? 'Stop Daemon' : 'Start Daemon') +
+      '</button>' +
+      '<button id="qp-routstr-refresh-btn" class="qp-btn draggable-none">Refresh Status</button>' +
+      '<span class="qp-muted" style="font-size:11.5px;">Endpoint: <code>' + escapeHtml(st.baseUrl || 'http://127.0.0.1:8008/v1') + '</code></span>' +
+    '</div>';
+
+    if (!st.walletInitialized) {
+      html += '<div class="qp-banner info" style="margin-top:10px;">No Cashu wallet yet. <strong>Start Daemon</strong> runs <code>routstrd onboard --skip-integration</code> and creates a fresh 12-word seed.</div>';
+    }
+
+    html += '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-top:12px;">' +
+      '<div class="qp-Field" style="margin:0;flex:1;min-width:150px;">' +
+        '<label class="qp-label">Lightning top-up (sats)</label>' +
+        '<input id="qp-routstr-amount" class="qp-input draggable-none" type="number" min="1" step="1" value="500" />' +
+      '</div>' +
+      '<button id="qp-routstr-invoice-btn" class="qp-btn primary draggable-none">Create Invoice</button>' +
+    '</div>';
+
+    if (routstrInvoice) {
+      html += '<div class="qp-banner ok" style="margin-top:10px;word-break:break-all;">' +
+        '<div style="font-size:12px;font-weight:600;margin-bottom:4px;">Pay this Lightning invoice (' + escapeHtml(String(routstrInvoice.amountSats || '')) + ' sats)</div>' +
+        '<code id="qp-routstr-invoice-text" style="font-size:11px;user-select:all;">' + escapeHtml(routstrInvoice.invoice || '') + '</code>' +
+        '<div class="qp-btn-row" style="margin-top:8px;">' +
+          '<button id="qp-routstr-copy-invoice" class="qp-btn draggable-none">Copy Invoice</button>' +
+        '</div>' +
+      '</div>';
+    }
+
+    html += '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-top:10px;">' +
+      '<div class="qp-Field" style="margin:0;flex:1;min-width:180px;">' +
+        '<label class="qp-label">Receive a Cashu token</label>' +
+        '<input id="qp-routstr-cashu" class="qp-input draggable-none" type="text" placeholder="cashuB..." />' +
+      '</div>' +
+      '<button id="qp-routstr-cashu-btn" class="qp-btn draggable-none">Receive Token</button>' +
+    '</div>';
+
+    if (routstrNpc && routstrNpc.address) {
+      html += '<div class="qp-hint" style="margin-top:8px;">Lightning address: <code>' + escapeHtml(routstrNpc.address) + '</code></div>';
+    }
+
+    html += '<div class="qp-btn-row" style="margin-top:12px;border-top:1px solid rgba(127,127,127,0.18);padding-top:10px;">' +
+      '<button id="qp-routstr-npc-btn" class="qp-btn draggable-none">Lightning Address</button>' +
+      '<button id="qp-routstr-seed-btn" class="qp-btn draggable-none">Back Up Seed Phrase</button>' +
+      '<button id="qp-routstr-confidential-btn" class="qp-btn ' + (isConfidential ? 'primary' : '') + ' draggable-none">' +
+        (st.confidential && st.confidential.enabled ? 'Confidential Mode Enabled ✓' : 'Enable Confidential Mode') +
+      '</button>' +
+    '</div>';
+
+    if (routstrSeed) {
+      html += '<div class="qp-banner err" style="margin-top:10px;">' +
+        '<div style="font-weight:600;font-size:12.5px;margin-bottom:4px;">⚠ Cashu wallet seed — anyone with this phrase can spend your funds</div>' +
+        '<code id="qp-routstr-seed-text" style="font-size:12.5px;user-select:all;display:block;padding:8px;background:rgba(0,0,0,0.18);border-radius:6px;">' + escapeHtml(routstrSeed.mnemonic || '') + '</code>' +
+        '<div class="qp-btn-row" style="margin-top:8px;">' +
+          '<button id="qp-routstr-copy-seed" class="qp-btn draggable-none">Copy Seed</button>' +
+          '<button id="qp-routstr-hide-seed" class="qp-btn draggable-none">Hide</button>' +
+        '</div>' +
+      '</div>';
+    }
+
+    if (isConfidential) {
+      var conf = st.confidential || {};
+      html += '<div class="qp-banner ' + (conf.enabled ? 'ok' : 'info') + '" style="margin-top:10px;font-size:12px;">' +
+        'Confidential requests are relayed by routstrd so the node never sees your prompt or response. ' +
+        (conf.proverInstalled ? '<strong>cu-prover detected.</strong>' : '<strong>cu-prover is missing</strong> — install it before sending confidential requests.') +
+      '</div>';
+    }
+
+    return html + '</div>';
+  }
+
   function renderOverlay() {
     injectStyles();
     if (!state || !state.providers) return;
@@ -1642,8 +1763,8 @@
     var p = getSelectedProvider();
     if (!p) return;
 
-    var priorityProviders = state.providers.filter(function(item) { return item.priorityRank <= 5; });
-    var otherProviders = state.providers.filter(function(item) { return item.priorityRank > 5; });
+    var priorityProviders = state.providers.filter(function(item) { return item.category === 'priority'; });
+    var otherProviders = state.providers.filter(function(item) { return item.category !== 'priority'; });
 
     var sidebarHtml = '<div class="qp-sec-hdr"><span>Primary Providers (Priority Order)</span></div>';
     priorityProviders.forEach(function(item) {
@@ -1755,6 +1876,10 @@
       }
     }
 
+    if (p.id === 'routstr' || p.id === 'routstr-confidential') {
+      authSectionHtml += renderRoutstrPanel(p);
+    }
+
     var modelsOptionsHtml = '';
     (p.models || []).forEach(function(m) {
       if (p.id === 'openai') {
@@ -1813,6 +1938,7 @@
               '<select id="qp-model-select" class="qp-select draggable-none">' + modelsOptionsHtml + '</select>' +
             '</div>' +
             '<div class="qp-btn-row">' +
+              '<button id="qp-discover-models-btn" class="qp-btn draggable-none">↻ Discover Models</button>' +
               '<button id="qp-save-btn" class="qp-btn primary draggable-none">' +
                 'Save & Set Active (' + escapeHtml(p.name) + ')' +
               '</button>' +
@@ -1880,7 +2006,16 @@
       el.addEventListener('click', function() {
         selectedProviderId = el.getAttribute('data-pid');
         statusBanner = null;
+        routstrInvoice = null;
+        routstrSeed = null;
+        routstrNpc = null;
         renderOverlay();
+        if (selectedProviderId === 'routstr' || selectedProviderId === 'routstr-confidential') {
+          api('/api/quixi/routstr/status', 'GET').then(function(st) {
+            routstrStatus = st;
+            renderOverlay();
+          }).catch(function() {});
+        }
       });
     });
 
@@ -1912,6 +2047,40 @@
             text: p.name + ' saved and set as active provider (' + newState.activeModel + ').'
           };
           renderOverlay();
+        });
+      });
+    }
+
+    var discoverBtn = document.getElementById('qp-discover-models-btn');
+    if (discoverBtn) {
+      discoverBtn.addEventListener('click', function() {
+        var payload = collectFormPayload(p, false);
+        statusBanner = { kind: 'info', text: 'Discovering live models for ' + p.name + '…' };
+        renderOverlay();
+        api('/api/quixi/providers/discover-models', 'POST', payload).then(function(res) {
+          if (res && res.ok) {
+            state = res.state || state;
+            providersDirty = true;
+            statusBanner = {
+              kind: 'ok',
+              text: 'Discovered ' + (res.count || 0) + ' models for ' + p.name + '.'
+            };
+            // Load Routstr wallet/daemon status alongside model discovery.
+            if (p.id === 'routstr' || p.id === 'routstr-confidential') {
+              api('/api/quixi/routstr/status', 'GET').then(function(st) {
+                routstrStatus = st;
+                renderOverlay();
+              });
+            } else {
+              renderOverlay();
+            }
+          } else {
+            statusBanner = {
+              kind: 'err',
+              text: (res && (res.error || (res.hint ? res.hint : 'Model discovery failed'))) || 'Model discovery failed'
+            };
+            renderOverlay();
+          }
         });
       });
     }
@@ -2076,6 +2245,180 @@
           }
           renderOverlay();
         });
+      });
+    }
+
+    function copyText(text) {
+      if (!text) return;
+      if (typeof window.__quixi_copy_text__ === 'function') {
+        window.__quixi_copy_text__(text);
+      } else if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text);
+      }
+    }
+
+    function applyRoutstrStatus(st, banner) {
+      routstrStatus = st;
+      if (banner) statusBanner = banner;
+      renderOverlay();
+    }
+
+    var routstrRefreshBtn = document.getElementById('qp-routstr-refresh-btn');
+    if (routstrRefreshBtn) {
+      routstrRefreshBtn.addEventListener('click', function() {
+        api('/api/quixi/routstr/status', 'GET').then(function(st) {
+          applyRoutstrStatus(st, { kind: 'info', text: 'Routstr status refreshed.' });
+        });
+      });
+    }
+
+    var routstrStartBtn = document.getElementById('qp-routstr-start-btn');
+    if (routstrStartBtn) {
+      routstrStartBtn.addEventListener('click', function() {
+        statusBanner = { kind: 'info', text: 'Starting routstrd and unlocking the Cashu wallet…' };
+        renderOverlay();
+        api('/api/quixi/routstr/start', 'POST', {}).then(function(res) {
+          applyRoutstrStatus(res.status, {
+            kind: res.ok ? 'ok' : 'err',
+            text: res.ok ? 'routstrd is running.' : ('Failed to start routstrd: ' + (res.output || res.error || 'unknown error'))
+          });
+        });
+      });
+    }
+
+    var routstrStopBtn = document.getElementById('qp-routstr-stop-btn');
+    if (routstrStopBtn) {
+      routstrStopBtn.addEventListener('click', function() {
+        api('/api/quixi/routstr/stop', 'POST', {}).then(function(res) {
+          applyRoutstrStatus(res.status, { kind: 'info', text: 'routstrd stopped.' });
+        });
+      });
+    }
+
+    var routstrInvoiceBtn = document.getElementById('qp-routstr-invoice-btn');
+    if (routstrInvoiceBtn) {
+      routstrInvoiceBtn.addEventListener('click', function() {
+        var amountEl = document.getElementById('qp-routstr-amount');
+        var amount = amountEl ? parseInt(amountEl.value, 10) : 500;
+        if (!amount || amount < 1) amount = 500;
+        statusBanner = { kind: 'info', text: 'Creating a Lightning invoice for ' + amount + ' sats…' };
+        renderOverlay();
+        api('/api/quixi/routstr/receive', 'POST', { amountSats: amount }).then(function(res) {
+          if (res && res.ok && res.invoice) {
+            routstrInvoice = res;
+            statusBanner = { kind: 'ok', text: 'Invoice created. Pay it with any Lightning wallet; the balance updates in Routstr.' };
+          } else {
+            statusBanner = { kind: 'err', text: (res && (res.error || res.raw)) || 'Could not create invoice.' };
+          }
+          api('/api/quixi/routstr/status', 'GET').then(function(st) {
+            routstrStatus = st;
+            renderOverlay();
+          });
+        });
+      });
+    }
+
+    var routstrCopyInvoice = document.getElementById('qp-routstr-copy-invoice');
+    if (routstrCopyInvoice) {
+      routstrCopyInvoice.addEventListener('click', function() {
+        copyText(routstrInvoice && routstrInvoice.invoice);
+        routstrCopyInvoice.textContent = 'Copied Invoice ✓';
+      });
+    }
+
+    var routstrCashuBtn = document.getElementById('qp-routstr-cashu-btn');
+    if (routstrCashuBtn) {
+      routstrCashuBtn.addEventListener('click', function() {
+        var el = document.getElementById('qp-routstr-cashu');
+        var token = el ? el.value.trim() : '';
+        if (!token) {
+          statusBanner = { kind: 'err', text: 'Paste a Cashu token first.' };
+          renderOverlay();
+          return;
+        }
+        statusBanner = { kind: 'info', text: 'Receiving Cashu token…' };
+        renderOverlay();
+        api('/api/quixi/routstr/receive-cashu', 'POST', { token: token }).then(function(res) {
+          applyRoutstrStatus(res.status, {
+            kind: res.ok ? 'ok' : 'err',
+            text: res.ok ? 'Cashu token received.' : ('Cashu receive failed: ' + (res.error || 'unknown error'))
+          });
+        });
+      });
+    }
+
+    var routstrNpcBtn = document.getElementById('qp-routstr-npc-btn');
+    if (routstrNpcBtn) {
+      routstrNpcBtn.addEventListener('click', function() {
+        api('/api/quixi/routstr/npc', 'POST', {}).then(function(res) {
+          if (res && res.ok) {
+            routstrNpc = res;
+            statusBanner = { kind: 'ok', text: 'Lightning address: ' + (res.address || '(not claimed)') };
+          } else {
+            statusBanner = { kind: 'err', text: (res && res.error) || 'Could not read NPC address.' };
+          }
+          renderOverlay();
+        });
+      });
+    }
+
+    var routstrSeedBtn = document.getElementById('qp-routstr-seed-btn');
+    if (routstrSeedBtn) {
+      routstrSeedBtn.addEventListener('click', function() {
+        var ok = window.confirm('Reveal the Cashu wallet seed phrase?\n\nAnyone with this phrase can spend the wallet. Make sure nobody is watching your screen.');
+        if (!ok) return;
+        api('/api/quixi/routstr/seed', 'POST', { confirm: true }).then(function(res) {
+          if (res && res.ok) {
+            routstrSeed = res;
+            statusBanner = { kind: 'info', text: 'Seed phrase revealed. Store it offline and hide it when done.' };
+          } else {
+            statusBanner = { kind: 'err', text: (res && res.error) || 'Could not read wallet seed.' };
+          }
+          renderOverlay();
+        });
+      });
+    }
+
+    var routstrCopySeed = document.getElementById('qp-routstr-copy-seed');
+    if (routstrCopySeed) {
+      routstrCopySeed.addEventListener('click', function() {
+        copyText(routstrSeed && routstrSeed.mnemonic);
+        routstrCopySeed.textContent = 'Copied Seed ✓';
+      });
+    }
+
+    var routstrHideSeed = document.getElementById('qp-routstr-hide-seed');
+    if (routstrHideSeed) {
+      routstrHideSeed.addEventListener('click', function() {
+        routstrSeed = null;
+        statusBanner = { kind: 'info', text: 'Seed phrase hidden.' };
+        renderOverlay();
+      });
+    }
+
+    var routstrConfBtn = document.getElementById('qp-routstr-confidential-btn');
+    if (routstrConfBtn) {
+      routstrConfBtn.addEventListener('click', function() {
+        statusBanner = { kind: 'info', text: 'Enabling routstr confidential upstream transport and restarting the daemon…' };
+        renderOverlay();
+        api('/api/quixi/routstr/confidential/enable', 'POST', {}).then(function(res) {
+          var warnings = (res && res.warnings) || [];
+          applyRoutstrStatus(res.status, {
+            kind: res.ok ? 'ok' : 'err',
+            text: res.ok
+              ? 'Confidential mode enabled.' + (warnings.length ? ' ' + warnings.join(' ') : '')
+              : ('Could not enable confidential mode: ' + (res.error || 'unknown error'))
+          });
+        });
+      });
+    }
+
+    var routstrCopyInstall = document.getElementById('qp-routstr-copy-install');
+    if (routstrCopyInstall) {
+      routstrCopyInstall.addEventListener('click', function() {
+        var el = document.getElementById('qp-routstr-install-cmd');
+        copyText(el ? el.innerText : '');
+        routstrCopyInstall.textContent = 'Copied ✓';
       });
     }
 

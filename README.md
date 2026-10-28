@@ -14,7 +14,7 @@
 
 ---
 
-**QuixiDesk** is a fast, native Rust (`tao` + `wry`) open-source alternative to **Claude Desktop**. It replaces the heavy Electron + Node.js runtime with a single-process native Rust workspace engine reusing the desktop workspace UI and adding **17 pluggable LLM providers**, **zero-configuration built-in MCPs (In-App Browser Use & Computer Use)**, a **unified task/chat workspace**, and **11 UI languages** out of the box.
+**QuixiDesk** is a fast, native Rust (`tao` + `wry`) open-source alternative to **Claude Desktop** that runs first-class on **macOS and Linux (Wayland or X11)**. It replaces the heavy Electron + Node.js runtime with a single-process native Rust workspace engine reusing the desktop workspace UI and adding **20 pluggable LLM providers**, **Venice AI**, **Cashu/Lightning-paid Routstr (including confidential inference)**, **zero-configuration built-in MCPs (In-App Browser Use & Computer Use)**, a **unified task/chat workspace**, and **11 UI languages** out of the box.
 
 ## Screenshots
 
@@ -48,7 +48,7 @@ QuixiDesk's architectural reconstruction—mapping 1,400+ IPC channels, native m
 
 ## Supported LLM Providers
 
-QuixiDesk includes a built-in **Provider Manager** (`⌘⇧P` or click the top-right **Providers** pill) supporting **17 cloud, OAuth, and local inference providers**:
+QuixiDesk includes a built-in **Provider Manager** (`⌘⇧P` / `Ctrl+Shift+P` or click the top-right **Providers** pill) supporting **20 cloud, OAuth, local, and Cashu-paid providers**. API keys are pasted directly into Settings, and **Discover Models** pulls the live catalog from any provider's `/models` endpoint.
 
 ### Priority Providers
 | # | Provider | Auth Modes | Default / Example Models |
@@ -58,6 +58,9 @@ QuixiDesk includes a built-in **Provider Manager** (`⌘⇧P` or click the top-r
 | **3** | **OpenAI (ChatGPT Plus / Pro & API)** | **PKCE / Device OAuth** or API Key (`OPENAI_API_KEY`) | `gpt-5.4`, `gpt-5.4-mini`, `o3`, `o4-mini`, `gpt-4.1` |
 | **4** | **xAI Grok (SuperGrok / X & API)** | **RFC 8628 Device OAuth** or API Key (`XAI_API_KEY`) | `grok-4`, `grok-3`, `grok-3-mini`, `grok-code-fast-1` |
 | **5** | **Anthropic (Claude Direct)** | API Key (`ANTHROPIC_API_KEY`) | `claude-sonnet-4-6`, `claude-opus-4-6`, `claude-haiku-4-5-20251001` |
+| **6** | **Venice AI** | API Key (`VENICE_API_KEY`) | `zai-org-glm-5`, `venice-uncensored-1-2`, `claude-opus-4-8`, `gemini-3-1-pro-preview`, `grok-4-5`, `qwen-3-8-max` |
+| **7** | **Routstr** | Cashu / Lightning via local `routstrd` (optional client key) | `deepseek-v4.1-flash`, `claude-opus-5.5`, `glm-5.3`, `kimi-k2-6`, `gpt-5.5` |
+| **8** | **Routstr Confidential** | Cashu / Lightning + `x-routstr-verify: confidential` | Same catalog, routed only to confidential-capable nodes |
 
 ### Cloud Providers
 | Provider | Environment Variable | Base Endpoint | Example Models |
@@ -145,6 +148,44 @@ QUIXI_RESOURCES_DIR="$HOME/.local/opt/QuixiDesk/resources" "$HOME/.local/opt/Qui
 
 The destination machine needs GTK 3 and WebKitGTK 4.1 runtime libraries. Build on a compatible Linux distribution; this is not a universal static binary or an AppImage.
 
+On Arch / Omarchy / CachyOS the equivalent setup is:
+
+```sh
+sudo pacman -S --needed base-devel rust pkg-config gtk3 webkit2gtk-4.1 \
+  libsoup3 wl-clipboard wtype zenity
+cargo build --locked --release --workspace
+./target/release/QuixiDesk
+```
+
+QuixiDesk embeds WebKitGTK as a native GTK widget, so it runs natively on Wayland (and on X11; set `QUIXI_X11=1` to force the X11/XWayland backend). Additional Linux environment variables:
+
+| Variable | Purpose |
+| :--- | :--- |
+| `QUIXI_X11=1` | Force the GTK/XWayland X11 backend instead of Wayland |
+| `WEBKIT_DISABLE_DMABUF_RENDERER=1` | Work around blank rendering on some GPU/driver combinations |
+| `QUIXI_DEBUG_EIPC=1`, `QUIXI_DEBUG_BRIDGE=1`, `QUIXI_DEBUG_ASSETS=1`, `QUIXI_DEBUG_STORES=1` | Log EIPC / bridge / asset / store traffic for debugging |
+
+> **Why a loopback HTTP bridge?** WebKitGTK does not expose request bodies to
+> custom URI scheme handlers. QuixiDesk keeps `app://localhost` for the UI and
+> routes body-bearing `/api/*` and `/__eipc__/*` calls through a token-guarded
+> `127.0.0.1` bridge, so REST, SSE, and all 1,400 IPC channels work identically
+> on Linux and macOS.
+
+To package a portable Linux tarball (and an AppImage when `appimagetool` is installed):
+
+```sh
+./scripts/package-linux-app.sh
+# dist/QuixiDesk-<version>-linux-<arch>.tar.gz
+# dist/QuixiDesk-<version>-linux-<arch>/install.sh installs into ~/.local
+```
+
+The packaged tree ships `share/applications/quixidesk.desktop` and an SVG icon; its `install.sh` installs both into `~/.local`, so QuixiDesk appears in the desktop app launcher:
+
+```sh
+./dist/QuixiDesk-*/install.sh
+quixidesk
+```
+
 ### Windows 10 / 11 (native, PowerShell)
 
 Install Git, [Rust for Windows](https://rust-lang.org/tools/install/), and [Visual Studio C++ Build Tools](https://rust-lang.github.io/rustup/installation/windows-msvc.html) with the **Desktop development with C++** workload and a Windows SDK. Use the MSVC Rust toolchain, not the GNU or WSL toolchain. Install the [Microsoft Edge WebView2 Evergreen Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/) if it is not already present. Reopen PowerShell after installation so Cargo and Git are on `PATH`.
@@ -175,7 +216,7 @@ There is no MSI or Windows signing/installer workflow yet. Keep the resources di
 
 ### Platform scope and configuration
 
-Native CoreGraphics/AppleScript computer-use integration is macOS-specific. Linux and Windows builds do not currently provide the same native computer-use and folder-picker capabilities. Building the cross-platform shell does not imply full native-feature parity.
+Native CoreGraphics/AppleScript computer-use integration is macOS-specific; native AppleScript automation likewise. Linux builds provide clipboard access (`wl-copy`/`wl-paste`/`xclip`/`xsel`), typing and keypress injection (`wtype`/`xdotool`), and native folder-picker dialogs (`zenity`/`kdialog`/`yad`) when those helpers are installed. Building the cross-platform shell does not imply full native-feature parity.
 
 The engine opens the source checkout as its default workspace in development. Set `QUIXI_WORKSPACE` to an explicit folder to override it. `QUIXI_RESOURCES_DIR` overrides resource discovery. Normal app data is stored under the OS user's `.quixi` directory; test profiles below use a separate location. Configure a provider in the app after launch; no API credential is required to compile or run the tests.
 
@@ -217,6 +258,65 @@ The [E2E test suite design](docs/testing/E2E_TEST_PLAN.md) defines the proposed 
 
 ---
 
+## Venice AI
+
+Venice is a first-class provider (priority #6). Paste a key from
+[venice.ai/settings/api](https://venice.ai/settings/api) in **Providers → Venice
+AI**, then press **Discover Models** to pull the live 140+ model catalog from
+`https://api.venice.ai/api/v1/models` (context windows, vision, and reasoning
+capabilities are read from `model_spec`). The key is stored only in
+`~/.quixi/providers.json`; nothing is sent anywhere except `api.venice.ai`.
+
+## Routstr, Cashu & Confidential Inference
+
+QuixiDesk integrates the official [Routstr](https://github.com/Routstr/routstrd)
+daemon as two providers:
+
+- **Routstr** (`#7`) — cheapest-provider routing over an OpenAI-compatible
+  `http://127.0.0.1:8008/v1` endpoint, paid per token from a Cashu wallet.
+- **Routstr Confidential** (`#8`) — the same endpoint with
+  `x-routstr-verify: confidential`. routstrd acts as the TLS client of the
+  node's upstream provider, so the node relays encrypted records and never sees
+  your prompt or the response. Requests fail rather than silently downgrading if
+  confidential mode is unavailable.
+
+Install the daemon (stable release or the confidential-upstream fork):
+```bash
+./scripts/install-routstrd.sh                 # ~/.local/bin/routstrd
+./scripts/install-routstrd.sh --bundle        # also resources/bin/routstrd (baked-in)
+./scripts/install-routstrd.sh --confidential  # build the confidential fork (requires bun)
+```
+
+In **Providers → Routstr** you can:
+
+1. **Start Daemon** — first run performs `routstrd onboard --skip-integration`
+   and creates a 12-word BIP39 seed plus an in-process Cashu wallet.
+2. **Create Invoice** — mints a Lightning invoice (`routstrd wallet receive
+   bolt11 <sats>`) for top-up; pay from any Lightning wallet.
+3. **Receive Token** — redeem an existing `cashuB...` token.
+4. **Back Up Seed Phrase** — reveals the wallet mnemonic after an explicit
+   confirmation, with copy/hide controls. Keep it offline.
+5. **Enable Confidential Mode** — writes `confidentialUpstream.enabled` (with
+   `api.venice.ai` and other upstream hosts trusted) and restarts the daemon.
+
+Confidential inference additionally needs the `cu-prover` and `cu-2pc` client
+binaries from [jooray/routstr-confidential](https://github.com/jooray/routstr-confidential):
+
+```bash
+git clone https://github.com/jooray/routstr-confidential
+cd routstr-confidential/crypto/zkbench
+cargo build --release --bin cu-prover --bin cu-2pc
+cp target/release/cu-prover target/release/cu-2pc ~/.local/bin/
+```
+
+QuixiDesk reports whether `routstrd`, `cu-prover`, and `cu-2pc` are present and
+surfaces a warning if confidential mode is enabled without them.
+
+> The confidential fork currently depends on an unreleased
+> `@routstr/sdk` commit; `scripts/install-routstrd.sh --confidential` is a
+> convenience wrapper, not a pinned reproducibility guarantee. Use the stable
+> release for normal Routstr inference.
+
 ## Workspace Architecture
 
 ```text
@@ -224,7 +324,7 @@ QuixiDesk/
 ├── crates/
 │   ├── quixi-app/        # Native tao + wry WKWebView shell, custom app:// protocol & UI overlay
 │   ├── quixi-ipc/        # EIPC router implementing 1,400+ desktop service & store channels
-│   ├── quixi-engine/     # Session orchestrator, multi-provider LLM router & streaming engine
+│   ├── quixi-engine/     # Session orchestrator, multi-provider LLM router, streaming engine & Routstr manager
 │   ├── quixi-mcp/        # Built-in MCP host (Computer Use, Browser Use, Workspace, AppleScript, PDF, Memory)
 │   ├── quixi-platform/   # macOS CoreGraphics Computer Use, In-App Browser Use & SafeFS sandbox
 │   ├── quixi-workspace/  # Native file indexer, git pool engine, transcript search & PTY shell host

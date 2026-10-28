@@ -30,3 +30,7 @@ opencode.json
 
 
 
+
+# Optional bundled routstrd daemon (large prebuilt binary; see scripts/install-routstrd.sh)
+/resources/bin/routstrd
+/resources/bin/routstrd-*
