@@ -14,7 +14,7 @@
 
 ---
 
-**QuixiDesk** is a fast, native Rust (`tao` + `wry`) open-source alternative to **Claude Desktop** that runs first-class on **macOS and Linux (Wayland or X11)**. It replaces the heavy Electron + Node.js runtime with a single-process native Rust workspace engine reusing the desktop workspace UI and adding **17 pluggable LLM providers**, **zero-configuration built-in MCPs (In-App Browser Use & Computer Use)**, a **unified task/chat workspace**, and **11 UI languages** out of the box.
+**QuixiDesk** is a fast, native Rust (`tao` + `wry`) open-source alternative to **Claude Desktop** that runs first-class on **macOS and Linux (Wayland or X11)**. It replaces the heavy Electron + Node.js runtime with a single-process native Rust workspace engine reusing the desktop workspace UI and adding **18 pluggable LLM providers**, **Venice AI**, **zero-configuration built-in MCPs (In-App Browser Use & Computer Use)**, a **unified task/chat workspace**, and **11 UI languages** out of the box.
 
 ## Screenshots
 
@@ -48,7 +48,7 @@ QuixiDesk's architectural reconstruction—mapping 1,400+ IPC channels, native m
 
 ## Supported LLM Providers
 
-QuixiDesk includes a built-in **Provider Manager** (`⌘⇧P` / `Ctrl+Shift+P` or click the top-right **Providers** pill) supporting **17 cloud, OAuth, and local inference providers**:
+QuixiDesk includes a built-in **Provider Manager** (`⌘⇧P` / `Ctrl+Shift+P` or click the top-right **Providers** pill) supporting **18 cloud, OAuth, and local inference providers**. API keys are pasted directly into Settings, and **Discover Models** pulls the live catalog from any provider's `/models` endpoint.
 
 ### Priority Providers
 | # | Provider | Auth Modes | Default / Example Models |
@@ -58,6 +58,7 @@ QuixiDesk includes a built-in **Provider Manager** (`⌘⇧P` / `Ctrl+Shift+P` o
 | **3** | **OpenAI (ChatGPT Plus / Pro & API)** | **PKCE / Device OAuth** or API Key (`OPENAI_API_KEY`) | `gpt-5.4`, `gpt-5.4-mini`, `o3`, `o4-mini`, `gpt-4.1` |
 | **4** | **xAI Grok (SuperGrok / X & API)** | **RFC 8628 Device OAuth** or API Key (`XAI_API_KEY`) | `grok-4`, `grok-3`, `grok-3-mini`, `grok-code-fast-1` |
 | **5** | **Anthropic (Claude Direct)** | API Key (`ANTHROPIC_API_KEY`) | `claude-sonnet-4-6`, `claude-opus-4-6`, `claude-haiku-4-5-20251001` |
+| **6** | **Venice AI** | API Key (`VENICE_API_KEY`) | `zai-org-glm-5`, `venice-uncensored-1-2`, `claude-opus-4-8`, `gemini-3-1-pro-preview`, `grok-4-5`, `qwen-3-8-max` |
 
 ### Cloud Providers
 | Provider | Environment Variable | Base Endpoint | Example Models |
@@ -255,6 +256,15 @@ The [E2E test suite design](docs/testing/E2E_TEST_PLAN.md) defines the proposed 
 
 ---
 
+## Venice AI
+
+Venice is a first-class provider (priority #6). Paste a key from
+[venice.ai/settings/api](https://venice.ai/settings/api) in **Providers → Venice
+AI**, then press **Discover Models** to pull the live 140+ model catalog from
+`https://api.venice.ai/api/v1/models` (context windows, vision, and reasoning
+capabilities are read from `model_spec`). The key is stored only in
+`~/.quixi/providers.json`; nothing is sent anywhere except `api.venice.ai`.
+
 ## Workspace Architecture
 
 ```text
@@ -262,7 +272,7 @@ QuixiDesk/
 ├── crates/
 │   ├── quixi-app/        # Native tao + wry WKWebView shell, custom app:// protocol & UI overlay
 │   ├── quixi-ipc/        # EIPC router implementing 1,400+ desktop service & store channels
-│   ├── quixi-engine/     # Session orchestrator, multi-provider LLM router & streaming engine
+│   ├── quixi-engine/     # Session orchestrator, multi-provider LLM router, streaming engine & model discovery
 │   ├── quixi-mcp/        # Built-in MCP host (Computer Use, Browser Use, Workspace, AppleScript, PDF, Memory)
 │   ├── quixi-platform/   # macOS CoreGraphics Computer Use, In-App Browser Use & SafeFS sandbox
 │   ├── quixi-workspace/  # Native file indexer, git pool engine, transcript search & PTY shell host

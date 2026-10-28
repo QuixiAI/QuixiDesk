@@ -1046,6 +1046,11 @@ impl QuixiEngine {
             self.sync_sessions_to_connected_models();
             return Self::json_resp(200, &res);
         }
+        if clean_path == "/api/quixi/providers/discover-models" {
+            let res = self.provider_manager.discover_models(&body_json);
+            self.sync_sessions_to_connected_models();
+            return Self::json_resp(200, &res);
+        }
         if clean_path == "/api/quixi/providers/oauth/start" {
             return Self::json_resp(200, &self.provider_manager.start_oauth(&body_json));
         }

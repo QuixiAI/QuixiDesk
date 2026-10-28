@@ -1642,8 +1642,8 @@
     var p = getSelectedProvider();
     if (!p) return;
 
-    var priorityProviders = state.providers.filter(function(item) { return item.priorityRank <= 5; });
-    var otherProviders = state.providers.filter(function(item) { return item.priorityRank > 5; });
+    var priorityProviders = state.providers.filter(function(item) { return item.category === 'priority'; });
+    var otherProviders = state.providers.filter(function(item) { return item.category !== 'priority'; });
 
     var sidebarHtml = '<div class="qp-sec-hdr"><span>Primary Providers (Priority Order)</span></div>';
     priorityProviders.forEach(function(item) {
@@ -1813,6 +1813,7 @@
               '<select id="qp-model-select" class="qp-select draggable-none">' + modelsOptionsHtml + '</select>' +
             '</div>' +
             '<div class="qp-btn-row">' +
+              '<button id="qp-discover-models-btn" class="qp-btn draggable-none">↻ Discover Models</button>' +
               '<button id="qp-save-btn" class="qp-btn primary draggable-none">' +
                 'Save & Set Active (' + escapeHtml(p.name) + ')' +
               '</button>' +
@@ -1912,6 +1913,32 @@
             text: p.name + ' saved and set as active provider (' + newState.activeModel + ').'
           };
           renderOverlay();
+        });
+      });
+    }
+
+    var discoverBtn = document.getElementById('qp-discover-models-btn');
+    if (discoverBtn) {
+      discoverBtn.addEventListener('click', function() {
+        var payload = collectFormPayload(p, false);
+        statusBanner = { kind: 'info', text: 'Discovering live models for ' + p.name + '…' };
+        renderOverlay();
+        api('/api/quixi/providers/discover-models', 'POST', payload).then(function(res) {
+          if (res && res.ok) {
+            state = res.state || state;
+            providersDirty = true;
+            statusBanner = {
+              kind: 'ok',
+              text: 'Discovered ' + (res.count || 0) + ' models for ' + p.name + '.'
+            };
+            renderOverlay();
+          } else {
+            statusBanner = {
+              kind: 'err',
+              text: (res && (res.error || (res.hint ? res.hint : 'Model discovery failed'))) || 'Model discovery failed'
+            };
+            renderOverlay();
+          }
         });
       });
     }

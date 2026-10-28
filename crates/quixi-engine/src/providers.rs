@@ -164,7 +164,7 @@ impl ProviderManager {
     /// 5. Anthropic (API Key)
     /// 6..19. Remaining HexisPro cloud & local providers
     pub fn default_catalog() -> ProvidersStateFile {
-        let providers = vec![
+        let mut providers = vec![
             // 1. OpenRouter (First on the list)
             ProviderEntry {
                 id: "openrouter".to_string(),
@@ -820,6 +820,60 @@ impl ProviderManager {
             },
         ];
 
+        // Venice AI is a first-class provider in the "Primary providers" group.
+        // Shift the pre-existing cloud/local ranks so the priority order stays
+        // stable and insert it at 6.
+        for p in providers.iter_mut() {
+            if p.priority_rank >= 6 {
+                p.priority_rank += 1;
+            }
+        }
+
+        providers.push(ProviderEntry {
+            id: "venice".to_string(),
+            name: "Venice AI".to_string(),
+            subtitle: "Private, uncensored inference with OpenAI-compatible models (Venice, Claude, GPT, Gemini, Grok, Qwen)".to_string(),
+            badge: "Private AI · #6".to_string(),
+            category: "priority".to_string(),
+            priority_rank: 6,
+            supports_oauth: false,
+            oauth_label: None,
+            auth_mode: "api_key".to_string(),
+            api_format: "openai".to_string(),
+            base_url: "https://api.venice.ai/api/v1".to_string(),
+            api_key_masked: String::new(),
+            api_key_raw: String::new(),
+            oauth_access_token: String::new(),
+            oauth_refresh_token: String::new(),
+            oauth_account_label: None,
+            oauth_expires_ms: None,
+            key_placeholder: "VENICE_API_KEY...".to_string(),
+            env_var: "VENICE_API_KEY".to_string(),
+            docs_url: "https://venice.ai/settings/api".to_string(),
+            configured: false,
+            selected_model: "zai-org-glm-5".to_string(),
+            models: vec![
+                Self::model("zai-org-glm-5", "GLM-5 (Venice)", 198_000, true, false),
+                Self::model("venice-uncensored-1-2", "Venice Uncensored 1.2", 128_000, false, true),
+                Self::model("claude-opus-4-8", "Claude Opus 4.8 (Venice)", 1_000_000, true, true),
+                Self::model("claude-sonnet-4-6", "Claude Sonnet 4.6 (Venice)", 1_000_000, true, true),
+                Self::model("gemini-3-1-pro-preview", "Gemini 3.1 Pro (Venice)", 1_000_000, true, true),
+                Self::model("gemini-3-5-flash", "Gemini 3.5 Flash (Venice)", 1_000_000, true, true),
+                Self::model("grok-4-5", "Grok 4.5 (Venice)", 500_000, true, true),
+                Self::model("qwen-3-8-max", "Qwen 3.8 Max (Venice)", 1_000_000, true, true),
+                Self::model("qwen3-coder-480b-a35b-instruct-turbo", "Qwen3 Coder 480B Turbo (Venice)", 256_000, false, false),
+                Self::model("mistral-small-3-2-24b-instruct", "Mistral Small 3.2 (Venice)", 256_000, false, true),
+                Self::model("kimi-k2-6", "Kimi K2.6 (Venice)", 256_000, true, true),
+                Self::model("deepseek-v3-2", "DeepSeek V3.2 (Venice)", 160_000, true, false),
+            ],
+            custom_models: vec![],
+            context_window: 198_000,
+            last_tested_ok: None,
+            last_latency_ms: None,
+        });
+
+        providers.sort_by_key(|p| p.priority_rank);
+
         ProvidersStateFile {
             onboarding_completed: false,
             active_provider: "openrouter".to_string(),
@@ -1365,6 +1419,221 @@ impl ProviderManager {
             "latencyMs": latency_ms,
             "message": message,
             "discoveredModels": discovered_models,
+        })
+    }
+
+    /// Fetches the provider's live model catalog (`GET {base_url}/models`) and merges it
+    /// into the persisted provider entry. Works for Venice, OpenAI-compatible cloud
+    /// endpoints, and local servers.
+    pub fn discover_models(&self, body: &Value) -> Value {
+        let provider_id = body
+            .get("providerId")
+            .or_else(|| body.get("id"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if provider_id.is_empty() {
+            return json!({ "ok": false, "error": "providerId is required" });
+        }
+
+        let supplied_key = body
+            .get("apiKey")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let supplied_url = body
+            .get("baseUrl")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+
+        let (base_url, api_key, api_format) = {
+            let st = self.state.read();
+            let Some(entry) = st.providers.iter().find(|p| p.id == provider_id) else {
+                return json!({ "ok": false, "error": "unknown provider" });
+            };
+            let url = if supplied_url.is_empty() {
+                entry.base_url.trim_end_matches('/').to_string()
+            } else {
+                supplied_url.trim_end_matches('/').to_string()
+            };
+            let key = if !supplied_key.is_empty() && !supplied_key.contains("••••") {
+                supplied_key
+            } else if !entry.oauth_access_token.is_empty() {
+                entry.oauth_access_token.clone()
+            } else {
+                entry.api_key_raw.clone()
+            };
+            (url, key, entry.api_format.clone())
+        };
+
+        let http = match reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(20))
+            .build()
+        {
+            Ok(c) => c,
+            Err(err) => return json!({ "ok": false, "error": err.to_string() }),
+        };
+
+        let mut req = http.get(format!("{}/models", base_url));
+        if !api_key.is_empty() {
+            if api_format == "anthropic" {
+                req = req
+                    .header("x-api-key", &api_key)
+                    .header("anthropic-version", "2023-06-01");
+            } else {
+                req = req.header("Authorization", format!("Bearer {}", api_key));
+            }
+        }
+
+        let resp = match req.send() {
+            Ok(r) => r,
+            Err(err) => {
+                return json!({
+                    "ok": false,
+                    "providerId": provider_id,
+                    "error": format!("Model discovery failed: {}", err),
+                    "hint": "Is the provider endpoint reachable?"
+                })
+            }
+        };
+
+        let status = resp.status();
+        let val: Value = resp.json().unwrap_or_else(|_| json!({}));
+        if !status.is_success() {
+            return json!({
+                "ok": false,
+                "providerId": provider_id,
+                "httpStatus": status.as_u16(),
+                "error": val.get("error").cloned().unwrap_or(json!("Provider rejected /models")),
+            });
+        }
+
+        let items = val
+            .get("data")
+            .or_else(|| val.get("models"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        let mut discovered: Vec<ProviderModelInfo> = Vec::new();
+        let mut max_context = 0u32;
+        for item in items.iter().take(600) {
+            let Some(id) = item
+                .get("id")
+                .or_else(|| item.get("model"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+            else {
+                continue;
+            };
+            let spec = item.get("model_spec").unwrap_or(&Value::Null);
+            let caps = spec.get("capabilities").unwrap_or(&Value::Null);
+            let ctx = spec
+                .get("availableContextTokens")
+                .or_else(|| item.get("context_length"))
+                .or_else(|| item.get("context_window"))
+                .or_else(|| spec.get("availableContextTokens"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as u32;
+            let label = spec
+                .get("name")
+                .or_else(|| item.get("name"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| id.clone());
+            let vision = caps
+                .get("supportsVision")
+                .and_then(|v| v.as_bool())
+                .unwrap_or_else(|| {
+                    item.pointer("/architecture/input_modalities")
+                        .and_then(|v| v.as_array())
+                        .map(|a| a.iter().any(|m| m.as_str() == Some("image")))
+                        .unwrap_or(false)
+                });
+            let thinking = caps
+                .get("supportsReasoning")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+                || item
+                    .pointer("/architecture/instruct_type")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.contains("reason"))
+                    .unwrap_or(false);
+            if ctx > max_context {
+                max_context = ctx;
+            }
+            discovered.push(ProviderModelInfo {
+                id,
+                label,
+                context_window: if ctx == 0 { 128_000 } else { ctx },
+                supports_thinking: thinking,
+                supports_vision: vision,
+            });
+        }
+
+        if discovered.is_empty() {
+            return json!({
+                "ok": false,
+                "providerId": provider_id,
+                "error": "Provider returned an empty model catalog",
+            });
+        }
+
+        let mut discovered_ids: Vec<String> = discovered.iter().map(|m| m.id.clone()).collect();
+        discovered_ids.sort();
+        discovered_ids.dedup();
+
+        let mut st = self.state.write();
+        let mut selected = String::new();
+        if let Some(entry) = st.providers.iter_mut().find(|p| p.id == provider_id) {
+            // Keep models the user pinned manually, then replace the discovered set.
+            let mut merged: Vec<ProviderModelInfo> = Vec::new();
+            for m in discovered.iter() {
+                if !merged.iter().any(|x| x.id == m.id) {
+                    merged.push(m.clone());
+                }
+            }
+            for custom in entry.custom_models.iter() {
+                if !merged.iter().any(|x| &x.id == custom) {
+                    merged.push(Self::model(
+                        custom,
+                        custom,
+                        entry.context_window,
+                        true,
+                        true,
+                    ));
+                }
+            }
+            entry.models = merged;
+            if max_context > 0 {
+                entry.context_window = entry.context_window.max(max_context);
+            }
+            if !entry.models.iter().any(|m| m.id == entry.selected_model) {
+                entry.selected_model = entry
+                    .models
+                    .first()
+                    .map(|m| m.id.clone())
+                    .unwrap_or_default();
+            }
+            selected = entry.selected_model.clone();
+        }
+        if st.active_provider == provider_id && st.active_model.is_empty() {
+            st.active_model = selected.clone();
+        }
+        drop(st);
+
+        self.persist();
+        json!({
+            "ok": true,
+            "providerId": provider_id,
+            "count": discovered.len(),
+            "selectedModel": selected,
+            "models": discovered,
+            "state": self.get_public_state(),
         })
     }
 
@@ -3439,5 +3708,26 @@ mod provider_validation_tests {
             assert_eq!(std::fs::read(root.join("providers.json")).unwrap(),before);
         }
         drop(manager); std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod venice_catalog_tests {
+    use super::*;
+
+    #[test]
+    fn catalog_includes_venice_priority_provider() {
+        let catalog = ProviderManager::default_catalog();
+        let venice = catalog.providers.iter().find(|p| p.id == "venice").unwrap();
+        assert_eq!(venice.priority_rank, 6);
+        assert_eq!(venice.category, "priority");
+        assert_eq!(venice.base_url, "https://api.venice.ai/api/v1");
+        assert!(venice.models.iter().any(|m| m.id == "zai-org-glm-5"));
+
+        // Priority ranks stay unique after the insertion of the new provider.
+        let mut ranks: Vec<usize> = catalog.providers.iter().map(|p| p.priority_rank).collect();
+        ranks.sort_unstable();
+        ranks.dedup();
+        assert_eq!(ranks.len(), catalog.providers.len());
     }
 }
