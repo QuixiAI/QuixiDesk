@@ -1362,7 +1362,7 @@ fn main() -> anyhow::Result<()> {
 
     let user_agent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) QuixiDesk/3.6556.2 Claude/3.6556.2 Electron/44.9.3 Safari/605.1.15";
 
-    let webview = WebViewBuilder::new()
+    let webview_builder = WebViewBuilder::new()
         .with_user_agent(user_agent)
         .with_initialization_script_for_main_only(&init_script, true)
         .with_devtools(true)
@@ -1512,8 +1512,18 @@ fn main() -> anyhow::Result<()> {
                 b"<!doctype html><html><body></body></html>".to_vec(),
             )
         })
-        .with_url("app://localhost/")
-        .build(&window)?;
+        .with_url("app://localhost/");
+
+    // Linux Tao windows own a GTK container; the raw window-handle builder
+    // does not support that handle kind on Wayland/X11 GTK backends.
+    #[cfg(target_os = "linux")]
+    let webview = {
+        use tao::platform::unix::WindowExtUnix;
+        use wry::WebViewBuilderExtUnix;
+        webview_builder.build_gtk(window.default_vbox().ok_or_else(|| anyhow::anyhow!("GTK window container unavailable"))?)?
+    };
+    #[cfg(not(target_os = "linux"))]
+    let webview = webview_builder.build(&window)?;
 
     start_automation_http_server(proxy.clone());
 

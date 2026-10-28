@@ -473,7 +473,11 @@ impl ShellHostEngine {
 
     pub fn run_bash_command(cwd: &Path, command: &str) -> Result<Value> {
         let env_map = Self::resolve_user_shell_env();
-        let output = Command::new("/bin/zsh")
+        #[cfg(target_os = "macos")]
+        let shell = "/bin/zsh";
+        #[cfg(not(target_os = "macos"))]
+        let shell = if Path::new("/bin/bash").is_file() { "/bin/bash" } else { "/bin/sh" };
+        let output = Command::new(shell)
             .arg("-c")
             .arg(command)
             .current_dir(cwd)
