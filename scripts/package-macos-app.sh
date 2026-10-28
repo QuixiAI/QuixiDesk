@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="/Users/eric/quixi-desk"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROFILE="${1:-release}"
 TARGET_DIR="$ROOT_DIR/target/$PROFILE"
 APP_BUNDLE="$ROOT_DIR/dist/QuixiDesk.app"
