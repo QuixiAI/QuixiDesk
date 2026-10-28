@@ -1786,7 +1786,7 @@ impl ProviderManager {
 
         if token_acquired.is_none() && provider_id == "openai" {
             // Also check if the user already has valid Codex OAuth credentials in ~/.hexis/auth/oauth.openai_codex.json or ~/.codex/auth.json
-            if let Some(home) = dirs::home_dir() {
+            if let Some(home) = Some(quixi_proto::paths::account_home()) {
                 let hexis_auth = home.join(".hexis/auth/oauth.openai_codex.json");
                 let codex_auth = home.join(".codex/auth.json");
                 if force_complete && std::env::var("QUIXI_E2E_TEST").is_err() {

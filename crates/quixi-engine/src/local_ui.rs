@@ -24,6 +24,26 @@ fn matching_snippet(query: &str, title: &str, messages: &[Value]) -> Option<Stri
 }
 
 impl QuixiEngine {
+    /// Replace only account-facing bootstrap data; provider credentials remain separate.
+    /// Called at startup for an explicitly selected test profile, never by renderer IPC.
+    pub fn apply_mock_account(&self, fixture: &Value) -> Result<(), String> {
+        let account = fixture.get("account").filter(|v| v.is_object()).ok_or("Mock fixture requires account object")?;
+        let id = account.get("uuid").and_then(Value::as_str).ok_or("Mock account requires uuid")?;
+        Uuid::parse_str(id).map_err(|_| "Mock account uuid must be a UUID")?;
+        if !account.get("memberships").is_some_and(Value::is_array) {
+            return Err("Mock account requires memberships array".into());
+        }
+        let mut boot = self.bootstrap_template.write();
+        boot["account"] = account.clone();
+        if let Some(settings) = account.get("settings").filter(|v| v.is_object()) {
+            *self.account_settings.write() = settings.clone();
+        }
+        for key in ["current_user_access", "featureFlagsOrgUuid"] {
+            if let Some(value) = fixture.get(key) { boot[key] = value.clone(); }
+        }
+        Ok(())
+    }
+
     pub fn search_local_sessions(&self, query: &str, limit: usize) -> Vec<Value> {
         let query = query.trim().to_lowercase();
         if query.is_empty() {
@@ -181,6 +201,22 @@ impl QuixiEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn mock_accounts_are_profile_local_and_invalid_fixtures_do_not_replace_them() {
+        let roots: Vec<_>=(0..2).map(|_| std::env::temp_dir().join(format!("quixi-account-{}",Uuid::new_v4()))).collect();
+        let engines: Vec<_>=roots.iter().map(|p| QuixiEngine::new_with_data_dir(PathBuf::new(),p.clone())).collect();
+        for (index,engine) in engines.iter().enumerate() {
+            let fixture=json!({"account":{"uuid":Uuid::new_v4().to_string(),"email_address":format!("qa{index}@example.invalid"),"full_name":format!("Account {index}"),"memberships":[],"settings":{"marker":index}}});
+            engine.apply_mock_account(&fixture).unwrap();
+            assert_eq!(engine.build_live_bootstrap()["account"]["settings"]["marker"],index);
+            assert_eq!(engine.mcp_host.config_path.parent(),Some(roots[index].as_path()));
+            assert_eq!(engine.netstack.config_file.parent(),Some(roots[index].as_path()));
+            assert_eq!(engine.provider_manager.get_public_state()["configuredCount"],0);
+            assert!(engine.apply_mock_account(&json!({"account":{"uuid":"bad","memberships":[]}})).is_err());
+            assert_eq!(engine.build_live_bootstrap()["account"]["email_address"],format!("qa{index}@example.invalid"));
+        }
+        drop(engines);for root in roots { fs::remove_dir_all(root).unwrap(); }
+    }
     #[test]
     fn project_instructions_reach_provider_without_leaking_to_other_projects() {
         use std::io::{Read, Write};

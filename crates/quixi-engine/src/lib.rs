@@ -1,6 +1,7 @@
 pub mod agent_tools;
 pub mod providers;
 mod local_ui;
+mod storage;
 
 use chrono::Utc;
 use parking_lot::RwLock;
@@ -50,6 +51,7 @@ pub struct QuixiEngine {
     pub user_locale: RwLock<String>,
     pub emitter: RwLock<Option<EventCallback>>,
     turn_cancellations: RwLock<HashMap<String, Arc<AtomicBool>>>,
+    storage: storage::SessionStorage,
 }
 
 impl QuixiEngine {
@@ -74,8 +76,7 @@ impl QuixiEngine {
     }
 
     pub fn new(resources_dir: PathBuf) -> Arc<Self> {
-        let home = dirs::home_dir().unwrap_or_else(quixi_proto::paths::home_dir);
-        Self::new_with_data_dir(resources_dir, home.join(".quixi"))
+        Self::new_with_data_dir(resources_dir, quixi_proto::paths::data_dir())
     }
 
     /// Construct an engine with isolated storage (also used by regression tests).
@@ -180,7 +181,7 @@ impl QuixiEngine {
 
         let engine = Arc::new(Self {
             resources_dir,
-            data_dir,
+            data_dir: data_dir.clone(),
             bootstrap_template: RwLock::new(bootstrap_template),
             desktop_features,
             desktop_managed_config,
@@ -209,6 +210,7 @@ impl QuixiEngine {
             agent_sessions: RwLock::new(HashMap::new()),
             code_sessions: RwLock::new(HashMap::new()),
             code_transcripts: RwLock::new(HashMap::new()),
+            storage: storage::SessionStorage::default(),
             cowork_spaces: RwLock::new(spaces),
             chat_conversations: RwLock::new(HashMap::new()),
             projects: RwLock::new(HashMap::new()),
@@ -221,8 +223,8 @@ impl QuixiEngine {
             trusted_folders: RwLock::new(vec![
                 default_workspace,
             ]),
-            mcp_host: McpHost::new(),
-            netstack: NetstackPolicy::new(),
+            mcp_host: McpHost::new_with_data_dir(&data_dir),
+            netstack: NetstackPolicy::new_with_data_dir(&data_dir),
             shell_host: ShellHostEngine::new(),
             provider_manager,
             user_locale: RwLock::new(initial_locale),
@@ -231,6 +233,7 @@ impl QuixiEngine {
         });
 
         engine.load_persisted_sessions();
+        engine.load_session_recovery();
         engine.load_local_artifacts();
         engine
     }
@@ -297,9 +300,7 @@ impl QuixiEngine {
                                     }
                                 }
                             }
-                            if changed {
-                                self.persist_agent_session(&sess);
-                            }
+                            let _ = changed;
                             map.insert(sess.session_id.clone(), sess);
                         }
                     }
@@ -319,15 +320,22 @@ impl QuixiEngine {
                                 continue;
                             }
                             if let Some(stripped) = sess.session_id.strip_prefix("local_cli_") {
-                                let _ = fs::remove_file(entry.path());
-                                sess.session_id = format!("local_{}", stripped);
+                                let canonical_id = format!("local_{}", stripped);
+                                let canonical = code_sessions_dir.join(format!("{canonical_id}.json"));
+                                if fs::read(canonical).ok().and_then(|raw| serde_json::from_slice::<LocalCodeSession>(&raw).ok())
+                                    .is_some_and(|saved| saved.session_id == canonical_id) { continue; }
+                                sess.session_id = canonical_id;
+                            }
+                            if let Ok(document) = serde_json::from_str::<Value>(&raw) {
+                                if let Some(transcript) = document.get("transcript").and_then(Value::as_array) {
+                                    self.code_transcripts.write().insert(sess.session_id.clone(), transcript.clone());
+                                }
                             }
                             sess.is_running = false;
                             sess.turn_running = false;
                             sess.model = self
                                 .provider_manager
                                 .resolve_connected_model(Some(&sess.model));
-                            self.persist_code_session(&sess);
                             map.insert(sess.session_id.clone(), sess);
                         }
                     }
@@ -416,30 +424,6 @@ impl QuixiEngine {
             }
         }
         boot
-    }
-
-    pub fn persist_agent_session(&self, sess: &LocalAgentSession) {
-        if sess.session_id.trim().is_empty() {
-            return;
-        }
-        let dir = self.data_dir.join("sessions");
-        let _ = fs::create_dir_all(&dir);
-        let file = dir.join(format!("{}.json", sess.session_id));
-        if let Ok(raw) = serde_json::to_string_pretty(sess) {
-            let _ = fs::write(file, raw);
-        }
-    }
-
-    pub fn persist_code_session(&self, sess: &LocalCodeSession) {
-        if sess.session_id.trim().is_empty() {
-            return;
-        }
-        let dir = self.data_dir.join("code_sessions");
-        let _ = fs::create_dir_all(&dir);
-        let file = dir.join(format!("{}.json", sess.session_id));
-        if let Ok(raw) = serde_json::to_string_pretty(sess) {
-            let _ = fs::write(file, raw);
-        }
     }
 
     pub fn persist_cowork_space(&self, sp: &CoworkSpace) {
@@ -1023,6 +1007,16 @@ impl QuixiEngine {
         } else {
             serde_json::from_slice(body).unwrap_or_else(|_| json!({}))
         };
+
+        if clean_path == "/api/quixi/storage/status" {
+            return Self::json_resp(200, &self.session_storage_status());
+        }
+        if clean_path == "/api/quixi/storage/retry" && method == "POST" {
+            return Self::json_resp(200, &self.retry_session_saves());
+        }
+        if clean_path == "/api/quixi/storage/export" {
+            return Self::json_resp(200, &self.session_storage_export());
+        }
 
         if let Some(id) = clean_path.strip_prefix("/api/quixi/artifacts/") {
             return self.artifacts.read().get(id)
@@ -2260,8 +2254,7 @@ impl QuixiEngine {
             .filter(|s| !s.trim().is_empty())
             .map(|s| s.to_string());
         let now_ms = Utc::now().timestamp_millis() as u64;
-        let home = dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from(quixi_proto::paths::home_dir_str()))
+        let home = quixi_proto::paths::account_home()
             .to_string_lossy()
             .to_string();
         let folders: Vec<String> = opts
@@ -2400,8 +2393,7 @@ impl QuixiEngine {
         {
             let mut sessions = self.agent_sessions.write();
             if !sessions.contains_key(session_id) && !session_id.is_empty() {
-                let home = dirs::home_dir()
-                    .unwrap_or_else(|| PathBuf::from(quixi_proto::paths::home_dir_str()))
+                let home = quixi_proto::paths::account_home()
                     .to_string_lossy()
                     .to_string();
                 let auto_sess = LocalAgentSession {
@@ -2958,6 +2950,10 @@ impl QuixiEngine {
             .or_default()
             .push(user_msg.clone());
 
+        if let Some(session) = self.code_sessions.read().get(session_id) {
+            self.persist_code_session(session);
+        }
+
         let sid = session_id.to_string();
         let prompt_owned = prompt.to_string();
         let code_permission_mode_owned = code_permission_mode;
@@ -3119,6 +3115,9 @@ impl QuixiEngine {
                         .entry(sid_tools.clone())
                         .or_default()
                         .push(msg.clone());
+                    if let Some(session) = eng_tools.code_sessions.read().get(&sid_tools) {
+                        eng_tools.persist_code_session(session);
+                    }
                     eng_tools.emit_eipc(
                         "claude.web",
                         "LocalSessions",

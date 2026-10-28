@@ -21,10 +21,52 @@ use wry::{
     WebViewBuilder,
 };
 
+// WebView2 maps Wry's custom scheme onto a virtual HTTP host.
+#[cfg(target_os = "windows")]
+const APP_ORIGIN: &str = "http://app.localhost";
+#[cfg(not(target_os = "windows"))]
+const APP_ORIGIN: &str = "app://localhost";
+
+fn trusted_app_origin(origin: Option<&http::HeaderValue>) -> bool {
+    origin.is_none_or(|value| value == APP_ORIGIN)
+}
+
+fn exit_event_loop(control_flow: &mut ControlFlow) {
+    *control_flow = ControlFlow::Exit;
+    #[cfg(target_os = "windows")]
+    {
+        // Tao waits for the redraw batch to finish before honoring Exit.
+        // A WebView2 host on an inactive desktop may never receive WM_PAINT.
+        // Called on the UI thread, WM_QUIT lets its native message pump finish
+        // normally, including LoopDestroyed, without waiting for a repaint.
+        #[link(name = "user32")]
+        extern "system" { fn PostQuitMessage(exit_code: i32); }
+        unsafe { PostQuitMessage(0); }
+    }
+}
+
+#[cfg(test)]
+mod origin_tests {
+    use super::*;
+
+    #[test]
+    fn only_the_platform_app_origin_can_access_native_routes() {
+        assert!(trusted_app_origin(None));
+        assert!(trusted_app_origin(Some(&http::HeaderValue::from_static(APP_ORIGIN))));
+        for origin in ["null", "https://example.com", "http://app.localhost.evil", "http://localhost:19458"] {
+            assert!(!trusted_app_origin(Some(&http::HeaderValue::from_str(origin).unwrap())));
+        }
+        let response = build_http_response(200, "application/json", b"{}".to_vec());
+        assert_eq!(response.headers()["Access-Control-Allow-Origin"], APP_ORIGIN);
+    }
+}
+
 #[cfg(target_os = "macos")]
 use tao::platform::macos::WindowBuilderExtMacOS;
 #[cfg(target_os = "macos")]
 use wry::WebViewExtMacOS;
+#[cfg(target_os = "macos")]
+use wry::WebViewBuilderExtDarwin;
 
 #[cfg(target_os = "macos")]
 static MENU_PROXY: std::sync::OnceLock<std::sync::Mutex<tao::event_loop::EventLoopProxy<UserEvent>>> = std::sync::OnceLock::new();
@@ -32,6 +74,11 @@ static MENU_PROXY: std::sync::OnceLock<std::sync::Mutex<tao::event_loop::EventLo
 #[cfg(target_os = "macos")]
 extern "C" fn open_settings_menu(_: &objc::runtime::Object, _: objc::runtime::Sel, _: cocoa::base::id) {
     if let Some(proxy) = MENU_PROXY.get() { let _ = proxy.lock().unwrap().send_event(UserEvent::OpenSettings); }
+}
+
+#[cfg(target_os = "macos")]
+extern "C" fn quit_menu(_: &objc::runtime::Object, _: objc::runtime::Sel, _: cocoa::base::id) {
+    if let Some(proxy) = MENU_PROXY.get() { let _ = proxy.lock().unwrap().send_event(UserEvent::CloseWindow); }
 }
 
 /// Installs a native macOS `NSMenu` bar (`QuixiDesk`, `Edit`, `Window`) on `NSApp` so that
@@ -70,6 +117,7 @@ fn setup_macos_main_menu() {
         let cls = objc::runtime::Class::get("QuixiDeskMenuActions").unwrap_or_else(|| {
             let mut decl = objc::declare::ClassDecl::new("QuixiDeskMenuActions", objc::class!(NSObject)).unwrap();
             decl.add_method(sel!(openSettings:), open_settings_menu as extern "C" fn(&objc::runtime::Object, objc::runtime::Sel, id));
+            decl.add_method(sel!(quitSafely:), quit_menu as extern "C" fn(&objc::runtime::Object, objc::runtime::Sel, id));
             decl.register()
         });
         let target: id = msg_send![cls, new];
@@ -117,8 +165,9 @@ fn setup_macos_main_menu() {
         let quit_title = NSString::alloc(nil).init_str("Quit QuixiDesk");
         let quit_key = NSString::alloc(nil).init_str("q");
         let quit_item = NSMenuItem::alloc(nil)
-            .initWithTitle_action_keyEquivalent_(quit_title, sel!(terminate:), quit_key)
+            .initWithTitle_action_keyEquivalent_(quit_title, sel!(quitSafely:), quit_key)
             .autorelease();
+        let _: () = msg_send![quit_item, setTarget: target];
         app_menu.addItem_(quit_item);
         app_menu_item.setSubmenu_(app_menu);
 
@@ -275,6 +324,11 @@ enum UserEvent {
     ToggleMaximize,
     MinimizeWindow,
     CloseWindow,
+    #[cfg(target_os = "linux")]
+    WriteClipboard {
+        text: String,
+        tx: std::sync::mpsc::Sender<Result<(), String>>,
+    },
     CaptureSnapshot {
         tx: std::sync::mpsc::Sender<Result<Vec<u8>, String>>,
     },
@@ -359,27 +413,14 @@ fn unwrap_webview_eval_json(raw: &str) -> Value {
     serde_json::json!({ "ok": true, "raw": trimmed })
 }
 
-fn start_automation_http_server(proxy: tao::event_loop::EventLoopProxy<UserEvent>) {
+fn start_automation_http_server(proxy: tao::event_loop::EventLoopProxy<UserEvent>) -> anyhow::Result<()> {
+    let addr = format!("127.0.0.1:{}", quixi_proto::paths::automation_port());
+    // Fail startup rather than attach to another process's automation bridge.
+    let listener = std::net::TcpListener::bind(&addr)?;
     std::thread::spawn(move || {
         use std::io::{Read, Write};
-        use std::net::TcpListener;
         use std::time::Duration;
 
-        let addr = "127.0.0.1:19455";
-        let mut listener_opt = None;
-        for _ in 0..5 {
-            match TcpListener::bind(addr) {
-                Ok(l) => {
-                    listener_opt = Some(l);
-                    break;
-                }
-                Err(_) => std::thread::sleep(Duration::from_millis(200)),
-            }
-        }
-        let Some(listener) = listener_opt else {
-            tracing::warn!("Could not bind QuixiDesk automation bridge on {}", addr);
-            return;
-        };
         tracing::info!("QuixiDesk native UI & screenshot bridge listening on http://{}", addr);
 
         for stream in listener.incoming().flatten() {
@@ -540,6 +581,7 @@ fn start_automation_http_server(proxy: tao::event_loop::EventLoopProxy<UserEvent
             });
         }
     });
+    Ok(())
 }
 
 fn locate_resources_dir() -> PathBuf {
@@ -612,7 +654,7 @@ fn build_http_response(
     Response::builder()
         .status(StatusCode::from_u16(status).unwrap_or(StatusCode::OK))
         .header(CONTENT_TYPE, content_type)
-        .header("Access-Control-Allow-Origin", "app://localhost")
+        .header("Access-Control-Allow-Origin", APP_ORIGIN)
         .header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
         .header("Access-Control-Allow-Headers", "*")
         .header("Cache-Control", "no-cache")
@@ -688,6 +730,29 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
+    let args: Vec<String> = std::env::args().collect();
+    let option_value = |name: &str| -> anyhow::Result<Option<String>> {
+        let mut matches = args.iter().enumerate().filter(|(_, arg)| arg.as_str() == name);
+        let Some((index, _)) = matches.next() else { return Ok(None); };
+        if matches.next().is_some() { anyhow::bail!("Duplicate {name}"); }
+        let value = args.get(index + 1).filter(|value| !value.starts_with("--") && !value.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("{name} requires a path"))?;
+        Ok(Some(value.clone()))
+    };
+    let mock_account = option_value("--mock-account")?;
+    let test_profile = option_value("--test-profile")?
+        .or_else(|| std::env::var("QUIXI_TEST_PROFILE").ok());
+    if let Some(root) = &test_profile {
+        #[cfg(target_os = "macos")]
+        {
+            let version = std::process::Command::new("/usr/bin/sw_vers").arg("-productVersion").output()?;
+            let major: u32 = String::from_utf8_lossy(&version.stdout).split('.').next().unwrap_or("").trim().parse()?;
+            if major < 14 { anyhow::bail!("Isolated test web storage requires macOS 14 or later"); }
+        }
+        quixi_proto::paths::configure_test_profile(Path::new(root)).map_err(anyhow::Error::msg)?;
+        let profile = quixi_proto::paths::test_profile().unwrap();
+        for sub in ["workspace", "tmp", "home/Documents", "home/Downloads", "home/Desktop"] { fs::create_dir_all(profile.join(sub))?; }
+    }
     let resources_dir = locate_resources_dir();
     tracing::info!("QuixiDesk booting with resources_dir: {:?}", resources_dir);
 
@@ -698,6 +763,31 @@ fn main() -> anyhow::Result<()> {
     let _rt_guard = tokio_rt.enter();
 
     let engine = QuixiEngine::new(resources_dir.clone());
+    if let Some(profile) = quixi_proto::paths::test_profile() {
+        let fixture_path = mock_account.as_ref().map(PathBuf::from)
+            .unwrap_or_else(|| profile.join("mock-account.json"));
+        if !fixture_path.exists() {
+            if mock_account.is_some() { anyhow::bail!("Mock account fixture does not exist: {}",fixture_path.display()); }
+            let mut fixture = engine.build_live_bootstrap();
+            let account = &mut fixture["account"];
+            account["uuid"] = serde_json::json!(uuid::Uuid::new_v4().to_string());
+            account["email_address"] = serde_json::json!("qa@example.invalid");
+            account["full_name"] = serde_json::json!("Mock QA Account");
+            account["display_name"] = serde_json::json!("Mock QA");
+            if let Some(memberships) = account["memberships"].as_array_mut() {
+                for (index, member) in memberships.iter_mut().enumerate() {
+                    member["organization"]["name"] = serde_json::json!(format!("Mock Organization {}",index+1));
+                }
+            }
+            let fixture = serde_json::json!({"account":fixture["account"],"current_user_access":fixture["current_user_access"],"featureFlagsOrgUuid":fixture["featureFlagsOrgUuid"]});
+            fs::write(&fixture_path, serde_json::to_vec_pretty(&fixture)?)?;
+        }
+        let fixture: Value = serde_json::from_slice(&fs::read(&fixture_path)?)?;
+        engine.apply_mock_account(&fixture).map_err(anyhow::Error::msg)?;
+        tracing::info!("Test profile active: {} (mock account data only; providers configured separately)",profile.display());
+    } else if mock_account.is_some() {
+        anyhow::bail!("--mock-account requires --test-profile");
+    }
     let router = Arc::new(EipcRouter::new(engine.clone()));
 
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
@@ -719,7 +809,7 @@ fn main() -> anyhow::Result<()> {
 
     // Build native OS window matching Claude.app dimensions and titlebar inset
     let mut win_builder = WindowBuilder::new()
-        .with_title("QuixiDesk")
+        .with_title(if test_profile.is_some() { "QuixiDesk — Test Profile" } else { "QuixiDesk" })
         .with_inner_size(LogicalSize::new(1280.0, 840.0))
         .with_min_inner_size(LogicalSize::new(480.0, 360.0));
 
@@ -1336,12 +1426,16 @@ fn main() -> anyhow::Result<()> {
 
     init_script.push_str(include_str!("provider_ui.js"));
     init_script.push_str(include_str!("local_artifacts_ui.js"));
+    init_script.push_str(include_str!("storage_ui.js"));
 
     // The E2E harness needs the live workspace root, not a baked-in developer path.
     init_script = init_script.replace(
         "__QUIXI_WORKSPACE__",
-        quixi_proto::paths::default_workspace_str(),
+        &quixi_proto::paths::default_workspace_str().replace('\\', "\\\\").replace('\'', "\\'"),
     );
+    // Keep IPC URLs and the reused preload's trusted-origin checks consistent
+    // with the origin exposed by the platform webview.
+    init_script = init_script.replace("app://localhost", APP_ORIGIN);
 
     #[cfg(target_os = "macos")]
     {
@@ -1362,7 +1456,16 @@ fn main() -> anyhow::Result<()> {
 
     let user_agent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) QuixiDesk/3.6556.2 Claude/3.6556.2 Electron/44.9.3 Safari/605.1.15";
 
-    let webview_builder = WebViewBuilder::new()
+    let mut web_context = wry::WebContext::new(quixi_proto::paths::test_profile().map(|p| p.join("website-data")));
+    let mut webview_builder = if test_profile.is_some() { WebViewBuilder::with_web_context(&mut web_context) } else { WebViewBuilder::new() };
+    #[cfg(target_os = "macos")]
+    if let Some(profile) = quixi_proto::paths::test_profile() {
+        let file = profile.join("web-store-id");
+        let id: [u8; 16] = if file.exists() { fs::read(&file)?.try_into().map_err(|_| anyhow::anyhow!("Invalid test web store ID"))? }
+            else { let id = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos().to_le_bytes(); fs::write(file, id)?; id };
+        webview_builder = webview_builder.with_data_store_identifier(id);
+    }
+    let webview_builder = webview_builder
         .with_user_agent(user_agent)
         .with_initialization_script_for_main_only(&init_script, true)
         .with_devtools(true)
@@ -1378,7 +1481,7 @@ fn main() -> anyhow::Result<()> {
                 let uri = request.uri();
                 let path = uri.path();
                 // Opaque sandbox frames and remote websites must never invoke app APIs.
-                if request.headers().get("Origin").is_some_and(|v| v != "app://localhost") {
+                if !trusted_app_origin(request.headers().get("Origin")) {
                     return build_http_response(403, "text/plain", b"Untrusted origin".to_vec());
                 }
                 let path_and_query = uri
@@ -1407,7 +1510,17 @@ fn main() -> anyhow::Result<()> {
                                     .get("text")
                                     .and_then(|v| v.as_str())
                                     .unwrap_or("");
-                                let _ = quixi_platform::ComputerUse::write_clipboard(text);
+                                #[cfg(target_os = "linux")]
+                                let written = {
+                                    let (tx, rx) = std::sync::mpsc::channel();
+                                    protocol_proxy.send_event(UserEvent::WriteClipboard { text: text.to_string(), tx }).is_ok()
+                                        && matches!(rx.recv_timeout(std::time::Duration::from_secs(5)), Ok(Ok(())))
+                                };
+                                #[cfg(not(target_os = "linux"))]
+                                let written = quixi_platform::ComputerUse::write_clipboard(text).is_ok();
+                                if !written {
+                                    return build_http_response(500, "application/json", b"{\"ok\":false}".to_vec());
+                                }
                                 return build_http_response(
                                     200,
                                     "application/json; charset=utf-8",
@@ -1525,7 +1638,7 @@ fn main() -> anyhow::Result<()> {
     #[cfg(not(target_os = "linux"))]
     let webview = webview_builder.build(&window)?;
 
-    start_automation_http_server(proxy.clone());
+    start_automation_http_server(proxy.clone())?;
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
@@ -1536,13 +1649,32 @@ fn main() -> anyhow::Result<()> {
                 setup_macos_main_menu();
                 tracing::info!("QuixiDesk native window initialized (app://localhost/)");
             }
+            Event::LoopDestroyed => {
+                tracing::info!("QuixiDesk native event loop stopped");
+            }
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
                 ..
             } => {
-                *control_flow = ControlFlow::Exit;
+                if engine.has_unsaved_conversations() {
+                    let state = engine.session_storage_status();
+                    let _ = webview.evaluate_script(&format!("window.__quixi_show_storage_status__?.({state});"));
+                } else { exit_event_loop(control_flow); }
             }
             Event::UserEvent(user_evt) => match user_evt {
+                #[cfg(target_os = "linux")]
+                UserEvent::WriteClipboard { text, tx } => {
+                    // GTK clipboard ownership must be established on the GTK event thread,
+                    // while the custom-protocol worker waits for a real native result.
+                    let result = if gtk::gdk::Display::default().is_some() {
+                        let clipboard = gtk::Clipboard::get(&gtk::gdk::SELECTION_CLIPBOARD);
+                        clipboard.set_text(&text);
+                        clipboard.store();
+                        // Preserve the existing in-app clipboard read bridge as well.
+                        quixi_platform::ComputerUse::write_clipboard(&text).map_err(|error| error.to_string())
+                    } else { Err("GTK display unavailable".to_string()) };
+                    let _ = tx.send(result);
+                }
                 UserEvent::OpenSettings => {
                     let _ = webview.evaluate_script("location.hash='settings/general'; window.dispatchEvent(new PopStateEvent('popstate'));");
                 }
@@ -1574,7 +1706,14 @@ fn main() -> anyhow::Result<()> {
                     window.set_minimized(true);
                 }
                 UserEvent::CloseWindow => {
-                    *control_flow = ControlFlow::Exit;
+                    if engine.has_unsaved_conversations() {
+                        tracing::warn!("Close blocked: conversations have no durable save");
+                        let state = engine.session_storage_status();
+                        let _ = webview.evaluate_script(&format!("window.__quixi_show_storage_status__?.({state});"));
+                    } else {
+                        tracing::info!("Closing QuixiDesk with conversations durably saved");
+                        exit_event_loop(control_flow);
+                    }
                 }
                 UserEvent::CaptureSnapshot { tx } => {
                     #[cfg(target_os = "macos")]

@@ -394,14 +394,15 @@ impl ComputerUse {
         use std::net::{SocketAddr, TcpStream};
         use std::time::Duration;
 
-        let addr: SocketAddr = "127.0.0.1:19455".parse().ok()?;
+        let port = quixi_proto::paths::automation_port();
+        let addr: SocketAddr = format!("127.0.0.1:{port}").parse().ok()?;
         let mut stream = TcpStream::connect_timeout(&addr, Duration::from_millis(350)).ok()?;
         let _ = stream.set_read_timeout(Some(Duration::from_millis(2500)));
         let _ = stream.set_write_timeout(Some(Duration::from_millis(1000)));
 
         let body_slice = body.unwrap_or(&[]);
         let req = format!(
-            "{} {} HTTP/1.1\r\nHost: 127.0.0.1:19455\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            "{} {} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             method,
             path,
             body_slice.len()
@@ -670,21 +671,21 @@ impl ComputerUse {
     }
 
     pub fn write_clipboard(text: &str) -> Result<()> {
-        if let Ok(mut st) = cu_state().lock() {
-            st.clipboard_fallback = text.to_string();
-        }
         #[cfg(target_os = "macos")]
         {
             use std::process::Stdio;
-            if let Ok(mut child) = Command::new("/usr/bin/pbcopy")
+            let mut child = Command::new("/usr/bin/pbcopy")
                 .stdin(Stdio::piped())
-                .spawn()
-            {
-                if let Some(stdin) = child.stdin.as_mut() {
-                    let _ = stdin.write_all(text.as_bytes());
-                }
-                let _ = child.wait();
+                .spawn()?;
+            let write = child.stdin.take().ok_or_else(|| anyhow::anyhow!("Clipboard input unavailable"))?
+                .write_all(text.as_bytes());
+            if let Err(error) = write {
+                let _ = child.kill(); let _ = child.wait(); return Err(error.into());
             }
+            if !child.wait()?.success() { anyhow::bail!("System clipboard rejected the copy"); }
+        }
+        if let Ok(mut st) = cu_state().lock() {
+            st.clipboard_fallback = text.to_string();
         }
         Ok(())
     }
@@ -1587,7 +1588,12 @@ impl BrowserUse {
     }
 
     fn fetch_and_parse_html(url: &str) -> (String, String, String, Vec<BrowserElementRef>, u16) {
-        let out = Command::new("/usr/bin/curl")
+        #[cfg(target_os = "windows")]
+        let curl = PathBuf::from(std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into()))
+            .join("System32/curl.exe");
+        #[cfg(not(target_os = "windows"))]
+        let curl = PathBuf::from("/usr/bin/curl");
+        let out = Command::new(curl)
             .args([
                 "-sL",
                 "--proto", "=http,https",
@@ -2034,8 +2040,13 @@ mod tests {
 
     #[test]
     fn test_spawn_disclaimed_computer_use_and_browser_use() {
+        #[cfg(target_os = "windows")]
+        let (program, args) = (std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".into()),
+            vec!["/D".into(), "/C".into(), "echo quixi-ok".into()]);
+        #[cfg(not(target_os = "windows"))]
+        let (program, args) = ("/bin/echo".to_string(), vec!["quixi-ok".into()]);
         let mut child =
-            SecurityAndSpawn::spawn_disclaimed("/bin/echo", &["quixi-ok".to_string()], None)
+            SecurityAndSpawn::spawn_disclaimed(&program, &args, None)
                 .unwrap();
         let status = child.wait().unwrap();
         assert!(status.success());

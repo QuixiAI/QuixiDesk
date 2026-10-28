@@ -360,6 +360,17 @@ pub struct ShellHostEngine {
 }
 
 impl ShellHostEngine {
+    fn default_shell() -> String {
+        #[cfg(target_os = "windows")]
+        { std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".into()) }
+        #[cfg(not(target_os = "windows"))]
+        { std::env::var("SHELL").unwrap_or_else(|_| {
+            if cfg!(target_os = "macos") { "/bin/zsh" }
+            else if Path::new("/bin/bash").is_file() { "/bin/bash" }
+            else { "/bin/sh" }.into()
+        }) }
+    }
+
     pub fn new() -> Self {
         Self {
             ptys: Arc::new(Mutex::new(HashMap::new())),
@@ -367,13 +378,43 @@ impl ShellHostEngine {
     }
 
     pub fn resolve_user_shell_env() -> HashMap<String, String> {
+        if let Some(profile) = quixi_proto::paths::test_profile() {
+            #[cfg(target_os = "windows")]
+            {
+                let mut env = HashMap::new();
+                // cmd and native tools need these OS settings even in an isolated
+                // account fixture. Do not forward credentials or other user env.
+                for name in ["SystemRoot", "ComSpec", "PATH", "PATHEXT"] {
+                    if let Some(value) = std::env::var_os(name) {
+                        env.insert(name.to_string(), value.to_string_lossy().into_owned());
+                    }
+                }
+                let tmp = profile.join("tmp");
+                let _ = fs::create_dir_all(&tmp);
+                env.insert("TEMP".into(), tmp.to_string_lossy().into_owned());
+                env.insert("TMP".into(), tmp.to_string_lossy().into_owned());
+                return env;
+            }
+            #[cfg(not(target_os = "windows"))]
+            return HashMap::from([
+                ("PATH".into(), "/usr/bin:/bin:/usr/sbin:/sbin".into()),
+                ("LANG".into(), "en_US.UTF-8".into()),
+                ("ZDOTDIR".into(), profile.join("home").to_string_lossy().into_owned()),
+                ("TMPDIR".into(), profile.join("tmp").to_string_lossy().into_owned()),
+            ]);
+        }
         let mut map: HashMap<String, String> = std::env::vars().collect();
+        #[cfg(target_os = "windows")]
+        return map;
+        #[cfg(not(target_os = "windows"))]
+        {
         let current_path = map.get("PATH").cloned().unwrap_or_default();
         let mut extra_paths = vec![
             "/opt/homebrew/bin".to_string(),
             "/usr/local/bin".to_string(),
         ];
-        if let Some(home) = dirs::home_dir() {
+        {
+            let home = quixi_proto::paths::account_home();
             extra_paths.push(home.join(".cargo/bin").to_string_lossy().to_string());
             extra_paths.push(home.join(".local/bin").to_string_lossy().to_string());
         }
@@ -382,10 +423,15 @@ impl ShellHostEngine {
         }
         map.insert("PATH".to_string(), extra_paths.join(":"));
         map
+        }
     }
 
     pub fn get_terminal_shells() -> Value {
-        let default_shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+        let default_shell = Self::default_shell();
+        #[cfg(target_os = "windows")]
+        return json!({"shells":[{"id":"cmd","name":"Command Prompt","path":default_shell,"isDefault":true}],"selected":default_shell});
+        #[cfg(not(target_os = "windows"))]
+        {
         let mut shells = Vec::new();
         for (id, name, bin) in [
             ("zsh", "zsh", "/bin/zsh"),
@@ -405,10 +451,11 @@ impl ShellHostEngine {
             "shells": shells,
             "selected": default_shell,
         })
+        }
     }
 
     pub fn start_pty(&self, key: &str, cwd: &Path) -> Value {
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+        let shell = Self::default_shell();
         let entry = PtySessionEntry {
             key: key.to_string(),
             cwd: cwd.to_string_lossy().to_string(),
@@ -473,12 +520,14 @@ impl ShellHostEngine {
 
     pub fn run_bash_command(cwd: &Path, command: &str) -> Result<Value> {
         let env_map = Self::resolve_user_shell_env();
-        #[cfg(target_os = "macos")]
-        let shell = "/bin/zsh";
-        #[cfg(not(target_os = "macos"))]
-        let shell = if Path::new("/bin/bash").is_file() { "/bin/bash" } else { "/bin/sh" };
-        let output = Command::new(shell)
-            .arg("-c")
+        let shell = Self::default_shell();
+        let mut cmd = Command::new(shell);
+        if quixi_proto::paths::test_profile().is_some() { cmd.env_clear(); }
+        #[cfg(target_os = "windows")]
+        cmd.args(["/D", "/S", "/C"]);
+        #[cfg(not(target_os = "windows"))]
+        cmd.arg("-c");
+        let output = cmd
             .arg(command)
             .current_dir(cwd)
             .envs(&env_map)
@@ -505,9 +554,10 @@ impl TranscriptSearchEngine {
             return vec![];
         }
         let mut roots: Vec<PathBuf> = Vec::new();
-        if let Some(home) = dirs::home_dir() {
-            roots.push(home.join(".quixi/sessions"));
-            roots.push(home.join(".quixi/projects"));
+        {
+            let home = quixi_proto::paths::account_home();
+            roots.push(quixi_proto::paths::data_dir().join("sessions"));
+            roots.push(quixi_proto::paths::data_dir().join("projects"));
             roots.push(home.join(".claude/projects"));
         }
 
@@ -553,9 +603,7 @@ impl TranscriptSearchEngine {
     pub fn list_cli_sessions(limit: usize) -> Vec<Value> {
         use std::io::BufRead;
         let mut raw_sessions: Vec<(u64, String, Value)> = Vec::new();
-        let Some(home) = dirs::home_dir() else {
-            return Vec::new();
-        };
+        let home = quixi_proto::paths::account_home();
         let claude_projects = home.join(".claude/projects");
         if claude_projects.exists() {
             for entry in WalkBuilder::new(&claude_projects)
@@ -685,9 +733,7 @@ impl TranscriptSearchEngine {
     }
 
     pub fn read_cli_transcript(session_id: &str) -> Value {
-        let Some(home) = dirs::home_dir() else {
-            return json!({ "messages": [], "totalMessages": 0 });
-        };
+        let home = quixi_proto::paths::account_home();
         let claude_projects = home.join(".claude/projects");
         if claude_projects.exists() {
             for entry in WalkBuilder::new(&claude_projects)

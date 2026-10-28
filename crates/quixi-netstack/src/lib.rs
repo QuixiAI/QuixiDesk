@@ -15,7 +15,7 @@ pub struct QuixiAuthConfig {
 impl Default for QuixiAuthConfig {
     fn default() -> Self {
         Self {
-            api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
+            api_key: if quixi_proto::paths::test_profile().is_some() { None } else { std::env::var("ANTHROPIC_API_KEY").ok() },
             base_url: std::env::var("ANTHROPIC_BASE_URL")
                 .unwrap_or_else(|_| "https://api.anthropic.com".to_string()),
             egress_mode: "full_egress".to_string(),
@@ -35,8 +35,10 @@ pub struct NetstackPolicy {
 
 impl NetstackPolicy {
     pub fn new() -> Self {
-        let home = dirs::home_dir().unwrap_or_else(quixi_proto::paths::home_dir);
-        let quixi_dir = home.join(".quixi");
+        Self::new_with_data_dir(&quixi_proto::paths::data_dir())
+    }
+
+    pub fn new_with_data_dir(quixi_dir: &std::path::Path) -> Self {
         let _ = fs::create_dir_all(&quixi_dir);
         Self {
             config_file: quixi_dir.join("netstack.json"),
@@ -49,7 +51,7 @@ impl NetstackPolicy {
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
 
-        if cfg.api_key.is_none() {
+        if cfg.api_key.is_none() && quixi_proto::paths::test_profile().is_none() {
             cfg.api_key = std::env::var("ANTHROPIC_API_KEY")
                 .ok()
                 .filter(|k| k.starts_with("sk-ant-"));

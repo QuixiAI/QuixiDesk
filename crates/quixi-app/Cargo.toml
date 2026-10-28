@@ -28,8 +28,12 @@ wry.workspace = true
 http.workspace = true
 url.workspace = true
 dirs.workspace = true
+uuid.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc.workspace = true
 cocoa.workspace = true
 block = "0.1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"

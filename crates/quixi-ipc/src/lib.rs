@@ -87,6 +87,21 @@ impl EipcRouter {
             return EipcReplyPayload::ok(val);
         }
 
+        if parsed.namespace == "claude.web" && parsed.member == "delete" {
+            let kind = match parsed.service.as_str() {
+                "LocalAgentModeSessions" => Some("sessions"),
+                "LocalSessions" => Some("code_sessions"),
+                _ => None,
+            };
+            if let Some(kind) = kind {
+                let id = req.args.first().and_then(Value::as_str).unwrap_or_default();
+                if !id.is_empty() {
+                    if let Err(error) = self.engine.delete_session_storage(kind, id) {
+                        return EipcReplyPayload::err(error);
+                    }
+                }
+            }
+        }
         let raw_res = self.dispatch_service(
             &parsed.namespace,
             &parsed.service,
@@ -270,7 +285,7 @@ impl EipcRouter {
                     json!([{
                         "id": "claude-cli-local",
                         "label": "Claude Code CLI (~/.claude/projects)",
-                        "rootPath": format!("{}/.claude/projects", quixi_proto::paths::home_dir_str()),
+                        "rootPath": quixi_proto::paths::account_home().join(".claude/projects").to_string_lossy(),
                         "origin": "local",
                         "kind": "cli",
                         "sessionCount": cli_sessions.len()
@@ -2367,13 +2382,13 @@ impl EipcRouter {
                     .and_then(|v| v.as_str())
                     .unwrap_or("documents")
                     .to_lowercase();
-                let home = dirs::home_dir().unwrap_or_else(quixi_proto::paths::home_dir);
+                let home = Some(quixi_proto::paths::account_home()).unwrap_or_else(quixi_proto::paths::home_dir);
                 let resolved = match kind.as_str() {
-                    "documents" => dirs::document_dir().unwrap_or_else(|| home.join("Documents")),
-                    "downloads" => dirs::download_dir().unwrap_or_else(|| home.join("Downloads")),
-                    "desktop" => dirs::desktop_dir().unwrap_or_else(|| home.join("Desktop")),
+                    "documents" => if quixi_proto::paths::test_profile().is_some() { home.join("Documents") } else { dirs::document_dir().unwrap_or_else(|| home.join("Documents")) },
+                    "downloads" => if quixi_proto::paths::test_profile().is_some() { home.join("Downloads") } else { dirs::download_dir().unwrap_or_else(|| home.join("Downloads")) },
+                    "desktop" => if quixi_proto::paths::test_profile().is_some() { home.join("Desktop") } else { dirs::desktop_dir().unwrap_or_else(|| home.join("Desktop")) },
                     "home" => home,
-                    _ => dirs::document_dir().unwrap_or_else(|| home.join("Documents")),
+                    _ => if quixi_proto::paths::test_profile().is_some() { home.join("Documents") } else { dirs::document_dir().unwrap_or_else(|| home.join("Documents")) },
                 };
                 json!(resolved.to_string_lossy().to_string())
             }

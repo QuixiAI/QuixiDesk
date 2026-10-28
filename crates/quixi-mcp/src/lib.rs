@@ -31,8 +31,10 @@ pub struct McpHost {
 
 impl McpHost {
     pub fn new() -> Self {
-        let home = dirs::home_dir().unwrap_or_else(quixi_proto::paths::home_dir);
-        let quixi_dir = home.join(".quixi");
+        Self::new_with_data_dir(&quixi_proto::paths::data_dir())
+    }
+
+    pub fn new_with_data_dir(quixi_dir: &std::path::Path) -> Self {
         let _ = fs::create_dir_all(&quixi_dir);
         let config_path = quixi_dir.join("quixi_desktop_config.json");
 
@@ -1055,7 +1057,7 @@ impl McpHost {
                     "id": id,
                     "displayName": display_name,
                     "installSource": "builtin",
-                    "path": format!("{}/.quixi/extensions/{}", quixi_proto::paths::home_dir_str(), id),
+                    "path": quixi_proto::paths::data_dir().join("extensions").join(id).to_string_lossy(),
                     "settings": {
                         "isEnabled": true,
                         "userConfig": {}
@@ -1481,6 +1483,11 @@ impl McpHost {
         default_cwd: &Path,
     ) -> Result<Value> {
         let mut cmd = Command::new(&entry.command);
+        if let Some(profile) = quixi_proto::paths::test_profile() {
+            cmd.env_clear().env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+                .env("QUIXI_TEST_PROFILE", profile)
+                .env("QUIXI_AUTOMATION_PORT", quixi_proto::paths::automation_port().to_string());
+        }
         cmd.args(&entry.args)
             .envs(&entry.env)
             .current_dir(default_cwd)
@@ -2410,8 +2417,7 @@ impl McpHost {
                 }))
             }
             "store_memory" | "recall_memory" => {
-                let home = dirs::home_dir().unwrap_or_else(quixi_proto::paths::home_dir);
-                let mem_file = home.join(".quixi/memory/CLAUDE.md");
+                let mem_file = self.config_path.parent().unwrap().join("memory/CLAUDE.md");
                 if tool_name == "store_memory" {
                     let k = args.get("key").and_then(|v| v.as_str()).unwrap_or("note");
                     let v = args.get("value").and_then(|v| v.as_str()).unwrap_or("");

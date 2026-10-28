@@ -2215,6 +2215,7 @@ dependencies = [
  "block",
  "cocoa",
  "dirs",
+ "gtk",
  "http",
  "objc",
  "parking_lot",
@@ -2232,6 +2233,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "uuid",
  "wry",
 ]
 

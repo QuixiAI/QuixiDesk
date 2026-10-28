@@ -63,12 +63,12 @@ run/<run-id>/<case-id>/
 
 Required changes and safeguards:
 
-1. Introduce an explicit app-data root shared by engine, providers, MCP, netstack, transcripts and helpers. A proposed `QUIXI_DATA_DIR` is a new interface, not an existing option. Verify every persistence path uses it.
+1. Use `--test-profile /absolute/path` (or `QUIXI_TEST_PROFILE`) for app data, providers, MCP configuration, netstack, memory, transcript fixtures and web storage. `--mock-account file.json` supplies synthetic bootstrap account data. This interface now exists; its isolation still requires independent qualification. It does not sandbox arbitrary tool access or OS services.
 2. Retain `QUIXI_WORKSPACE` for fixture selection and `QUIXI_RESOURCES_DIR` for resource resolution. Never infer test storage from the original build checkout.
 3. Give the test build an isolated WKWebView website data store and a unique test bundle identifier. Verify cookies, local storage, cache, downloads and persisted permission preferences are independent.
-4. Set a controlled `HOME`, `TMPDIR` and environment allowlist, but do not assume this isolates `dirs::home_dir`, Keychain, TCC, browser storage, login shells or Apple services. Inventory and verify their effective paths and identities.
+4. Keep the OS `HOME` unchanged when using `--test-profile`; use its application-owned `home/`, temporary paths, and environment allowlist for fixtures. Use a disposable OS account or VM for cases requiring isolation of Keychain, TCC, login shells, or other OS services. Inventory and verify effective paths and identities.
 5. Remove production API keys, refresh tokens, inherited proxy configuration, cloud credentials and external MCP configuration from deterministic runs. Never clone the developer's real `providers.json` into CI.
-6. Replace the fixed automation port with a selectable or dynamically allocated port. Add a handshake containing PID, bundle path, binary hash, source revision, profile root and run UUID. Refuse any mismatch; do not silently connect to an older app on port 19455.
+6. Use `QUIXI_AUTOMATION_PORT` to select the automation port (test default 19456). Add a handshake containing PID, bundle path, binary hash, source revision, profile root and run UUID. Refuse any mismatch; do not silently connect to an older app on port 19455.
 7. Do not package into the normal `dist/` directory or copy helpers into the real `~/.local/bin` during tests. Add explicit output/install-root options or run packaging in a disposable account and checkout.
 8. Run the deterministic suite with network egress restricted to its local fixture servers. External requests must fail loudly and be recorded. Restrict helper processes as well as the main app.
 9. Record pre-run and post-run filesystem manifests. Exclude only known OS-owned caches. Any unexpected write outside the sandbox is a failure, even if the UI claims success.
