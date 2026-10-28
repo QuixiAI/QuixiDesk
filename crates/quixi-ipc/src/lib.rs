@@ -2487,8 +2487,12 @@ mod tests {
     use quixi_proto::EIPC_UUID_MAIN;
     use std::path::PathBuf;
 
+    fn workspace_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+    }
+
     fn make_router() -> (Arc<QuixiEngine>, EipcRouter) {
-        let res = PathBuf::from("/Users/eric/quixi-desk/resources");
+        let res = workspace_root().join("resources");
         let engine = QuixiEngine::new(res);
         *engine.user_locale.write() = "en-US".to_string();
         {
@@ -2609,14 +2613,11 @@ mod tests {
     fn test_all_1400_eipc_channels_and_session_lifecycles() {
         let (_engine, router) = make_router();
 
-        // 1. Parse reference/ipc-catalog-1400-members.txt and invoke all 1,400 channels
-        let catalog =
-            fs::read_to_string("/Users/eric/quixi-desk/reference/ipc-catalog-1400-members.txt")
-                .unwrap();
+        // 1. Invoke every channel in the checked-in catalog.
+        let catalog = include_str!("../tests/fixtures/ipc-catalog-1400-members.txt");
         let mut current_uuid = String::new();
         let mut current_ns = String::new();
         let mut invoked_count = 0usize;
-        let mut actual_outputs = serde_json::Map::new();
 
         for line in catalog.lines() {
             let trimmed = line.trim();
@@ -2634,13 +2635,6 @@ mod tests {
                 let svc = left.split_whitespace().next().unwrap_or("");
                 for member in right.split(", ").map(|s| s.trim()).filter(|s| !s.is_empty()) {
                     if member == "runBashCommand" || member == "captureScreenshot" {
-                        let key = format!("{}.{}", svc, member);
-                        let val = router
-                            .exact_methods
-                            .get(&key)
-                            .cloned()
-                            .unwrap_or_else(|| json!(""));
-                        actual_outputs.insert(key, val);
                         invoked_count += 1;
                         continue;
                     }
@@ -2653,20 +2647,11 @@ mod tests {
                         args: vec![],
                     });
                     assert!(reply.error.is_none());
-                    actual_outputs.insert(
-                        format!("{}.{}", svc, member),
-                        reply.result.unwrap_or(Value::Null),
-                    );
                     invoked_count += 1;
                 }
             }
         }
         assert_eq!(invoked_count, 1400);
-
-        let _ = fs::write(
-            "/Users/eric/quixi-desk/reference/quixi-ipc-actual-outputs.json",
-            serde_json::to_string_pretty(&Value::Object(actual_outputs)).unwrap(),
-        );
 
         // 2. Test full LocalAgentModeSessions (Cowork / 3P Chat) lifecycle
         let start_agent = router
@@ -2678,7 +2663,7 @@ mod tests {
                 args: vec![json!({
                     "message": "Check git status",
                     "sessionType": "cowork",
-                    "userSelectedFolders": ["/Users/eric/quixi-desk"]
+                    "userSelectedFolders": [workspace_root()]
                 })],
             })
             .result
@@ -2709,7 +2694,7 @@ mod tests {
                 ),
                 args: vec![json!({
                     "prompt": "List files in workspace",
-                    "cwd": "/Users/eric/quixi-desk"
+                    "cwd": workspace_root()
                 })],
             })
             .result
@@ -3017,7 +3002,7 @@ mod tests {
                     "message": "Check git status",
                     "model": "claude-sonnet-4-6", // Unconnected model requested by stale caller
                     "sessionType": "cowork",
-                    "userSelectedFolders": ["/Users/eric/quixi-desk"]
+                    "userSelectedFolders": [workspace_root()]
                 })],
             })
             .result
