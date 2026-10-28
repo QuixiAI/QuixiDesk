@@ -68,6 +68,11 @@ use wry::WebViewExtMacOS;
 #[cfg(target_os = "macos")]
 use wry::WebViewBuilderExtDarwin;
 
+#[cfg(target_os = "linux")]
+use tao::platform::unix::WindowExtUnix;
+#[cfg(target_os = "linux")]
+use wry::WebViewBuilderExtUnix;
+
 #[cfg(target_os = "macos")]
 static MENU_PROXY: std::sync::OnceLock<std::sync::Mutex<tao::event_loop::EventLoopProxy<UserEvent>>> = std::sync::OnceLock::new();
 
@@ -587,7 +592,7 @@ fn start_automation_http_server(proxy: tao::event_loop::EventLoopProxy<UserEvent
 fn locate_resources_dir() -> PathBuf {
     if let Ok(env_dir) = std::env::var("QUIXI_RESOURCES_DIR") {
         let p = PathBuf::from(env_dir);
-        if p.exists() {
+        if p.join("ion-dist/index.html").exists() {
             return p;
         }
     }
@@ -598,6 +603,11 @@ fn locate_resources_dir() -> PathBuf {
             let bundle_res = exe_dir.join("../Resources");
             if bundle_res.join("ion-dist/index.html").exists() {
                 return bundle_res.canonicalize().unwrap_or(bundle_res);
+            }
+            // Linux/Windows install layout: <prefix>/bin/QuixiDesk -> <prefix>/share/quixidesk/resources
+            let share_res = exe_dir.join("../share/quixidesk/resources");
+            if share_res.join("ion-dist/index.html").exists() {
+                return share_res.canonicalize().unwrap_or(share_res);
             }
             // Cargo target/release/QuixiDesk -> ../../resources
             let workspace_res = exe_dir.join("../../resources");
@@ -615,6 +625,368 @@ fn locate_resources_dir() -> PathBuf {
     std::env::current_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
         .join("resources")
+}
+
+/// Shared request handler for the `app://localhost` custom protocol and the loopback
+/// HTTP bridge. Returns `None` for static asset paths so callers can serve them from disk.
+///
+/// WebKitGTK does not expose request bodies to custom URI scheme handlers, so every
+/// body-bearing `$eipc_message$` / REST call is proxied over a loopback HTTP socket by
+/// the injected bridge prelude (`window.fetch`, `XMLHttpRequest`, `EventSource`).
+#[allow(clippy::too_many_arguments)]
+fn handle_quixi_request(
+    method: &str,
+    path: &str,
+    path_and_query: &str,
+    body: &[u8],
+    engine: &Arc<QuixiEngine>,
+    router: &Arc<EipcRouter>,
+    proxy: &tao::event_loop::EventLoopProxy<UserEvent>,
+) -> Option<(u16, String, Vec<u8>)> {
+    const JSON: &str = "application/json; charset=utf-8";
+
+    if method == "OPTIONS" {
+        return Some((204, "text/plain".to_string(), Vec::new()));
+    }
+
+    // 1. Native window actions, clipboard & diagnostics
+    if path == "/__eipc__/diag" {
+        if let Ok(val) = serde_json::from_slice::<Value>(body) {
+            tracing::info!("[WebView Diag] {}", val);
+            let _ = std::io::Write::flush(&mut std::io::stdout());
+        }
+        return Some((200, JSON.to_string(), b"{\"ok\":true}".to_vec()));
+    }
+
+    if path == "/__eipc__/clipboard" {
+        if let Ok(body_val) = serde_json::from_slice::<Value>(body) {
+            match body_val.get("action").and_then(|v| v.as_str()).unwrap_or("") {
+                "write" => {
+                    let text = body_val.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                    #[cfg(target_os = "linux")]
+                    let written = {
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        proxy.send_event(UserEvent::WriteClipboard { text: text.to_string(), tx }).is_ok()
+                            && matches!(rx.recv_timeout(std::time::Duration::from_secs(5)), Ok(Ok(())))
+                    };
+                    #[cfg(not(target_os = "linux"))]
+                    let written = quixi_platform::ComputerUse::write_clipboard(text).is_ok();
+                    if !written {
+                        return Some((500, JSON.to_string(), b"{\"ok\":false}".to_vec()));
+                    }
+                    return Some((200, JSON.to_string(), b"{\"ok\":true}".to_vec()));
+                }
+                "read" => {
+                    let text = quixi_platform::ComputerUse::read_clipboard();
+                    let resp = serde_json::json!({ "ok": true, "text": text });
+                    return Some((
+                        200,
+                        JSON.to_string(),
+                        serde_json::to_vec(&resp).unwrap_or_else(|_| b"{}".to_vec()),
+                    ));
+                }
+                _ => {}
+            }
+        }
+        return Some((200, JSON.to_string(), b"{\"ok\":true}".to_vec()));
+    }
+
+    if path == "/__eipc__/window-action" {
+        if let Ok(body_val) = serde_json::from_slice::<Value>(body) {
+            match body_val.get("action").and_then(|v| v.as_str()).unwrap_or("") {
+                "drag" => {
+                    let _ = proxy.send_event(UserEvent::DragWindow);
+                }
+                "toggle_maximize" => {
+                    let _ = proxy.send_event(UserEvent::ToggleMaximize);
+                }
+                "minimize" => {
+                    let _ = proxy.send_event(UserEvent::MinimizeWindow);
+                }
+                "close" => {
+                    let _ = proxy.send_event(UserEvent::CloseWindow);
+                }
+                _ => {}
+            }
+        }
+        return Some((200, JSON.to_string(), b"{\"ok\":true}".to_vec()));
+    }
+
+    // 2. `$eipc_message$` RPC & Sync Store Bridge
+    if path.starts_with("/__eipc__/") {
+        return match serde_json::from_slice::<EipcInvokePayload>(body) {
+            Ok(payload) => {
+                if payload.channel.contains("WindowControl_$_minimize") {
+                    let _ = proxy.send_event(UserEvent::MinimizeWindow);
+                } else if payload.channel.contains("WindowControl_$_maximize") {
+                    let _ = proxy.send_event(UserEvent::ToggleMaximize);
+                } else if payload.channel.contains("WindowControl_$_close") {
+                    let _ = proxy.send_event(UserEvent::CloseWindow);
+                }
+                let reply = router.dispatch(&payload);
+                if std::env::var_os("QUIXI_DEBUG_EIPC").is_some() {
+                    tracing::info!(
+                        "[eipc] {} -> err={} {}",
+                        payload.channel,
+                        reply.error.is_some(),
+                        reply
+                            .result
+                            .as_ref()
+                            .map(|v| serde_json::to_string(v)
+                                .unwrap_or_default()
+                                .chars()
+                                .take(160)
+                                .collect::<String>())
+                            .unwrap_or_else(|| "null".to_string())
+                    );
+                }
+                let bytes = serde_json::to_vec(&reply).unwrap_or_else(|_| b"{}".to_vec());
+                Some((200, JSON.to_string(), bytes))
+            }
+            Err(err) => {
+                let err_json = serde_json::json!({
+                    "error": { "message": format!("Invalid EIPC payload: {}", err) }
+                });
+                Some((
+                    400,
+                    JSON.to_string(),
+                    serde_json::to_vec(&err_json).unwrap_or_default(),
+                ))
+            }
+        };
+    }
+
+    // 3. Local REST & SSE API
+    if path.starts_with("/api/")
+        || path == "/api"
+        || path.starts_with("/edge-api/")
+        || path == "/edge-api"
+        || path.starts_with("/plugins/")
+        || path.starts_with("/marketplaces/")
+        || path.starts_with("/v1/")
+        || path.starts_with("/v2/")
+        || path.starts_with("/dust")
+    {
+        let (status, content_type, body) =
+            engine.handle_api_request(method, path_and_query, body);
+        tracing::info!("[API] {} {} -> {}", method, path_and_query, status);
+        return Some((status, content_type.to_string(), body));
+    }
+
+    None
+}
+
+/// Starts the loopback HTTP bridge used for requests that carry bodies (WebKitGTK
+/// custom URI schemes drop them). Binds an ephemeral loopback port and requires a
+/// per-launch bearer token supplied by the injected prelude.
+fn start_api_http_bridge(
+    engine: Arc<QuixiEngine>,
+    router: Arc<EipcRouter>,
+    proxy: tao::event_loop::EventLoopProxy<UserEvent>,
+) -> Option<(u16, String)> {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind(("127.0.0.1", 0)).ok()?;
+    let port = listener.local_addr().ok()?.port();
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let token = format!("{:x}{:x}{:x}", seed, std::process::id(), port);
+
+    let thread_token = token.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let engine = engine.clone();
+            let router = router.clone();
+            let proxy = proxy.clone();
+            let expected_token = thread_token.clone();
+            std::thread::spawn(move || {
+                let mut stream = stream;
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
+                let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(30)));
+
+                let mut buf = Vec::with_capacity(8192);
+                let mut temp = [0u8; 8192];
+                let mut header_end = None;
+                let mut content_length = 0usize;
+
+                loop {
+                    match stream.read(&mut temp) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            buf.extend_from_slice(&temp[..n]);
+                            if header_end.is_none() {
+                                if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                                    let hdr_end = pos + 4;
+                                    header_end = Some(hdr_end);
+                                    let hdr_str = String::from_utf8_lossy(&buf[..hdr_end]);
+                                    for line in hdr_str.lines() {
+                                        if let Some((k, v)) = line.split_once(':') {
+                                            if k.trim().eq_ignore_ascii_case("content-length") {
+                                                content_length = v.trim().parse().unwrap_or(0);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if let Some(hdr_end) = header_end {
+                                if buf.len() >= hdr_end + content_length {
+                                    break;
+                                }
+                            }
+                            if buf.len() > 64 * 1024 * 1024 {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+
+                let hdr_end = match header_end {
+                    Some(h) => h,
+                    None => return,
+                };
+                let req_header = String::from_utf8_lossy(&buf[..hdr_end]).to_string();
+                let request_origin = req_header
+                    .lines()
+                    .find_map(|line| {
+                        line.split_once(':').and_then(|(k, v)| {
+                            if k.trim().eq_ignore_ascii_case("origin") {
+                                Some(v.trim().to_string())
+                            } else {
+                                None
+                            }
+                        })
+                    })
+                    .unwrap_or_else(|| "*".to_string());
+                let request_headers = req_header
+                    .lines()
+                    .find_map(|line| {
+                        line.split_once(':').and_then(|(k, v)| {
+                            if k.trim().eq_ignore_ascii_case("access-control-request-headers") {
+                                Some(v.trim().to_string())
+                            } else {
+                                None
+                            }
+                        })
+                    })
+                    .unwrap_or_else(|| "*".to_string());
+
+                let write_resp = |stream: &mut std::net::TcpStream,
+                                  status: u16,
+                                  ct: &str,
+                                  body: &[u8]| {
+                    let reason = match status {
+                        200 => "OK",
+                        204 => "No Content",
+                        400 => "Bad Request",
+                        403 => "Forbidden",
+                        404 => "Not Found",
+                        500 => "Internal Server Error",
+                        _ => "OK",
+                    };
+                    // Credentialed fetches (the renderer API client uses `credentials:
+                    // include`) reject `Access-Control-Allow-Origin: *`, so reflect the
+                    // exact custom-scheme origin and allow credentials.
+                    let hdr = format!(
+                        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: {}\r\nAccess-Control-Allow-Credentials: true\r\nAccess-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS\r\nAccess-Control-Allow-Headers: {}\r\nAccess-Control-Expose-Headers: *\r\nAccess-Control-Max-Age: 600\r\nVary: Origin\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
+                        status,
+                        reason,
+                        ct,
+                        body.len(),
+                        request_origin,
+                        request_headers
+                    );
+                    let _ = stream.write_all(hdr.as_bytes());
+                    let _ = stream.write_all(body);
+                    let _ = stream.flush();
+                };
+
+                let first_line = req_header.lines().next().unwrap_or("");
+                let mut parts = first_line.split_whitespace();
+                let method = parts.next().unwrap_or("GET").to_uppercase();
+                let target = parts.next().unwrap_or("/");
+                let body_bytes = if hdr_end <= buf.len() {
+                    &buf[hdr_end..]
+                } else {
+                    &[][..]
+                };
+
+                // Token check: query parameter (EventSource) or header (fetch/XHR).
+                let has_header_token = req_header.lines().any(|line| {
+                    line.split_once(':')
+                        .map(|(k, v)| {
+                            k.trim().eq_ignore_ascii_case("x-quixi-bridge-token")
+                                && v.trim() == expected_token
+                        })
+                        .unwrap_or(false)
+                });
+                let has_query_token = target
+                    .split_once('?')
+                    .map(|(_, q)| {
+                        q.split('&').any(|kv| {
+                            kv.split_once('=')
+                                .map(|(k, v)| k == "__quixi_token" && v == expected_token)
+                                .unwrap_or(false)
+                        })
+                    })
+                    .unwrap_or(false);
+
+                if !has_header_token && !has_query_token && method != "OPTIONS" {
+                    write_resp(
+                        &mut stream,
+                        403,
+                        "application/json",
+                        b"{\"error\":\"invalid bridge token\"}",
+                    );
+                    return;
+                }
+
+                let (path, path_and_query) = match target.split_once('?') {
+                    Some((p, q)) => (p, format!("{}?{}", p, q)),
+                    None => (target, target.to_string()),
+                };
+                if std::env::var_os("QUIXI_DEBUG_BRIDGE").is_some() {
+                    tracing::info!("[bridge] {} {}", method, target);
+                }
+                // Strip the private bridge token before handing the query to the app.
+                let clean_path_and_query = match path_and_query.split_once("__quixi_token=") {
+                    Some((head, tail)) => {
+                        let rest = tail.split('&').skip(1).collect::<Vec<_>>().join("&");
+                        let trimmed = head.trim_end_matches(['?', '&']);
+                        if rest.is_empty() {
+                            trimmed.to_string()
+                        } else {
+                            format!("{}?{}", trimmed, rest)
+                        }
+                    }
+                    None => path_and_query.clone(),
+                };
+
+                match handle_quixi_request(
+                    &method,
+                    path,
+                    &clean_path_and_query,
+                    body_bytes,
+                    &engine,
+                    &router,
+                    &proxy,
+                ) {
+                    Some((status, ct, body)) => write_resp(&mut stream, status, &ct, &body),
+                    None => write_resp(
+                        &mut stream,
+                        404,
+                        "application/json",
+                        b"{\"error\":\"not found on api bridge\"}",
+                    ),
+                }
+            });
+        }
+    });
+
+    Some((port, token))
 }
 
 fn guess_mime_type(path: &Path) -> &'static str {
@@ -671,6 +1043,9 @@ fn serve_static_or_spa(resources_dir: &Path, req_path: &str) -> Response<Cow<'st
     if !clean_path.is_empty() {
         let candidate = ion_dist.join(clean_path);
         if candidate.is_file() {
+            if std::env::var_os("QUIXI_DEBUG_ASSETS").is_some() {
+                tracing::info!("[asset] {}", candidate.display());
+            }
             if let Ok(bytes) = fs::read(&candidate) {
                 return build_http_response(200, guess_mime_type(&candidate), bytes);
             }
@@ -714,7 +1089,26 @@ fn serve_static_or_spa(resources_dir: &Path, req_path: &str) -> Response<Cow<'st
     }
 }
 
+/// Linux compositor selection.
+///
+/// The WebView is embedded as a native GTK widget (`build_gtk`), so Wayland works
+/// out of the box. Some drivers/compositors still render blank through the GTK
+/// WebKit DMABUF path; `QUIXI_X11=1` forces the battle-tested XWayland path and
+/// `WEBKIT_DISABLE_DMABUF_RENDERER=1` disables the DMABUF renderer directly.
+#[cfg(target_os = "linux")]
+fn configure_linux_display_backend() {
+    if std::env::var_os("QUIXI_X11").is_none() {
+        return;
+    }
+    if std::env::var_os("DISPLAY").is_some() {
+        std::env::set_var("WINIT_UNIX_BACKEND", "x11");
+        std::env::set_var("GDK_BACKEND", "x11");
+    }
+}
+
 fn main() -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    configure_linux_display_backend();
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -795,6 +1189,13 @@ fn main() -> anyhow::Result<()> {
     let _ = MENU_PROXY.set(std::sync::Mutex::new(event_loop.create_proxy()));
     let proxy = event_loop.create_proxy();
 
+    // WebKitGTK drops request bodies for `app://` custom URI schemes, so expose the
+    // same API/EIPC surface over a token-guarded loopback HTTP socket as well.
+    let http_bridge = start_api_http_bridge(engine.clone(), router.clone(), proxy.clone());
+    if let Some((port, _)) = &http_bridge {
+        tracing::info!("QuixiDesk loopback API bridge listening on http://127.0.0.1:{}", port);
+    }
+
     #[cfg(target_os = "macos")]
     setup_macos_main_menu();
 
@@ -831,6 +1232,137 @@ fn main() -> anyhow::Result<()> {
         String::new()
     });
 
+    #[cfg(target_os = "linux")]
+    init_script.push_str(
+        r#"
+;(function() {
+  try {
+    if (globalThis.process) { globalThis.process.platform = "linux"; }
+  } catch (_) {}
+})();
+"#,
+    );
+
+    // Route body-bearing API/EIPC calls through the loopback HTTP bridge. This is required
+    // on WebKitGTK (Linux), where custom scheme handlers never receive POST bodies, and is
+    // harmless on macOS where the custom scheme handler also works.
+    if let Some((port, token)) = &http_bridge {
+        init_script.push_str(&format!(
+            r#"
+;(function() {{
+  var base = "http://127.0.0.1:{port}";
+  var token = "{token}";
+  var apiPrefixes = ["/__eipc__/", "/api/", "/api", "/edge-api", "/plugins/", "/marketplaces/", "/v1/", "/v2/", "/dust"];
+  window.__QUIXI_HTTP_BASE__ = base;
+  window.__QUIXI_BRIDGE_TOKEN__ = token;
+
+  function rewrite(raw) {{
+    if (raw === null || raw === undefined) return null;
+    var u = String(raw);
+    var path = null;
+    if (u.indexOf("app://localhost") === 0) path = u.slice("app://localhost".length);
+    else if (u.charAt(0) === "/") path = u;
+    else {{
+      try {{
+        var parsed = new URL(u, window.location.href);
+        if (parsed.origin === "app://localhost" || parsed.protocol === "app:") path = parsed.pathname + parsed.search;
+      }} catch (_) {{ return null; }}
+    }}
+    if (path === null) return null;
+    var handled = apiPrefixes.some(function (p) {{
+      return p.charAt(p.length - 1) === "/" ? path.indexOf(p) === 0 : (path === p || path.indexOf(p + "/") === 0 || path.indexOf(p + "?") === 0);
+    }});
+    if (!handled) return null;
+    var sep = path.indexOf("?") === -1 ? "?" : "&";
+    return base + path + sep + "__quixi_token=" + encodeURIComponent(token);
+  }}
+
+  function installFetchBridge() {{
+    if (typeof window.fetch !== "function" || window.fetch.__quixi_bridge__) return;
+    var nativeFetch = window.fetch.bind(window);
+    var bridgeFetch = function (input, init) {{
+      try {{
+        if (typeof input === "string") {{
+          var mapped = rewrite(input);
+          if (mapped) return nativeFetch(mapped, init);
+        }} else if (input && typeof input === "object" && typeof input.url === "string") {{
+          var mappedReq = rewrite(input.url);
+          if (mappedReq) {{
+            try {{ input = new Request(mappedReq, input); }} catch (_) {{ return nativeFetch(mappedReq, init); }}
+          }}
+        }}
+      }} catch (_) {{}}
+      return nativeFetch(input, init);
+    }};
+    bridgeFetch.__quixi_bridge__ = true;
+    try {{ window.fetch = bridgeFetch; }} catch (_) {{}}
+  }}
+  installFetchBridge();
+
+  function installXhrBridge() {{
+    if (typeof XMLHttpRequest === "undefined" || !XMLHttpRequest.prototype.open || XMLHttpRequest.prototype.open.__quixi_bridge__) return;
+    var nativeOpen = XMLHttpRequest.prototype.open;
+    var bridgeOpen = function (method, url) {{
+      var args = Array.prototype.slice.call(arguments);
+      try {{
+        var mapped = rewrite(url);
+        if (mapped) args[1] = mapped;
+      }} catch (_) {{}}
+      return nativeOpen.apply(this, args);
+    }};
+    bridgeOpen.__quixi_bridge__ = true;
+    try {{ XMLHttpRequest.prototype.open = bridgeOpen; }} catch (_) {{}}
+  }}
+  installXhrBridge();
+
+  // Telemetry SDKs (Datadog/Sentry) instrument fetch/XHR during bootstrap and would
+  // otherwise replace the bridge wrapper. Re-install around their startup.
+  [0, 100, 500, 1500, 4000].forEach(function (delay) {{
+    setTimeout(function () {{ installFetchBridge(); installXhrBridge(); }}, delay);
+  }});
+
+  if (typeof EventSource === "function" && !EventSource.__quixi_bridge__) {{
+    var NativeEventSource = EventSource;
+    var BridgeEventSource = function (url, config) {{
+      var mapped = null;
+      try {{ mapped = rewrite(url); }} catch (_) {{}}
+      return new NativeEventSource(mapped || url, config);
+    }};
+    BridgeEventSource.prototype = NativeEventSource.prototype;
+    BridgeEventSource.CONNECTING = 0;
+    BridgeEventSource.OPEN = 1;
+    BridgeEventSource.CLOSED = 2;
+    BridgeEventSource.__quixi_bridge__ = true;
+    window.EventSource = BridgeEventSource;
+  }}
+
+  if (navigator && typeof navigator.sendBeacon === "function" && !navigator.sendBeacon.__quixi_bridge__) {{
+    var nativeBeacon = navigator.sendBeacon.bind(navigator);
+    var bridgeBeacon = function (url, data) {{
+      var mapped = null;
+      try {{ mapped = rewrite(url); }} catch (_) {{}}
+      return nativeBeacon(mapped || url, data);
+    }};
+    bridgeBeacon.__quixi_bridge__ = true;
+    navigator.sendBeacon = bridgeBeacon;
+  }}
+
+  setTimeout(function() {{
+    try {{
+      localStorage.setItem("__quixi_bridge_diag__", JSON.stringify({{
+        fetch: !!(window.fetch && window.fetch.__quixi_bridge__),
+        xhr: !!(XMLHttpRequest.prototype.open && XMLHttpRequest.prototype.open.__quixi_bridge__),
+        es: !!(EventSource && EventSource.__quixi_bridge__),
+        href: location.href,
+        at: Date.now()
+      }}));
+    }} catch (_) {{}}
+  }}, 1200);
+}})();
+"#
+        ));
+    }
+
     // Append native window drag, titlebar double-click, and diagnostic telemetry bridge
     init_script.push_str(
         r#"
@@ -846,21 +1378,39 @@ fn main() -> anyhow::Result<()> {
     } catch (_) {}
   }
 
+  function recordBootError(kind, data) {
+    try {
+      var key = '__quixi_boot_errors__';
+      var list = [];
+      try { list = JSON.parse(window.localStorage.getItem(key) || '[]'); } catch (_) { list = []; }
+      list.push({ kind: kind, at: Date.now(), data: data });
+      if (list.length > 30) list = list.slice(-30);
+      window.localStorage.setItem(key, JSON.stringify(list));
+      var arr = window.__quixi_boot_errors__ || [];
+      arr.push({ kind: kind, at: Date.now(), data: data });
+      window.__quixi_boot_errors__ = arr;
+    } catch (_) {}
+  }
+
   window.addEventListener('error', function(e) {
-    reportToRust('window.error', {
+    var data = {
       message: String(e.message || ''),
       filename: String(e.filename || ''),
       lineno: e.lineno,
       colno: e.colno
-    });
+    };
+    recordBootError('window.error', data);
+    reportToRust('window.error', data);
   });
 
   window.addEventListener('unhandledrejection', function(e) {
     var reason = e.reason;
-    reportToRust('unhandledrejection', {
+    var data = {
       message: reason && reason.message ? String(reason.message) : String(reason),
       stack: reason && reason.stack ? String(reason.stack).slice(0, 800) : null
-    });
+    };
+    recordBootError('unhandledrejection', data);
+    reportToRust('unhandledrejection', data);
   });
 
   var origConsoleError = console.error;
@@ -873,6 +1423,7 @@ fn main() -> anyhow::Result<()> {
         }
         return String(a);
       });
+      recordBootError('console.error', { args: args });
       reportToRust('console.error', { args: args });
     } catch (_) {}
     return origConsoleError.apply(console, arguments);
@@ -1454,7 +2005,11 @@ fn main() -> anyhow::Result<()> {
     let protocol_router = router.clone();
     let protocol_proxy = proxy.clone();
 
-    let user_agent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) QuixiDesk/3.6556.2 Claude/3.6556.2 Electron/44.9.3 Safari/605.1.15";
+    let user_agent = if cfg!(target_os = "macos") {
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) QuixiDesk/3.6556.2 Claude/3.6556.2 Electron/44.9.3 Safari/605.1.15"
+    } else {
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko) QuixiDesk/3.6556.2 Claude/3.6556.2 Electron/44.9.3 Safari/605.1.15"
+    };
 
     let mut web_context = wry::WebContext::new(quixi_proto::paths::test_profile().map(|p| p.join("website-data")));
     let mut webview_builder = if test_profile.is_some() { WebViewBuilder::with_web_context(&mut web_context) } else { WebViewBuilder::new() };
@@ -1489,122 +2044,18 @@ fn main() -> anyhow::Result<()> {
                     .map(|pq| pq.as_str())
                     .unwrap_or(path);
 
-                if method == "OPTIONS" {
-                    return build_http_response(204, "text/plain", Vec::new());
-                }
-
-                // 1. Native Window Actions, Clipboard & Diagnostics
-                if path == "/__eipc__/diag" {
-                    if let Ok(val) = serde_json::from_slice::<Value>(request.body()) {
-                        tracing::info!("[WebView Diag] {}", val);
-                        let _ = std::io::Write::flush(&mut std::io::stdout());
-                    }
-                    return build_http_response(200, "application/json", b"{\"ok\":true}".to_vec());
-                }
-
-                if path == "/__eipc__/clipboard" {
-                    if let Ok(body_val) = serde_json::from_slice::<Value>(request.body()) {
-                        match body_val.get("action").and_then(|v| v.as_str()).unwrap_or("") {
-                            "write" => {
-                                let text = body_val
-                                    .get("text")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("");
-                                #[cfg(target_os = "linux")]
-                                let written = {
-                                    let (tx, rx) = std::sync::mpsc::channel();
-                                    protocol_proxy.send_event(UserEvent::WriteClipboard { text: text.to_string(), tx }).is_ok()
-                                        && matches!(rx.recv_timeout(std::time::Duration::from_secs(5)), Ok(Ok(())))
-                                };
-                                #[cfg(not(target_os = "linux"))]
-                                let written = quixi_platform::ComputerUse::write_clipboard(text).is_ok();
-                                if !written {
-                                    return build_http_response(500, "application/json", b"{\"ok\":false}".to_vec());
-                                }
-                                return build_http_response(
-                                    200,
-                                    "application/json; charset=utf-8",
-                                    b"{\"ok\":true}".to_vec(),
-                                );
-                            }
-                            "read" => {
-                                let text = quixi_platform::ComputerUse::read_clipboard();
-                                let resp = serde_json::json!({ "ok": true, "text": text });
-                                return build_http_response(
-                                    200,
-                                    "application/json; charset=utf-8",
-                                    serde_json::to_vec(&resp).unwrap_or_else(|_| b"{}".to_vec()),
-                                );
-                            }
-                            _ => {}
-                        }
-                    }
-                    return build_http_response(200, "application/json", b"{\"ok\":true}".to_vec());
-                }
-
-                if path == "/__eipc__/window-action" {
-                    if let Ok(body_val) = serde_json::from_slice::<Value>(request.body()) {
-                        match body_val.get("action").and_then(|v| v.as_str()).unwrap_or("") {
-                            "drag" => {
-                                let _ = protocol_proxy.send_event(UserEvent::DragWindow);
-                            }
-                            "toggle_maximize" => {
-                                let _ = protocol_proxy.send_event(UserEvent::ToggleMaximize);
-                            }
-                            "minimize" => {
-                                let _ = protocol_proxy.send_event(UserEvent::MinimizeWindow);
-                            }
-                            "close" => {
-                                let _ = protocol_proxy.send_event(UserEvent::CloseWindow);
-                            }
-                            _ => {}
-                        }
-                    }
-                    return build_http_response(200, "application/json", b"{\"ok\":true}".to_vec());
-                }
-
-                // 2. `$eipc_message$` RPC & Sync Store Bridge (`/__eipc__/invoke`, `/__eipc__/sync`, `/__eipc__/send`)
-                if path.starts_with("/__eipc__/") {
-                    match serde_json::from_slice::<EipcInvokePayload>(request.body()) {
-                        Ok(payload) => {
-                            if payload.channel.contains("WindowControl_$_minimize") {
-                                let _ = protocol_proxy.send_event(UserEvent::MinimizeWindow);
-                            } else if payload.channel.contains("WindowControl_$_maximize") {
-                                let _ = protocol_proxy.send_event(UserEvent::ToggleMaximize);
-                            } else if payload.channel.contains("WindowControl_$_close") {
-                                let _ = protocol_proxy.send_event(UserEvent::CloseWindow);
-                            }
-                            let reply = protocol_router.dispatch(&payload);
-                            let bytes = serde_json::to_vec(&reply).unwrap_or_else(|_| b"{}".to_vec());
-                            return build_http_response(200, "application/json; charset=utf-8", bytes);
-                        }
-                        Err(err) => {
-                            let err_json = serde_json::json!({
-                                "error": { "message": format!("Invalid EIPC payload: {}", err) }
-                            });
-                            return build_http_response(
-                                400,
-                                "application/json; charset=utf-8",
-                                serde_json::to_vec(&err_json).unwrap_or_default(),
-                            );
-                        }
-                    }
-                }
-
-                // 3. Local REST & SSE API (`/api/*`, `/edge-api/*`, `/plugins/*`, `/marketplaces/*`, `/v1/*`, `/v2/*`, `/dust/*`)
-                if path.starts_with("/api/")
-                    || path == "/api"
-                    || path.starts_with("/edge-api/")
-                    || path == "/edge-api"
-                    || path.starts_with("/plugins/")
-                    || path.starts_with("/marketplaces/")
-                    || path.starts_with("/v1/")
-                    || path.starts_with("/v2/")
-                    || path.starts_with("/dust")
-                {
-                    let (status, content_type, body) =
-                        protocol_engine.handle_api_request(&method, path_and_query, request.body());
-                    tracing::info!("[API] {} {} -> {}", method, path_and_query, status);
+                // The same handler is used by the loopback HTTP bridge; see
+                // `handle_quixi_request` for why body-bearing requests cannot rely on
+                // WebKitGTK custom URI schemes.
+                if let Some((status, content_type, body)) = handle_quixi_request(
+                    &method,
+                    path,
+                    path_and_query,
+                    request.body(),
+                    &protocol_engine,
+                    &protocol_router,
+                    &protocol_proxy,
+                ) {
                     return build_http_response(status, &content_type, body);
                 }
 
@@ -1627,13 +2078,15 @@ fn main() -> anyhow::Result<()> {
         })
         .with_url("app://localhost/");
 
-    // Linux Tao windows own a GTK container; the raw window-handle builder
-    // does not support that handle kind on Wayland/X11 GTK backends.
+    // On Linux, attaching the WebView to the window's X11 child handle leaves the page
+    // unpainted under XWayland (blank window). Build it as a native GTK widget inside
+    // tao's GTK window instead: this paints correctly and works on both Wayland and X11.
     #[cfg(target_os = "linux")]
     let webview = {
-        use tao::platform::unix::WindowExtUnix;
-        use wry::WebViewBuilderExtUnix;
-        webview_builder.build_gtk(window.default_vbox().ok_or_else(|| anyhow::anyhow!("GTK window container unavailable"))?)?
+        let container = window
+            .default_vbox()
+            .ok_or_else(|| anyhow::anyhow!("tao window has no default GTK container"))?;
+        webview_builder.build_gtk(container)?
     };
     #[cfg(not(target_os = "linux"))]
     let webview = webview_builder.build(&window)?;
