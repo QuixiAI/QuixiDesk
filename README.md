@@ -14,7 +14,7 @@
 
 ---
 
-**QuixiDesk** is a fast, native Rust (`tao` + `wry`) open-source alternative to **Claude Desktop**. It replaces the heavy Electron + Node.js runtime with a single-process native Rust workspace engine reusing the desktop workspace UI and adding **17 pluggable LLM providers**, **zero-configuration built-in MCPs (In-App Browser Use & Computer Use)**, a **unified task/chat workspace**, and **11 UI languages** out of the box.
+**QuixiDesk** is a fast, native Rust (`tao` + `wry`) open-source alternative to **Claude Desktop** that runs first-class on **macOS and Linux (Wayland or X11)**. It replaces the heavy Electron + Node.js runtime with a single-process native Rust workspace engine reusing the desktop workspace UI and adding **17 pluggable LLM providers**, **zero-configuration built-in MCPs (In-App Browser Use & Computer Use)**, a **unified task/chat workspace**, and **11 UI languages** out of the box.
 
 ## Screenshots
 
@@ -48,7 +48,7 @@ QuixiDesk's architectural reconstruction—mapping 1,400+ IPC channels, native m
 
 ## Supported LLM Providers
 
-QuixiDesk includes a built-in **Provider Manager** (`⌘⇧P` or click the top-right **Providers** pill) supporting **17 cloud, OAuth, and local inference providers**:
+QuixiDesk includes a built-in **Provider Manager** (`⌘⇧P` / `Ctrl+Shift+P` or click the top-right **Providers** pill) supporting **17 cloud, OAuth, and local inference providers**:
 
 ### Priority Providers
 | # | Provider | Auth Modes | Default / Example Models |
@@ -145,6 +145,44 @@ QUIXI_RESOURCES_DIR="$HOME/.local/opt/QuixiDesk/resources" "$HOME/.local/opt/Qui
 
 The destination machine needs GTK 3 and WebKitGTK 4.1 runtime libraries. Build on a compatible Linux distribution; this is not a universal static binary or an AppImage.
 
+On Arch / Omarchy / CachyOS the equivalent setup is:
+
+```sh
+sudo pacman -S --needed base-devel rust pkg-config gtk3 webkit2gtk-4.1 \
+  libsoup3 wl-clipboard wtype zenity
+cargo build --locked --release --workspace
+./target/release/QuixiDesk
+```
+
+QuixiDesk embeds WebKitGTK as a native GTK widget, so it runs natively on Wayland (and on X11; set `QUIXI_X11=1` to force the X11/XWayland backend). Additional Linux environment variables:
+
+| Variable | Purpose |
+| :--- | :--- |
+| `QUIXI_X11=1` | Force the GTK/XWayland X11 backend instead of Wayland |
+| `WEBKIT_DISABLE_DMABUF_RENDERER=1` | Work around blank rendering on some GPU/driver combinations |
+| `QUIXI_DEBUG_EIPC=1`, `QUIXI_DEBUG_BRIDGE=1`, `QUIXI_DEBUG_ASSETS=1`, `QUIXI_DEBUG_STORES=1` | Log EIPC / bridge / asset / store traffic for debugging |
+
+> **Why a loopback HTTP bridge?** WebKitGTK does not expose request bodies to
+> custom URI scheme handlers. QuixiDesk keeps `app://localhost` for the UI and
+> routes body-bearing `/api/*` and `/__eipc__/*` calls through a token-guarded
+> `127.0.0.1` bridge, so REST, SSE, and all 1,400 IPC channels work identically
+> on Linux and macOS.
+
+To package a portable Linux tarball (and an AppImage when `appimagetool` is installed):
+
+```sh
+./scripts/package-linux-app.sh
+# dist/QuixiDesk-<version>-linux-<arch>.tar.gz
+# dist/QuixiDesk-<version>-linux-<arch>/install.sh installs into ~/.local
+```
+
+The packaged tree ships `share/applications/quixidesk.desktop` and an SVG icon; its `install.sh` installs both into `~/.local`, so QuixiDesk appears in the desktop app launcher:
+
+```sh
+./dist/QuixiDesk-*/install.sh
+quixidesk
+```
+
 ### Windows 10 / 11 (native, PowerShell)
 
 Install Git, [Rust for Windows](https://rust-lang.org/tools/install/), and [Visual Studio C++ Build Tools](https://rust-lang.github.io/rustup/installation/windows-msvc.html) with the **Desktop development with C++** workload and a Windows SDK. Use the MSVC Rust toolchain, not the GNU or WSL toolchain. Install the [Microsoft Edge WebView2 Evergreen Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/) if it is not already present. Reopen PowerShell after installation so Cargo and Git are on `PATH`.
@@ -175,7 +213,7 @@ There is no MSI or Windows signing/installer workflow yet. Keep the resources di
 
 ### Platform scope and configuration
 
-Native CoreGraphics/AppleScript computer-use integration is macOS-specific. Linux and Windows builds do not currently provide the same native computer-use and folder-picker capabilities. Building the cross-platform shell does not imply full native-feature parity.
+Native CoreGraphics/AppleScript computer-use integration is macOS-specific; native AppleScript automation likewise. Linux builds provide clipboard access (`wl-copy`/`wl-paste`/`xclip`/`xsel`), typing and keypress injection (`wtype`/`xdotool`), and native folder-picker dialogs (`zenity`/`kdialog`/`yad`) when those helpers are installed. Building the cross-platform shell does not imply full native-feature parity.
 
 The engine opens the source checkout as its default workspace in development. Set `QUIXI_WORKSPACE` to an explicit folder to override it. `QUIXI_RESOURCES_DIR` overrides resource discovery. Normal app data is stored under the OS user's `.quixi` directory; test profiles below use a separate location. Configure a provider in the app after launch; no API credential is required to compile or run the tests.
 
