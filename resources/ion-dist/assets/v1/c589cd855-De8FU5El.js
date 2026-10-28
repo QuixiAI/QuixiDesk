@@ -1,1 +1,0 @@
-import"./vendor-frame-CnSY1sxv.js";import{ip as J9}from"./shared-frame-6jtSkIit.js";function e(e){return J9(2),null}export{e as t};

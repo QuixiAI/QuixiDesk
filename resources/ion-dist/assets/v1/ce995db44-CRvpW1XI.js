@@ -1,1 +1,0 @@
-function e(e){return`ssh:${e.sshHost}:${e.sshPort??22}`}function t(t){return t.kind==="wsl"?`wsl:${t.distro.toLowerCase()}`:e(t)}export{e as n,t};

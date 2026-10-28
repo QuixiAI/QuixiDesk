@@ -1,1 +1,0 @@
-function e(e,t){try{let n=2166136261,r=String(t);for(let e=0;e<r.length;e++)n=Math.imul(31,n)+r.charCodeAt(e)|0;let i=()=>(n=Math.imul(n^n>>>16,73244475),n=Math.imul(n^n>>>13,73244475),n=(n^n>>>16)>>>0,n/4294967296),a=e.slice();for(let e=a.length-1;e>0;e--){let t=Math.floor(i()*(e+1));[a[e],a[t]]=[a[t],a[e]]}return a}catch{return e}}export{e as t};

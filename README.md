@@ -4,7 +4,7 @@
 
 # QuixiDesk
 
-**A Native Rust, Open-Source Alternative to Claude Desktop**
+**A Native Rust Desktop Workspace for AI**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-14B8A6.svg)](LICENSE)
 [![Built with Rust](https://img.shields.io/badge/Built%20with-Rust-0F172A?logo=rust)](Cargo.toml)
@@ -14,15 +14,12 @@
 
 ---
 
-**QuixiDesk** is a fast, native Rust (`tao` + `wry`) open-source alternative to **Claude Desktop**. It replaces the heavy Electron + Node.js runtime with a single-process native Rust workspace engine reusing the desktop workspace UI and adding **17 pluggable LLM providers**, **zero-configuration built-in MCPs (In-App Browser Use & Computer Use)**, a **unified task/chat workspace**, and **11 UI languages** out of the box.
+**QuixiDesk** is a native Rust (`tao` + `wry`) desktop workspace with **pluggable LLM providers**, **built-in MCP tools**, and a **unified task/chat workspace**. Its native host runs without an Electron or Node.js application runtime.
 
 ## Screenshots
 
-### Unified Workspace Home
+### Original Workspace
 ![QuixiDesk Home Screen](docs/screenshots/quixidesk-home.png)
-
-### Docked In-App Browser Use & Accessibility DOM Inspector
-![QuixiDesk In-App Browser Use](docs/screenshots/quixidesk-in-app-browser.png)
 
 ---
 
@@ -30,30 +27,30 @@
 
 Special appreciation goes to **[REA — Reverse Engineer Anything (`github.com/morluto/rea`)](https://github.com/morluto/rea)**.
 
-QuixiDesk's architectural reconstruction—mapping 1,400+ IPC channels, native macOS helper protocols (`computer-use`, `browser-use`, `chrome-native-host`, `ssh-askpass`, `disclaimer`, `guest-daemon`), custom `app://` protocol handlers, and real-time streaming state stores into a clean 10-crate native Rust workspace—was made possible by **[REA](https://github.com/morluto/rea)**. If you are analyzing native binaries, Electron/JavaScript bundles, mobile packages, or complex runtime protocols, check out and star **[https://github.com/morluto/rea](https://github.com/morluto/rea)**.
+The native runtime development and analysis benefited from **[REA](https://github.com/morluto/rea)**. If you are analyzing native binaries, Electron/JavaScript bundles, mobile packages, or complex runtime protocols, check out and star **[https://github.com/morluto/rea](https://github.com/morluto/rea)**.
 
 ---
 
 ## Key Features
 
 - **Native Rust Runtime (Zero Electron / Node.js Overhead):** Built on `tao` + `wry` with a custom `app://localhost` protocol router (`quixi-app`, `quixi-ipc`, `quixi-engine`, `quixi-workspace`, `quixi-platform`, `quixi-mcp`, `quixi-netstack`).
-- **Unified Workspace Experience:** No artificial "Chat vs. Cowork vs. Code" mode walls—attach local workspace folders, grant or restrict file modification permissions on the fly, and run multi-turn streaming sessions in one unified view.
+- **Unified Workspace:** Attach local folders, choose file modification permissions, and run multi-turn streaming sessions in one view.
 - **Built-In In-App Browser Use & Computer Use (Out of the Box):**
-  - **In-App Browser (`Claude Browser` & `Claude in Chrome`):** Opens a docked browser pane right inside QuixiDesk with multi-tab navigation, live DOM rendering, and interactive `[ref_N]` accessibility element inspection.
+  - **In-App Browser:** Opens a docked browser pane inside QuixiDesk with multi-tab navigation, isolated page snapshots, and interactive `[ref_N]` accessibility element inspection.
   - **Computer Use:** Native macOS CoreGraphics screen capture, cursor control, keyboard/mouse synthesis, and window inspection (`44` tools active out of the box).
   - **Pre-Bundled Workspace & Productivity MCPs:** Includes `quixi-workspace` (file index, git pool, shell host), `applescript`, `pdf`, `memory`, `fetch`, `github`, `office365`, `Framebuffer`, `visualize`, and `scheduled-tasks` pre-configured with zero manual setup.
-- **11 Built-In UI Languages:** Switch seamlessly between English (`en-US`), Français (`fr-FR`), Deutsch (`de-DE`), Español (`es-ES` / `es-419`), 日本語 (`ja-JP`), 한국어 (`ko-KR`), Italiano (`it-IT`), Português (`pt-BR`), हिन्दी (`hi-IN`), and Bahasa Indonesia (`id-ID`).
+- **Original Interface:** System typography, light and dark themes, keyboard navigation, and responsive layouts. The replacement interface currently uses English.
 
 ---
 
 ## Supported LLM Providers
 
-QuixiDesk includes a built-in **Provider Manager** (`⌘⇧P` or click the top-right **Providers** pill) supporting **17 cloud, OAuth, and local inference providers**:
+QuixiDesk includes a built-in **Provider Manager** (open **Settings → Providers**) supporting **cloud, OAuth, and local inference providers**:
 
 ### Priority Providers
 | # | Provider | Auth Modes | Default / Example Models |
 | :--- | :--- | :--- | :--- |
-| **1** | **OpenRouter** *(Recommended)* | API Key (`OPENROUTER_API_KEY`) | `anthropic/claude-sonnet-4.6`, `anthropic/claude-opus-4.6`, `openai/gpt-5.4`, `google/gemini-3.1-pro`, `deepseek/deepseek-v4.1-flash`, `x-ai/grok-4` |
+| **1** | **OpenRouter** *(Recommended)* | API Key (`OPENROUTER_API_KEY`) | `openai/gpt-5.4`, `google/gemini-3.1-pro`, `deepseek/deepseek-v4.1-flash`, `x-ai/grok-4` |
 | **2** | **Custom OpenAI-Compatible** | API Key / Optional (`CUSTOM_LLM_API_KEY`) | Any OpenAI `/v1/chat/completions` endpoint (vLLM, LiteLLM, TabbyAPI, proxies) |
 | **3** | **OpenAI (ChatGPT Plus / Pro & API)** | **PKCE / Device OAuth** or API Key (`OPENAI_API_KEY`) | `gpt-5.4`, `gpt-5.4-mini`, `o3`, `o4-mini`, `gpt-4.1` |
 | **4** | **xAI Grok (SuperGrok / X & API)** | **RFC 8628 Device OAuth** or API Key (`XAI_API_KEY`) | `grok-4`, `grok-3`, `grok-3-mini`, `grok-code-fast-1` |
@@ -85,7 +82,7 @@ QuixiDesk includes a built-in **Provider Manager** (`⌘⇧P` or click the top-r
 
 QuixiDesk uses the system webview: WKWebView on macOS, WebKitGTK on Linux, and WebView2 on Windows. Build on the target OS with the **current stable Rust toolchain** from [rustup](https://rust-lang.org/tools/install/) and Git. The lockfile is checked in; use `--locked` for reproducible dependency selection. Node.js and Electron are not required to build or run the checked-in application.
 
-The renderer, preload bridge, bootstrap fixtures, and skills are checked in under `resources/`. Keep that directory with the application. Normal builds do not require `reference/`, `asar-extracted/`, or regenerating the renderer. `scripts/generate-exact-ipc-schemas.js` is a maintainer tool requiring the extracted JavaScript bundle and `reference/ipc-return-validators.json`; its generated snapshot is already checked in.
+The original interface, bootstrap defaults, icons, and task instructions are checked in under `resources/`. Keep that directory with the application. Build directly from the repository; no extracted application bundle or external renderer is required. Regenerate the skill archives with `python3 scripts/package-bundled-skills.py` after editing their sources.
 
 Clone using HTTPS (or your configured Git SSH credentials):
 
@@ -213,7 +210,21 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\test-windows-stora
 
 It launches the native WebView2 app with a fresh profile, obstructs only fixture save paths, verifies recovery and restart, exercises **Retry saving**, and checks allowed/blocked native close events. It leaves its JSON results and logs in a newly created temporary directory and restores the caller's environment. This is an automated app-bridge test; manual desktop checks remain separate.
 
-The [E2E test suite design](docs/testing/E2E_TEST_PLAN.md) defines the proposed full packaged-app suite, fixtures, isolation requirements, and CI rollout; its full runner is not implemented yet. The [Claude desktop UI exploration](docs/testing/CLAUDE_UI_EXPLORATION.md) records the reference controls inspected through computer use and the additional cases they informed.
+The original interface has a separate development-only Node.js test suite. Node.js is not needed by the production app:
+
+```sh
+npm ci --prefix tests/ui
+npm test --prefix tests/ui
+python3 scripts/audit-product-assets.py
+```
+
+The asset audit rejects imported branding and private font bundles and checks the integrity of redistributable artifact libraries and their licenses. The UI tests cover drafts, streaming, tool failures, project context, sandbox attributes, and concurrent updates; they do not replace native desktop or browser security testing.
+
+Schedules can be saved and run manually; automatic dispatch is not currently implemented. The replacement interface currently uses English. Native desktop validation and the full E2E catalog remain separate from the automated regression checks.
+
+On Linux, after a release build, run real WebKit frame isolation and navigation checks with `python3 scripts/test-linux-ui.py` (requires `xvfb-run`, `dbus-run-session`, and Python 3). It starts only a local fixture server and disposable profile and records its JSON results in a temporary directory. `--output` and `--port` select an evidence directory and unused automation port.
+
+The [E2E test suite design](docs/testing/E2E_TEST_PLAN.md) defines the proposed full packaged-app suite, fixtures, isolation requirements, and CI rollout; its full runner is not implemented yet.
 
 ---
 
@@ -222,8 +233,8 @@ The [E2E test suite design](docs/testing/E2E_TEST_PLAN.md) defines the proposed 
 ```text
 QuixiDesk/
 ├── crates/
-│   ├── quixi-app/        # Native tao + wry WKWebView shell, custom app:// protocol & UI overlay
-│   ├── quixi-ipc/        # EIPC router implementing 1,400+ desktop service & store channels
+│   ├── quixi-app/        # Native tao + wry WKWebView shell, custom app:// protocol & original UI
+│   ├── quixi-ipc/        # Desktop service and event router
 │   ├── quixi-engine/     # Session orchestrator, multi-provider LLM router & streaming engine
 │   ├── quixi-mcp/        # Built-in MCP host (Computer Use, Browser Use, Workspace, AppleScript, PDF, Memory)
 │   ├── quixi-platform/   # macOS CoreGraphics Computer Use, In-App Browser Use & SafeFS sandbox
@@ -236,7 +247,7 @@ QuixiDesk/
 │   ├── quixi-chrome-native-host/ # Native messaging host for browser extension bridge
 │   ├── quixi-disclaimer/         # TCC permission disclaimer helper
 │   └── quixi-ssh-askpass/        # Native SSH askpass helper
-└── resources/            # Bundled UI assets, 11-locale i18n catalogs, preload bridge & skills
+└── resources/            # Bundled UI assets, original interface, bootstrap defaults, icons & skills
 ```
 
 ---

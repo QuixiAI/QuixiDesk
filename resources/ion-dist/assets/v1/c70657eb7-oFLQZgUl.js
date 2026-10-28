@@ -1,1 +1,0 @@
-import{Ha as e}from"./vendor-frame-CnSY1sxv.js";function t({done:t,total:n}){let r=n>0?Math.round(t/n*100):0;return e("div",{className:"mb-1.5 mt-3.5 h-1.5 overflow-hidden rounded-full bg-surface-3 stacks:bg-neutral",children:e("div",{className:"h-full bg-fill-brand transition-[width]",style:{width:`${r}%`}})})}export{t};

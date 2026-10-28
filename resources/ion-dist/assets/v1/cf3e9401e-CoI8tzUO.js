@@ -1,1 +1,0 @@
-import{If as e}from"./shared-frame-6jtSkIit.js";import{lp as t}from"./shared-25-DOWZRSlq.js";import{au as n,rf as r,sd as i}from"./shared-1-BJhqMmkf.js";var a=`${i} [${r}][contenteditable="true"]`;function o(n){return e(t(n))?n.ownerDocument.querySelector(a):null}function s(e){n(e,o)}export{s as n,o as t};

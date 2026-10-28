@@ -1,1 +1,0 @@
-function e(e,t){return(e.lastViewedAtMs??0)>(t===void 0?0:t+1e4)}export{e as t};

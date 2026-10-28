@@ -1,1 +1,0 @@
-var e=new Map,t=new Map;function n(n,r){e.set(n,r),t.get(n)?.(r)}function r(t){e.delete(t)}function i(n,r,i){return e.has(n)?Promise.resolve(e.get(n)):new Promise(e=>{let a=r=>{clearTimeout(s),i?.removeEventListener("abort",o),t.delete(n),e(r)},o=()=>a(),s=setTimeout(a,r);i?.addEventListener("abort",o),t.set(n,a),i?.aborted&&a()})}export{n,r,i as t};

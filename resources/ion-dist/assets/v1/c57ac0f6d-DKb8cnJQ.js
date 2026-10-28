@@ -1,1 +1,0 @@
-import{Id as e}from"./shared-0-DDOOdL6P.js";function t(t,n,r){return Promise.resolve().then(t).catch(t=>(e(t,{source:"epitaxy_elevated_auth_gate_threw",site:r}),n))}async function n(e,n,r){return t(()=>e?.handleError(n,r.handleErrorOpts),r.degradeTo,r.site)}async function r(e,n,r){return t(()=>e?.handleErrorDetailed(n,r.handleErrorOpts),r.degradeTo,r.site)}export{n,r as t};

@@ -1,1 +1,0 @@
-var e="Claude Code",t="ccr_thinking_token_count";export{t as n,e as t};

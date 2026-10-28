@@ -1,1 +1,0 @@
-var e={"data-1p-ignore":!0,"data-lpignore":"true","data-bwignore":!0,"data-form-type":"other"},t={autoComplete:"off",spellCheck:!1,...e,"data-gramm":"false","data-gramm_editor":"false","data-enable-grammarly":"false"};export{t as n,e as t};

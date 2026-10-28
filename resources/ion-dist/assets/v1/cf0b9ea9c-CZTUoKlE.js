@@ -1,1 +1,0 @@
-import{Yh as e}from"./shared-25-DOWZRSlq.js";var t="claude_ai_share_age_verification_disabled";function n(){return!e(t)}export{n as t};

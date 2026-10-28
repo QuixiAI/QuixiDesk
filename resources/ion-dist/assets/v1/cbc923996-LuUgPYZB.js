@@ -1,1 +1,0 @@
-import{A as e,T as t,y as n}from"./vendor-zod-fszujTq6.js";import{Kg as r}from"./shared-78-D5Fw2h0a.js";var i=n(()=>t({error:t({details:t({error_code:e()})})}));function a(e){if(!r(e)||e.status!==403||typeof e.data.text!="string")return;let t;try{t=JSON.parse(e.data.text)}catch{return}let n=i.safeParse(t);return n.success?n.data.error.details.error_code:void 0}export{a as t};

@@ -1,1 +1,0 @@
-function e(e,t){let n=e.filter(e=>e.type==="local"),r=n.find(e=>e.localId===t.id);if(r!==void 0||!t.settings.isEnabled)return r;let i=t.manifest.display_name||t.manifest.name;return n.find(e=>e.name===t.id)??n.find(e=>e.localId===void 0&&e.name===i)}export{e as t};

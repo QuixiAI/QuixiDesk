@@ -1,1 +1,0 @@
-function e(e){try{return new URL(e).hostname.replace(/^www\./,"")}catch{return""}}export{e as t};

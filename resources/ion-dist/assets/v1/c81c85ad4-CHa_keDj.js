@@ -1,1 +1,0 @@
-import{Ix as e}from"./shared-0-DDOOdL6P.js";var t="terms_just_accepted_by";function n(n){e.setItem(t,n)}function r(){return e.getItem(t)??void 0}function i(e){return e!==void 0&&r()===e}function a(){e.removeItem(t)}export{r as i,n,i as r,a as t};

@@ -1,1 +1,0 @@
-var e=globalThis["claude.simulator"]?.Simulator;export{e as t};

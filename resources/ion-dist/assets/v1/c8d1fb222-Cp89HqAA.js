@@ -1,1 +1,0 @@
-import{hc as e}from"./shared-182-BI1KJccu.js";function t(t){return`${e}/${encodeURIComponent(t)}`}export{t};

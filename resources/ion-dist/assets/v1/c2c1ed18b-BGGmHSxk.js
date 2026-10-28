@@ -1,1 +1,0 @@
-import{Qf as J1,ip as J9,op as K1}from"./shared-frame-6jtSkIit.js";import{Br as e}from"./shared-25-DOWZRSlq.js";import{L_ as t}from"./shared-52-uHFNjl7C.js";function n(){let $=J9(2),n=e()?.account;return J1($,0,n)?K1($,0,n,t(n)):$[1]}export{n as t};

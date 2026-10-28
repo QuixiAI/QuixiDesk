@@ -1,1 +1,0 @@
-import{ho as e,wo as t}from"./vendor-frame-CnSY1sxv.js";import{$f as J2,cp as K3,ip as J9}from"./shared-frame-6jtSkIit.js";function n(n,r){let $=J9(4),[i,a]=t(n);n===""&&i!==""&&a("");let o,s;return J2($,0,n,r)?(o=()=>{if(n==="")return;let e=setTimeout(()=>a(n),r);return()=>clearTimeout(e)},s=[n,r],K3($,0,n,r,o,s)):(o=$[2],s=$[3]),e(o,s),n===""?"":i}export{n as t};

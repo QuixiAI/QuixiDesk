@@ -1,1 +1,0 @@
-function e(e,t){if(!(new TextEncoder().encode(t).length<=2e3))return e.formatMessage({defaultMessage:"Project name is too long. Use a shorter name.",id:"9k2tOFiwkn"})}export{e as t};

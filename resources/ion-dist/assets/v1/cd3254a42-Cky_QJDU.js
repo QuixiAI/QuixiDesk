@@ -1,1 +1,0 @@
-var e=new Set(["assets.claude.ai","assets-proxy.anthropic.com"]);function t(t){let n;try{n=new URL(t)}catch{return!1}return n.protocol==="https:"&&e.has(n.hostname)&&n.port===""&&n.username===""&&n.password===""}export{t as n,e as t};

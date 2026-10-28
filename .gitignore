@@ -21,12 +21,11 @@ opencode.json
 .junie/skills
 .kilo/skills
 /target/
+/tests/ui/node_modules/
 /dist/
 /asar-extracted/
 /binaries/
 /reference/
 *.bak
 .DS_Store
-
-
-
+__pycache__/

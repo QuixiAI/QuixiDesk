@@ -1,1 +1,0 @@
-function e(e){return e}var t=e({purchaseNotMade:{defaultMessage:"The security check wasn\u2019t completed, so your purchase wasn\u2019t made. You can try again.",id:"RYrRuisKcu"},notCompleted:{defaultMessage:"The security check wasn\u2019t completed. You can try again.",id:"L9bG0ax830"}});export{t};

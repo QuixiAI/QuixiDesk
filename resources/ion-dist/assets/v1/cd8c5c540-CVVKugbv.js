@@ -1,1 +1,0 @@
-import{Ha as e,to as t,wo as n}from"./vendor-frame-CnSY1sxv.js";import{$f as J2,ip as J9,sp as K2}from"./shared-frame-6jtSkIit.js";var r=t(null);function i(){return null}function a(t){let $=J9(3),{children:a}=t,[o]=n(i);return J2($,0,a,o)?K2($,0,a,o,e(r.Provider,{value:o,children:a})):$[2]}export{a as t};

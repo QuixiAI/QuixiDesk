@@ -1,4 +1,4 @@
-//! `quixi-ssh-askpass` — Native Rust replacement for `Contents/Helpers/claude-ssh-askpass`
+//! `quixi-ssh-askpass` — Native SSH password prompt helper.
 //! Prompts the user or queries the parent QuixiDesk IPC socket when `SSH_ASKPASS` is invoked.
 
 use std::env;

@@ -1,1 +1,0 @@
-import{Co as e,do as t,ho as n}from"./vendor-frame-CnSY1sxv.js";import{LS as r}from"./shared-0-DDOOdL6P.js";function i(i,a,o){let s=e(void 0),c=r(i),l=t(()=>{s.current&&window.clearTimeout(s.current),s.current=window.setTimeout(c,o)},[c,o]);return n(()=>{if(!(typeof window>"u"))return l(),()=>{s.current&&window.clearTimeout(s.current)}},[...a,l]),l}export{i as t};

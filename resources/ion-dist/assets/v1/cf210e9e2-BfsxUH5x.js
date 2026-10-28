@@ -1,1 +1,0 @@
-import{Yh as e}from"./shared-25-DOWZRSlq.js";var t="ce_admin_api_desktop_config";function n(){return e(t)}export{n as t};

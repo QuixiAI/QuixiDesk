@@ -1,1 +1,0 @@
-import{D_ as e,I_ as t,T_ as n,V_ as r}from"./shared-0-DDOOdL6P.js";function i(i){let a=t(i)??t(r(i));return a?[a.base,a.suffix,a.ctx].filter(Boolean).join(" "):e(i)?n(i):i}export{i as t};

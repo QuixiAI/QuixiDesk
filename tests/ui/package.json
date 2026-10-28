@@ -1,0 +1,8 @@
+{
+  "name": "quixidesk-interface-tests",
+  "private": true,
+  "version": "1.0.0",
+  "license": "MIT",
+  "scripts": {"test": "node original-ui.test.cjs"},
+  "devDependencies": {"jsdom": "26.1.0"}
+}

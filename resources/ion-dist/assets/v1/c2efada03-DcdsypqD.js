@@ -1,1 +1,0 @@
-import{Pl as e,Yr as t}from"./shared-25-DOWZRSlq.js";import{B_ as n,Ba as r,Va as i}from"./shared-78-D5Fw2h0a.js";import{Di as a}from"./shared-26-CGuBxVt9.js";function o(){let o=n(),s=r(),c=o&&s,l=a(),u=i("org_surveys_enabled"),d=t(e.AnalyticsView);return{ready:c,allowed:l&&u&&d}}export{o as t};

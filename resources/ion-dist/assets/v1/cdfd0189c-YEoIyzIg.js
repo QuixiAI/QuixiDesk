@@ -1,1 +1,0 @@
-import{xo as e}from"./vendor-frame-CnSY1sxv.js";import{Ef as t,Sf as n,bf as r,kf as i,yf as a,zf as o}from"./shared-1-BJhqMmkf.js";function s(s){let c=a(s),l=c===null?null:o(c),u=c===t,d=e(()=>u?i():null,[u]);return l===null?{forwarded:c!==null,token:d?.token??null,postAcceptPath:n(d?.postAcceptPath??null)}:{forwarded:!0,token:l,postAcceptPath:r(s)}}export{s as t};

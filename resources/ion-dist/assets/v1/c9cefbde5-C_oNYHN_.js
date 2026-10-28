@@ -1,1 +1,0 @@
-import"./vendor-frame-CnSY1sxv.js";import{Hl as e,Qr as t,Zr as n,_i as r,br as i,qr as a,si as o}from"./shared-25-DOWZRSlq.js";function s(){let s=n(),c=a(),l=t(),u=r(),d=o(),f=i()?.seat_tier;return(s||c)&&!l||(u||d)&&f!=="unassigned"&&!e(f)}export{s as t};

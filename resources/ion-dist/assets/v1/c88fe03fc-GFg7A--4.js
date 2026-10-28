@@ -1,1 +1,0 @@
-import{Mg as e,jg as t}from"./shared-52-uHFNjl7C.js";var n=e(!1);function r(){n.set(!0)}function i(){return t(n,n.read)}export{i as n,r as t};

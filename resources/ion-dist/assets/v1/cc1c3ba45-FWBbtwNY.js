@@ -1,1 +1,0 @@
-import{Co as e,go as t,ho as n}from"./vendor-frame-CnSY1sxv.js";function r(r,i){let a=e(!1),o=t(i);n(()=>{r&&!a.current&&(a.current=!0,o())},[r])}export{r as t};

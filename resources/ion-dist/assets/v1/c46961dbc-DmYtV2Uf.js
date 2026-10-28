@@ -1,1 +1,0 @@
-import{B as e}from"./shared-25-DOWZRSlq.js";import{Li as t}from"./shared-104-CTONUSaz.js";function n(n){if(n.data){let r=t(n.data);return e(r?.tags)?"closed":"open"}return n.isError?"failed":"pending"}export{n as t};

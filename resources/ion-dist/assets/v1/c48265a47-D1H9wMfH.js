@@ -1,1 +1,0 @@
-function e(e){if(!e||typeof e!="object")return null;let t=e;return!t.location&&!t.current&&!t.daily?.length?null:t}export{e as t};

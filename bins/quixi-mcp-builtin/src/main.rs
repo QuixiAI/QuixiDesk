@@ -21,7 +21,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     let mode = if args.iter().any(|a| a == "--browser-use" || a == "--chrome") {
-        "claude-in-chrome"
+        "quixi-in-chrome"
     } else if args.iter().any(|a| a == "--workspace") {
         "quixi-workspace"
     } else if args.iter().any(|a| a == "--github") {
@@ -76,7 +76,7 @@ fn main() -> anyhow::Result<()> {
             "ping" => json!({}),
             "tools/list" => {
                 let tools = match mode {
-                    "claude-in-chrome" => McpHost::claude_browser_and_preview_tools(),
+                    "quixi-in-chrome" => McpHost::browser_and_preview_tools(),
                     "quixi-workspace" => McpHost::workspace_tools(),
                     "github" => McpHost::github_tools(),
                     "office365" => McpHost::office365_tools(),

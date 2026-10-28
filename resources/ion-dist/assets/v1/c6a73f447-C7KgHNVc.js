@@ -1,1 +1,0 @@
-var e="rounded border-0.5 inset-shadow-[0.5px_1px_0] inset-shadow-white/95 inset-ring inset-ring-white/40 [--sheet-card-lit:0.55] dark:inset-shadow-white/15 dark:inset-ring-white/5 dark:[--sheet-card-lit:0.08]",t="bg-gray-50 border-alpha-2 dark:bg-gray-800";export{t as n,e as t};

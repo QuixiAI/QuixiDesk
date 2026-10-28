@@ -3,7 +3,7 @@
 //! - `/sdk-daemon` (`coworkd` listening on vsock/TCP port 51234 / `0xc822`)
 //! - `/sandbox-helper` (bubblewrap + seccomp + network proxy sandbox wrapper)
 //! - `/cli-wrapper` (wraps CLI commands inside the Cowork guest)
-//! - `/claude-shim` (guest CLI shim)
+//! - `/quixi-shim` (guest CLI shim)
 
 use quixi_proto::{VmJsonRpcRequest, VmJsonRpcResponse};
 use serde_json::{json, Value};
@@ -22,7 +22,7 @@ fn main() -> anyhow::Result<()> {
 
     match prog {
         "sandbox-helper" => run_sandbox_helper(&args[1..]),
-        "cli-wrapper" | "claude-shim" => run_cli_wrapper(&args[1..]),
+        "cli-wrapper" | "quixi-shim" => run_cli_wrapper(&args[1..]),
         _ => run_sdk_daemon(&args[1..]),
     }
 }

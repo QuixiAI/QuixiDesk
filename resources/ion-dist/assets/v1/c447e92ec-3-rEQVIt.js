@@ -1,1 +1,0 @@
-import{F as e}from"./vendor-all-0-DXM0MGjZ.js";var t=e()(e=>({debugInfo:void 0,setDebugInfo:t=>e({debugInfo:t})}));function n(){return t(r)}function r(e){return e.setDebugInfo}export{n,t};

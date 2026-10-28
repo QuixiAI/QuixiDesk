@@ -1,1 +1,0 @@
-function e(e,t){let n=e.toLowerCase(),r=t.toLowerCase();return n.startsWith("*.")?r.endsWith(n.slice(1)):r===n}export{e as t};

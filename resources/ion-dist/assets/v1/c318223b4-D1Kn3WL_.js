@@ -1,1 +1,0 @@
-import{uv as e}from"./shared-0-DDOOdL6P.js";var t="missing_client_attestation";function n(t){return t instanceof e&&(t.errorCode==="missing_client_attestation"||t.extra.reason==="missing_client_attestation")}export{n,t};

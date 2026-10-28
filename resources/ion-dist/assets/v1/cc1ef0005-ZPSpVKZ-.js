@@ -1,1 +1,0 @@
-var e="open",t={includeVirtual:!0,includeSlackBinding:!0,includeTeamsBinding:!0},n={includeBindings:!0,includeGithubPermissions:!0};export{t as n,n as r,e as t};

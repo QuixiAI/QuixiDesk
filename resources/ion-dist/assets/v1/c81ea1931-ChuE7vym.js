@@ -1,1 +1,0 @@
-function e(e){return e.preventDefault()}export{e as t};

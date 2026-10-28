@@ -1,1 +1,0 @@
-function e(e){return e==="user_asked"||e==="proactive"?e:void 0}export{e as t};

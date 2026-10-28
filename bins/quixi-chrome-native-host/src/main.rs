@@ -60,7 +60,7 @@ pub fn handle_native_message(host: &McpHost, incoming: &Value) -> Value {
                 .unwrap_or_else(|| json!({}));
             let res = host
                 .call_tool(
-                    "claude-in-chrome",
+                    "quixi-in-chrome",
                     tool,
                     &args,
                     Path::new(quixi_proto::paths::default_workspace_str()),

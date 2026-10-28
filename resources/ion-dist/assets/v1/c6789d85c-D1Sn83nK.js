@@ -1,1 +1,0 @@
-import{$f as J2,ip as J9,sp as K2}from"./shared-frame-6jtSkIit.js";import{Uu as e,yp as t}from"./shared-25-DOWZRSlq.js";import{Oc as n}from"./shared-5-Bg6ZMqvt.js";import{og as r}from"./shared-156-BLTosN8U.js";function i(){let $=J9(3),i=t(),a=n();return J2($,0,a,i)?K2($,0,a,i,{push:t=>r(i,a,t,e("page_control"))}):$[2]}export{i as t};

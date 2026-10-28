@@ -1,1 +1,0 @@
-import{N_ as e}from"./shared-25-DOWZRSlq.js";var t=3,n=864e5;function r(){return e(Date.now,0)}function i(e,r){return(r-Math.max(...e.map(e=>Date.parse(e.created_at??""))))/n>=t}export{r as n,i as t};

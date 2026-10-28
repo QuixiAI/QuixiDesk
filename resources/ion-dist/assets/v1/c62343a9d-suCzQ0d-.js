@@ -1,1 +1,0 @@
-import{Ha as e}from"./vendor-frame-CnSY1sxv.js";import{g as t,s as n}from"./c3a41fcbb-BAYONtxD.js";import{n as r}from"./c1ec8a7a7-56P5bj5Q.js";function i({listClassName:i,trimmed:a=!1,rowGap:o}){return e(r,{points:a?t:n,align:"center",rowGap:o,className:i})}export{i as t};

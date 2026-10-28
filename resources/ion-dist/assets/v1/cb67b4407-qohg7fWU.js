@@ -1,1 +1,0 @@
-import{lp as e}from"./shared-25-DOWZRSlq.js";var t="frame-content";function n(e){let n=e?.contentDocument?.getElementById(t);return n&&!n.closest("[inert]")?n:null}var r="claude-host-focuses-frame";function i(t){let i=n(t);i&&(e(t).dispatchEvent(new Event(r)),i.focus({preventScroll:!0}),i.contentWindow?.focus())}export{i as n,n as r,r as t};

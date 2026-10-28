@@ -1,1 +1,0 @@
-import{t as e}from"./c4707d0f6-Ck4AzheP.js";function t(t,n){let r=e.fromMillis(n,{zone:"utc"}).startOf("day");switch(t){case"daily":return r.plus({days:1});case"weekly":return r.plus({weeks:1}).startOf("week");case"monthly":return r.plus({months:1}).startOf("month")}}export{t};

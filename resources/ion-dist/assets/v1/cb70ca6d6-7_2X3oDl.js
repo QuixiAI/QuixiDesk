@@ -1,1 +1,0 @@
-import{gb as e,om as t}from"./shared-0-DDOOdL6P.js";var n=3426039377;function r(e){let r=n;for(let t=0;t<e.length;t++)r^=e.charCodeAt(t),r=Math.imul(r,16777619);return t(String(r>>>0))%1e4/1e4}var i="__gb__379791961";function a(t){if(r(t)<.1)return"launch";if(e(i)==="control")return"chat"}export{a as t};

@@ -1,1 +1,0 @@
-import{Kf as I1,Qf as J1,ip as J9,op as K1}from"./shared-frame-6jtSkIit.js";import{zr as e}from"./shared-25-DOWZRSlq.js";var t=["taint:hipaa_regulated"];function n(){let $=J9(4),{activeOrganization:n}=e(),r=J1($,0,n?.capabilities)?I1($,0,n?.capabilities??[],n?.capabilities):$[1];return J1($,2,r)?K1($,2,r,t.some(e=>r.includes(e))):$[3]}export{n as t};

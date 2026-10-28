@@ -1,1 +1,0 @@
-var e="flex size-4 items-center justify-center rounded bg-fill-accent text-on-accent hover:bg-fill-accent-hover";export{e as t};

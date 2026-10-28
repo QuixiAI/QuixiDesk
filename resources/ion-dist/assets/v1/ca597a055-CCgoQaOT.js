@@ -1,1 +1,0 @@
-import{X as e}from"./vendor-frame-CnSY1sxv.js";var t=new Map;function n(n,r){let i=JSON.stringify({locale:e(n),options:r}),a=t.get(i);if(a)return a;let o=new Intl.NumberFormat(n,r);return t.set(i,o),o}function r(e,t,r){return e==null?"":n(t,r).format(e)}function i(e,t=-(2**53-1),n=2**53-1){return Math.max(t,Math.min(e,n))}export{r as n,n as r,i as t};

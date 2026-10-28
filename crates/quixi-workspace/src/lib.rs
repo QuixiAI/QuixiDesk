@@ -558,7 +558,7 @@ impl TranscriptSearchEngine {
             let home = quixi_proto::paths::account_home();
             roots.push(quixi_proto::paths::data_dir().join("sessions"));
             roots.push(quixi_proto::paths::data_dir().join("projects"));
-            roots.push(home.join(".claude/projects"));
+            roots.push(home.join(".quixi/cli/projects"));
         }
 
         let mut jsonl_files = Vec::new();
@@ -599,14 +599,14 @@ impl TranscriptSearchEngine {
         matches.into_iter().take(limit).collect()
     }
 
-    /// Discovers existing CLI sessions in `~/.claude/projects` and `~/.quixi/code_sessions`
+    /// Discovers existing CLI sessions in `~/.quixi/cli/projects` and `~/.quixi/code_sessions`
     pub fn list_cli_sessions(limit: usize) -> Vec<Value> {
         use std::io::BufRead;
         let mut raw_sessions: Vec<(u64, String, Value)> = Vec::new();
         let home = quixi_proto::paths::account_home();
-        let claude_projects = home.join(".claude/projects");
-        if claude_projects.exists() {
-            for entry in WalkBuilder::new(&claude_projects)
+        let cli_projects = home.join(".quixi/cli/projects");
+        if cli_projects.exists() {
+            for entry in WalkBuilder::new(&cli_projects)
                 .max_depth(Some(3))
                 .build()
                 .flatten()
@@ -734,9 +734,9 @@ impl TranscriptSearchEngine {
 
     pub fn read_cli_transcript(session_id: &str) -> Value {
         let home = quixi_proto::paths::account_home();
-        let claude_projects = home.join(".claude/projects");
-        if claude_projects.exists() {
-            for entry in WalkBuilder::new(&claude_projects)
+        let cli_projects = home.join(".quixi/cli/projects");
+        if cli_projects.exists() {
+            for entry in WalkBuilder::new(&cli_projects)
                 .max_depth(Some(3))
                 .build()
                 .flatten()

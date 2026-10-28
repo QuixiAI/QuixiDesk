@@ -1,1 +1,0 @@
-import{n as e,r as t}from"./c2e83f327-CpBIiGbX.js";var n={};function r(r,i){return!r||r===e?t:i===!1?r.armProps:n}function i(n){return!n||n===e?t:n.armProps}export{i as n,r as t};

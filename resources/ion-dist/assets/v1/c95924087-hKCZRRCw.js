@@ -1,1 +1,0 @@
-function e(e){let t=e?.omittedReason;return typeof t=="string"&&t!==""}function t(e){try{let t=JSON.parse(e);return Array.isArray(t)?{connectors:t}:{...t,connectors:t.connectors??t.results??[]}}catch{return null}}export{t as n,e as t};

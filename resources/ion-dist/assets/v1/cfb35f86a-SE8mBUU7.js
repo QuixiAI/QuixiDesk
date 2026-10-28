@@ -1,1 +1,0 @@
-import{D_ as e,O_ as t}from"./shared-78-D5Fw2h0a.js";function n(n,r){let i=r?Date.parse(r):NaN;return Number.isNaN(i)?null:{day:n.formatDate(i,e),time:n.formatTime(i,t)}}function r(t,n){let r=n?Date.parse(n):NaN;return Number.isNaN(r)?null:t.formatDate(r,e)}export{n,r as t};

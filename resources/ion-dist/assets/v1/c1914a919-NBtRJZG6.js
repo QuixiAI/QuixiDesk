@@ -1,1 +1,0 @@
-function e(e){return e.normalize("NFKD").toLowerCase().replace(/[\u0300-\u036f]/g,"").replace(/[\u2018\u2019\u201B]/g,"'").replace(/[\u201C\u201D]/g,'"').replace(/[\s\-_]+/g," ").trim()}export{e as t};

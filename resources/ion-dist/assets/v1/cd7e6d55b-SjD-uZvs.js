@@ -1,1 +1,0 @@
-import{i as e,v as t}from"./c2fbf5129-CvKD0QAa.js";import{t as n}from"./c902df5e1-DByCAE9O.js";function r(e){return a(e.getTime())}function i(e){return new Date(o(e))}function a(r){return e(n,{seconds:t.parse(Math.floor(r/1e3)),nanos:r%1e3*1e6})}function o(e){return Number(e.seconds)*1e3+Math.ceil(e.nanos/1e6)}export{r as n,a as r,i as t};

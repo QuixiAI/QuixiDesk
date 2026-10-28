@@ -1,0 +1,33 @@
+{
+  "mermaid": {
+    "version": "11.17.2",
+    "license": "MIT",
+    "registry": "https://registry.npmjs.org/mermaid",
+    "integrity": "sha512-V6K3C8EBdEsPFZXSKMJe6ppQOENxuHARr9GvHX4hh47lAbhMRD9qf4oEK7LoaRQxULMa80/qt5gHO73aCleBBg==",
+    "files": {
+      "npm_mermaid@11.17.2_dist_mermaid.min.js": "581ed7d74bd9048d0e3a91363927d72ef22942d7722546b27f7cc29e35390eb8",
+      "licenses/mermaid-MIT.txt": "ec9fb67dcb25eccc416ed56e1aab819222c805a2a4bfe4cb19e7556bf2ffde80"
+    }
+  },
+  "chart.js": {
+    "version": "4.5.0",
+    "license": "MIT",
+    "registry": "https://registry.npmjs.org/chart.js",
+    "integrity": "sha512-aYeC/jDgSEx8SHWZvANYMioYMZ2KX02W6f6uVfyteuCGcadDLcYVHdfdygsTQkQ4TKn5lghoojAsPj5pu0SnvQ==",
+    "files": {
+      "npm_chart.js@4.5.0_dist_chart.umd.js": "b7929ad4d5323b8244f85d79bba0b3d1495e66f79a2f0023be7f4de5ba4fbac8",
+      "licenses/chart.js-MIT.txt": "41a84aa2caba645f966a18d9c2056b73e6d3a81d80bc0046bc0011a2634d4cce"
+    }
+  },
+  "gridjs": {
+    "version": "5.0.2",
+    "license": "MIT",
+    "registry": "https://registry.npmjs.org/gridjs",
+    "integrity": "sha512-7EaMc4/IhqRcSbdOYvHOlHETciWmbbhMU6rDr2e0UfzIXSkb7X3Lhf9+bGv+v4JaWnJW5GBillgIIHrAvIIoFg==",
+    "files": {
+      "npm_gridjs@5.0.2_dist_gridjs.umd.js": "16be7f9bed197c567d96f9e333dee7ae4a09aa8e5392b3fea1333810006aac28",
+      "npm_gridjs@5.0.2_dist_theme_mermaid.min.css": "1ab4ee41929f642c16a68d41fbdd0791d58fe6279df37aafd56d17fa1bcc37ff",
+      "licenses/gridjs-MIT.txt": "479a9ad0bd0150ec8892f67eb0bad10fe9699edb06c5d7f8968e5e464c8426bd"
+    }
+  }
+}

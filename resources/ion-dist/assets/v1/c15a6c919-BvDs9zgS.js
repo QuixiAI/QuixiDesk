@@ -1,1 +1,0 @@
-import{f as e}from"./vendor-intl-DYfox5Co.js";var t=e({allow:{defaultMessage:"Always allow",id:"lr3QX/nctD"},ask:{defaultMessage:"Needs approval",id:"RpqjOZsF2J"},blocked:{defaultMessage:"Blocked",id:"qUJTsTFu1b"}}),n={...t,...e({custom:{defaultMessage:"Custom",id:"Sjo1P44FYy"}})};export{t as n,n as t};

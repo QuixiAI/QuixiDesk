@@ -1,1 +1,0 @@
-import{n as e}from"./c45281563-DSOO4Usn.js";function t(t){let n=e({authStatus:t.authStatus,authErrorSubtype:t.authErrorSubtype,authRemediation:t.authRemediation,connectionError:t.connectionError,connectionState:t.connectionState,lastConnectedAt:t.lastConnectedAt});return n?.kind==="fixable"&&n.via==="reconnect"}export{t};

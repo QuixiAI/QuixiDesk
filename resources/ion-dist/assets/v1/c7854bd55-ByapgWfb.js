@@ -1,1 +1,0 @@
-import{Ow as e,Qa as t,hy as n,xv as r}from"./shared-78-D5Fw2h0a.js";function i(){let{considerEnabledForNonUI:t}=r(),n=e();return t===!0&&!n}var a=Object.freeze({selectedFolders:[],selectedProjectUuids:new Set});function o(){let e=n(),r=i(),a=t();return e&&r||!a?void 0:"chat"}export{o as n,i as r,a as t};

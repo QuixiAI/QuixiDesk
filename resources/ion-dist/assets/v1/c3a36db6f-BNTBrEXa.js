@@ -1,1 +1,0 @@
-import{Ba as e,Ha as t}from"./vendor-frame-CnSY1sxv.js";function a(i){let c=e("inline-flex items-center justify-center align-middle",i&&i.className);return t("span",{className:c,"aria-hidden":"true",children:t("img",{src:"/assets/quixi-spinner.gif",alt:"",style:{width:"1.15em",height:"1.15em",objectFit:"contain",display:"inline-block"}})})}export{a as t};

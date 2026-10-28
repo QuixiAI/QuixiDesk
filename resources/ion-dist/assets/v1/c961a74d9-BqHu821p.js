@@ -1,1 +1,0 @@
-function e(e){return e==="SKILL.md"||e.endsWith("/SKILL.md")}function t(t){return/\.skill$/i.test(t)||e(t)}export{t as n,e as t};

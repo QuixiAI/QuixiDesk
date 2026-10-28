@@ -1,1 +1,0 @@
-import{f as e}from"./vendor-intl-DYfox5Co.js";var t=e({auto:{defaultMessage:"System",id:"+CwN9C/QFk"},light:{defaultMessage:"Light",id:"A0UsqIrpdq"},dark:{defaultMessage:"Dark",id:"BX2/DcCVek"}});export{t};

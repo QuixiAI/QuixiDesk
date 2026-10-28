@@ -1,1 +1,0 @@
-var e={succeeded:{icon:"CheckCircle",className:"text-muted-as-secondary"},failed:{icon:"XCircle",className:"text-danger"},cancelled:{icon:"Prohibit",className:"text-muted-as-secondary"}};export{e as t};

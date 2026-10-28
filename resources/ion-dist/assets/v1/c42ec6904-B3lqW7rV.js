@@ -1,3 +1,0 @@
-var e="\n\nFor pull requests or issues, use a markdown link with the full URL, taking owner/repo from the repository the pull request or issue belongs to \u2014 the `--repo` you passed to `gh`, or the git remote of the checkout you ran the command in \u2014 which may not be your working directory. Never write a bare `#123` or `PR #123`; if you must write a short reference, qualify it as `owner/repo#123`.\n";function t(e){return e?.length?`\n${e.join(`
-
-`)}\n`:void 0}function n(n){return e+(t(n)??"")}export{n,t as r,e as t};

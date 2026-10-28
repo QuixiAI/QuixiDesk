@@ -3,7 +3,7 @@ pub mod paths;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const EIPC_UUID_MAIN: &str = "5de9b164-2257-4603-a1e1-e00cdb72056c";
+pub const EIPC_UUID_MAIN: &str = "6d3e7708-9b4b-4d8a-9274-060f783c110b";
 pub const EIPC_UUID_WINDOW: &str = "fcb91d11-972d-4fd6-b90b-72739699bff5";
 pub const VSOCK_PORT_GUEST_DAEMON: u32 = 51234; // 0xc822
 
@@ -134,7 +134,7 @@ fn default_perm_mode() -> String {
     "default".to_string()
 }
 
-/// LocalSessions (Claude Code Desktop) session record matching `oy(e)` validator
+/// LocalSessions (workspace code) session record matching `oy(e)` validator
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalCodeSession {
@@ -225,17 +225,17 @@ mod tests {
     #[test]
     fn test_parse_eipc_channels() {
         let ch1 = format!(
-            "$eipc_message$_{}_$_claude.web_$_LocalSessions_$_getAll",
+            "$eipc_message$_{}_$_quixi.web_$_LocalSessions_$_getAll",
             EIPC_UUID_MAIN
         );
         let p1 = ParsedEipcChannel::parse(&ch1).unwrap();
-        assert_eq!(p1.namespace, "claude.web");
+        assert_eq!(p1.namespace, "quixi.web");
         assert_eq!(p1.service, "LocalSessions");
         assert_eq!(p1.member, "getAll");
         assert_eq!(p1.kind, EipcMethodKind::Call);
 
         let ch2 = format!(
-            "$eipc_message$_{}_$_claude.web_$_ManagedConfig_$_managedRendererConfig_$store$_getStateSync",
+            "$eipc_message$_{}_$_quixi.web_$_ManagedConfig_$_managedRendererConfig_$store$_getStateSync",
             EIPC_UUID_MAIN
         );
         let p2 = ParsedEipcChannel::parse(&ch2).unwrap();

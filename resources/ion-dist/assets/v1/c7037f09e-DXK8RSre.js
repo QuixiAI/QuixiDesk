@@ -1,1 +1,0 @@
-function e(e,t){if(t){if(e==="ArrowLeft")return"ArrowRight";if(e==="ArrowRight")return"ArrowLeft"}return e}export{e as t};

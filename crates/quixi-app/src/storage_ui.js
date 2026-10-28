@@ -41,7 +41,7 @@
         if (!response.ok) throw new Error('Export failed');
         return response.json();
       }).then(function (data) {
-        return fetch('app://localhost/__eipc__/clipboard', {method: 'POST', headers: {'Content-Type':'application/json'},
+        return fetch('/__eipc__/clipboard', {method: 'POST', headers: {'Content-Type':'application/json'},
           body: JSON.stringify({action:'write', text:JSON.stringify(data, null, 2)})});
       }).then(function (response) {
         if (!response.ok) throw new Error('Copy failed');

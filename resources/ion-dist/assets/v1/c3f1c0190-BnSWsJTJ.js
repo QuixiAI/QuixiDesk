@@ -1,1 +1,0 @@
-import{qr as e}from"./shared-26-CGuBxVt9.js";var t="library";function n(n,r){return e(n,r,t)}export{n as t};

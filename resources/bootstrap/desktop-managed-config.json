@@ -1,11 +1,5 @@
 {
-  "deploymentMode": "3p",
-  "appVersion": "3.6556.2",
-  "cookielessOrigin": true,
   "deploymentDisplayName": "QuixiDesk",
   "disableEssentialTelemetry": true,
-  "disableNonessentialTelemetry": true,
-  "preferredSystemLanguages": [
-    "en-US"
-  ]
+  "disableNonessentialTelemetry": true
 }

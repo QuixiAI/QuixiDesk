@@ -1,1 +1,0 @@
-import{Va as e}from"./shared-78-D5Fw2h0a.js";var t="__gb__1655681081";function n(){return e(t)}export{n as t};

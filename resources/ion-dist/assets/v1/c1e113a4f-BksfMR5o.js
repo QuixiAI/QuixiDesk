@@ -1,1 +1,0 @@
-import{_b as e}from"./shared-78-D5Fw2h0a.js";var t=e("launchRemoteBrowserAllowed",!1),n=t.useEnabled,r=t.useHasKey;function i(e){return t.getEnabled(),t.subscribe((t,n)=>{n.isInitialized&&t.isEnabled!==n.isEnabled&&e()})}export{n,r,i as t};

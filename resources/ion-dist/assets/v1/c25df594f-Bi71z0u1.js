@@ -1,1 +1,0 @@
-import{Ha as e}from"./vendor-frame-CnSY1sxv.js";import{wa as t}from"./shared-182-BI1KJccu.js";import{a as n,i as r}from"./c8903df54-ci3sRKZD.js";function i({amount:i,currency:a,preferWholeNumber:o=!1}){return e(t,{amount:n(i,a),currency:a,preferWholeNumber:o||r(a)===0})}export{i as t};

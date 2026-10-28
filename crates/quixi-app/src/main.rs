@@ -1,6 +1,6 @@
 //! `QuixiDesk` — Native Cross-Platform Rust Desktop Application (`tao` + `wry` + Tokio + Rayon)
-//! Zero Node.js, zero Electron processes. Serves `ion-dist` over `app://localhost` and bridges
-//! all 1,400 `$eipc_message$` channels to `QuixiEngine` & `EipcRouter`.
+//! Zero Node.js, zero Electron processes. Serves the original interface over `app://localhost` and bridges
+//! desktop service and event channels to `QuixiEngine` & `EipcRouter`.
 
 use quixi_engine::QuixiEngine;
 use quixi_ipc::EipcRouter;
@@ -594,14 +594,16 @@ fn locate_resources_dir() -> PathBuf {
 
     if let Ok(exe) = std::env::current_exe() {
         if let Some(exe_dir) = exe.parent() {
+            let portable = exe_dir.join("resources");
+            if portable.join("ui/index.html").exists() { return portable; }
             // macOS .app bundle: QuixiDesk.app/Contents/MacOS/QuixiDesk -> ../Resources
             let bundle_res = exe_dir.join("../Resources");
-            if bundle_res.join("ion-dist/index.html").exists() {
+            if bundle_res.join("ui/index.html").exists() {
                 return bundle_res.canonicalize().unwrap_or(bundle_res);
             }
             // Cargo target/release/QuixiDesk -> ../../resources
             let workspace_res = exe_dir.join("../../resources");
-            if workspace_res.join("ion-dist/index.html").exists() {
+            if workspace_res.join("ui/index.html").exists() {
                 return workspace_res.canonicalize().unwrap_or(workspace_res);
             }
         }
@@ -664,25 +666,20 @@ fn build_http_response(
 
 fn serve_static_or_spa(resources_dir: &Path, req_path: &str) -> Response<Cow<'static, [u8]>> {
     let clean_path = req_path.trim_start_matches('/');
-    let ion_dist = resources_dir.join("ion-dist");
-    let renderer_dir = resources_dir.join("renderer");
+    if Path::new(clean_path).components().any(|part| matches!(part, std::path::Component::ParentDir | std::path::Component::Prefix(_))) {
+        return build_http_response(404, "text/plain", b"Not found".to_vec());
+    }
+    let ui_dir = resources_dir.join("ui");
 
-    // 1. Direct static file in ion-dist
+    // 1. Direct static file in the UI directory
     if !clean_path.is_empty() {
-        let candidate = ion_dist.join(clean_path);
+        let candidate = ui_dir.join(clean_path);
         if candidate.is_file() {
             if let Ok(bytes) = fs::read(&candidate) {
                 return build_http_response(200, guess_mime_type(&candidate), bytes);
             }
         }
-        // 2. Direct static file in renderer/ (about.html, quick-window.html, find-in-page.html, etc.)
-        let renderer_candidate = renderer_dir.join(clean_path);
-        if renderer_candidate.is_file() {
-            if let Ok(bytes) = fs::read(&renderer_candidate) {
-                return build_http_response(200, guess_mime_type(&renderer_candidate), bytes);
-            }
-        }
-        // 3. Direct static file in resources/ root (e.g. fonts/, en-US.json)
+        // 3. Direct static file in resources/ root (e.g. icons and local libraries)
         let root_candidate = resources_dir.join(clean_path);
         if root_candidate.is_file() {
             if let Ok(bytes) = fs::read(&root_candidate) {
@@ -702,8 +699,8 @@ fn serve_static_or_spa(resources_dir: &Path, req_path: &str) -> Response<Cow<'st
         }
     }
 
-    // 5. SPA fallback -> ion-dist/index.html for all client routes (/new, /chat/*, /cowork*, /code*, /settings*, etc.)
-    let index_html = ion_dist.join("index.html");
+    // 5. SPA fallback -> ui/index.html for all client routes (/new, /chat/*, /cowork*, /code*, /settings*, etc.)
+    let index_html = ui_dir.join("index.html");
     match fs::read(&index_html) {
         Ok(bytes) => build_http_response(200, "text/html; charset=utf-8", bytes),
         Err(err) => build_http_response(
@@ -807,7 +804,7 @@ fn main() -> anyhow::Result<()> {
         });
     }));
 
-    // Build native OS window matching Claude.app dimensions and titlebar inset
+    // Build the native workspace window and titlebar inset.
     let mut win_builder = WindowBuilder::new()
         .with_title(if test_profile.is_some() { "QuixiDesk — Test Profile" } else { "QuixiDesk" })
         .with_inner_size(LogicalSize::new(1280.0, 840.0))
@@ -824,618 +821,9 @@ fn main() -> anyhow::Result<()> {
 
     let window = win_builder.build(&event_loop)?;
 
-    // Read combined Electron-free preload bridge
-    let preload_path = resources_dir.join("preload/combined_preload.js");
-    let mut init_script = fs::read_to_string(&preload_path).unwrap_or_else(|e| {
-        tracing::error!("Failed to read {:?}: {}", preload_path, e);
-        String::new()
-    });
-
-    // Append native window drag, titlebar double-click, and diagnostic telemetry bridge
-    init_script.push_str(
-        r#"
-;(function() {
-  var origFetch = window.fetch;
-  function reportToRust(kind, data) {
-    try {
-      origFetch('app://localhost/__eipc__/diag', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ kind: kind, href: location.href, data: data })
-      }).catch(function(){});
-    } catch (_) {}
-  }
-
-  window.addEventListener('error', function(e) {
-    reportToRust('window.error', {
-      message: String(e.message || ''),
-      filename: String(e.filename || ''),
-      lineno: e.lineno,
-      colno: e.colno
-    });
-  });
-
-  window.addEventListener('unhandledrejection', function(e) {
-    var reason = e.reason;
-    reportToRust('unhandledrejection', {
-      message: reason && reason.message ? String(reason.message) : String(reason),
-      stack: reason && reason.stack ? String(reason.stack).slice(0, 800) : null
-    });
-  });
-
-  var origConsoleError = console.error;
-  console.error = function() {
-    try {
-      var args = Array.prototype.slice.call(arguments).map(function(a) {
-        if (a instanceof Error) return a.message + '\n' + (a.stack || '').slice(0, 600);
-        if (typeof a === 'object' && a !== null) {
-          try { return JSON.stringify(a).slice(0, 400); } catch (_) { return String(a); }
-        }
-        return String(a);
-      });
-      reportToRust('console.error', { args: args });
-    } catch (_) {}
-    return origConsoleError.apply(console, arguments);
-  };
-
-  function checkMountStatus(tag) {
-    var root = document.getElementById('root');
-    var rootChildren = root ? root.children.length : 0;
-    var readyAttr = document.documentElement.getAttribute('data-boot-ui-ready');
-    var textSample = document.body ? (document.body.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 400) : '';
-    reportToRust('mount_status', {
-      tag: tag || 'initial',
-      rootChildren: rootChildren,
-      bootUiReady: readyAttr,
-      title: document.title,
-      pathname: location.pathname,
-      textSample: textSample
-    });
-  }
-
-  setTimeout(function() { checkMountStatus('boot_2.5s'); }, 2500);
-})();
-"#,
-    );
-
-    if std::env::var("QUIXI_E2E_TEST").is_ok() {
-        init_script.push_str(
-            r#"
-;(function() {
-  window.__QUIXI_E2E_MODE__ = true;
-  setTimeout(async function() {
-    try {
-      var stRes = await fetch('app://localhost/api/quixi/providers');
-      var st = await stRes.json();
-      var top5 = (st.providers || []).slice(0, 5).map(function(p) { return p.id; });
-      var overlayEl = document.getElementById('quixi-provider-overlay');
-      var provLogoSvgs = overlayEl ? overlayEl.querySelectorAll('.qp-prov-svg[data-provider-logo]').length : 0;
-      var brandBadgeSvg = document.querySelector('#qp-brand-badge svg circle');
-      fetch('app://localhost/__eipc__/diag', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          kind: 'e2e_provider_first_load_check',
-          overlayShownOnFirstLoad: !!overlayEl,
-          providerLogoSvgCount: provLogoSvgs,
-          quixiBrandBadgeHasSvg: !!brandBadgeSvg,
-          top5Providers: top5,
-          totalProviders: (st.providers || []).length,
-          onboardingCompleted: st.onboardingCompleted
-        })
-      }).catch(function(){});
-      if (overlayEl) {
-        var contBtn = document.getElementById('qp-continue-btn');
-        if (contBtn) contBtn.click();
-      }
-    } catch (e) {}
-  }, 1200);
-
-  function nav(path, tag) {
-    try {
-      window.history.pushState({}, '', path);
-      window.dispatchEvent(new PopStateEvent('popstate'));
-      setTimeout(function() {
-        var fullText = document.body ? (document.body.innerText || '').replace(/\s+/g, ' ').trim() : '';
-        var textSample = fullText.slice(0, 400);
-        var textTail = fullText.length > 400 ? fullText.slice(-500) : fullText;
-        fetch('app://localhost/__eipc__/diag', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            kind: 'e2e_route_check',
-            tag: tag,
-            pathname: location.pathname,
-            title: document.title,
-            textSample: textSample,
-            textTail: textTail
-          })
-        }).catch(function(){});
-      }, 900);
-    } catch (e) {}
-  }
-
-  setTimeout(function() { nav('/new', 'route_new'); }, 1800);
-  setTimeout(function() { nav('/epitaxy', 'route_code_epitaxy'); }, 2500);
-  setTimeout(function() { nav('/projects', 'route_projects'); }, 3200);
-  setTimeout(function() { nav('/scheduled-task', 'route_scheduled'); }, 3900);
-  setTimeout(function() { nav('/customize', 'route_customize'); }, 4600);
-  setTimeout(function() { nav('/recents', 'route_recents'); }, 5300);
-  setTimeout(async function() {
-    try {
-      var cw = window['claude.web'] || (window.claude && window.claude.web);
-      var sidObj = await cw.LocalAgentModeSessions.start({
-        message: 'Check git status in workspace',
-        sessionType: 'cowork',
-        userSelectedFolders: ['__QUIXI_WORKSPACE__']
-      });
-      var sid = (sidObj && sidObj.sessionId) ? sidObj.sessionId : String(sidObj);
-      nav('/cowork/' + sid, 'route_cowork_session');
-      var cidObj = await cw.LocalSessions.start({
-        prompt: 'List files in workspace',
-        cwd: '__QUIXI_WORKSPACE__'
-      });
-      var cid = (cidObj && cidObj.sessionId) ? cidObj.sessionId : String(cidObj);
-      setTimeout(async function() {
-        var agentTranscript = await cw.LocalAgentModeSessions.getTranscript(sid);
-        var codeTranscript = await cw.LocalSessions.getTranscript(cid);
-        var skills = await cw.LocalAgentModeSessions.listLocalSkills();
-        var docxFiles = await cw.LocalAgentModeSessions.getLocalSkillFiles('docx');
-        var gitInfo = await cw.LocalSessions.getGitInfo('__QUIXI_WORKSPACE__');
-        var gitCommits = await cw.LocalSessions.getGitCommits('__QUIXI_WORKSPACE__');
-        var shells = await cw.LocalSessions.getTerminalShells();
-        var csim = window['claude.simulator'] || (window.claude && window.claude.simulator);
-        var simDevices = (csim && csim.Simulator) ? await csim.Simulator.listDevices() : [];
-        var serverCandidates = await cw.Launch.detectServerCandidates('__QUIXI_WORKSPACE__');
-        await cw.CoworkMemory.writeGlobalMemory('# QuixiDesk Global Memory\n');
-        var mem = await cw.CoworkMemory.readGlobalMemory();
-        var cs = window['claude.settings'] || (window.claude && window.claude.settings);
-        var prefs = cs ? await cs.AppPreferences.getPreferences() : null;
-        var sysInfo = cs ? await cs.DesktopInfo.getSystemInfo() : null;
-        var localMcp = await cw.LocalAgentModeSessions.getLocalMcpServers();
-        var directMcp = await cw.LocalAgentModeSessions.getDirectMcpServerStatuses();
-        var cuPos = await cw.LocalAgentModeSessions.directMcpCallTool('b0a3b6e5-7ca0-462a-8e6f-bac087408b17', 'cursor_position', {});
-        var chromeTabs = await cw.LocalAgentModeSessions.directMcpCallTool('a8f3c7e2-4b9d-4f1a-8c3e-9d2a5b7f8e1c', 'tabs_context_mcp', { createIfEmpty: true });
-        var tccState = cw.ComputerUseTcc ? await cw.ComputerUseTcc.getState() : null;
-        var tccApps = cw.ComputerUseTcc ? await cw.ComputerUseTcc.listInstalledApps() : [];
-        var chromeExts = cw.ChromeExtension ? await cw.ChromeExtension.getConnectedExtensions() : [];
-        var quixiLogos = Array.prototype.slice.call(document.querySelectorAll('svg path')).filter(function(p) {
-          return (p.getAttribute('fill') || '').toUpperCase().indexOf('18C9B0') !== -1;
-        }).length;
-        var claudePaths = Array.prototype.slice.call(document.querySelectorAll('svg path[d]')).filter(function(p) {
-          if (p.closest && p.closest('#quixi-provider-overlay')) return false;
-          var d = p.getAttribute('d') || '';
-          return d.indexOf('M16.597') === 0 || d.indexOf('M13.827') === 0 || d.indexOf('M20.328') === 0 || d.indexOf('M17.304') === 0 || d.indexOf('M46.187') === 0 || d.indexOf('M123.516') === 0;
-        }).length;
-        fetch('app://localhost/__eipc__/diag', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            kind: 'e2e_sessions_check',
-            agentSessionId: sid,
-            agentTranscriptLen: agentTranscript ? agentTranscript.length : -1,
-            codeSessionId: cid,
-            codeTranscriptLen: codeTranscript ? codeTranscript.length : -1,
-            skillsCount: skills ? skills.length : -1,
-            docxFilesCount: docxFiles ? docxFiles.length : -1,
-            gitBranch: gitInfo ? gitInfo.branch : null,
-            gitCommitsCount: gitCommits ? gitCommits.length : -1,
-            shellsCount: (shells && shells.shells) ? shells.shells.length : -1,
-            simDevicesCount: simDevices ? simDevices.length : -1,
-            serverCandidatesCount: serverCandidates ? serverCandidates.length : -1,
-            globalMemoryLen: mem ? mem.length : -1,
-            prefsMenuBarEnabled: prefs ? prefs.menuBarEnabled : null,
-            sysInfoPlatform: sysInfo ? sysInfo.platform : null,
-            localMcpCount: localMcp ? localMcp.length : -1,
-            directMcpCount: directMcp ? directMcp.length : -1,
-            computerUseCursorPos: (cuPos && cuPos.content && cuPos.content[0]) ? cuPos.content[0].text : null,
-            browserUseTabsContext: (chromeTabs && chromeTabs.content && chromeTabs.content[0]) ? chromeTabs.content[0].text.slice(0, 120) : null,
-            tccAccessibility: tccState ? tccState.accessibility : null,
-            tccAppsCount: tccApps ? tccApps.length : -1,
-            chromeExtsCount: chromeExts ? chromeExts.length : -1,
-            workspaceQuixiLogosCount: quixiLogos,
-            workspaceClaudeOrAnthropicLogosCount: claudePaths
-          })
-        }).catch(function(){});
-      }, 800);
-    } catch (err) {
-      fetch('app://localhost/__eipc__/diag', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ kind: 'e2e_sessions_err', error: String(err) })
-      }).catch(function(){});
-    }
-  }, 6000);
-  setTimeout(function() { nav('/settings', 'route_settings'); }, 7400);
-})();
-"#,
-        );
-    }
-
-    init_script.push_str(
-        r#"
-;(function() {
-  var origFetch = window.fetch;
-
-  // Native OS Clipboard & Keyboard Edit Bridge (Cmd+C, Cmd+X, navigator.clipboard.writeText/readText)
-  function writeNativeClipboard(text) {
-    if (typeof text !== 'string') text = String(text == null ? '' : text);
-    try {
-      return origFetch('app://localhost/__eipc__/clipboard', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'write', text: text })
-      }).then(function() {}).catch(function() {});
-    } catch (_) {
-      return Promise.resolve();
-    }
-  }
-
-  function readNativeClipboard() {
-    try {
-      return origFetch('app://localhost/__eipc__/clipboard', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'read' })
-      }).then(function(r) { return r.json(); }).then(function(d) {
-        return (d && typeof d.text === 'string') ? d.text : '';
-      }).catch(function() { return ''; });
-    } catch (_) {
-      return Promise.resolve('');
-    }
-  }
-
-  window.__quixi_copy_text__ = writeNativeClipboard;
-  window.__quixi_read_clipboard__ = readNativeClipboard;
-
-  try {
-    var origClipboard = navigator.clipboard;
-    var origWriteText = origClipboard && typeof origClipboard.writeText === 'function'
-      ? origClipboard.writeText.bind(origClipboard)
-      : null;
-    var origReadText = origClipboard && typeof origClipboard.readText === 'function'
-      ? origClipboard.readText.bind(origClipboard)
-      : null;
-
-    var customClipboard = {
-      writeText: function(text) {
-        var s = String(text == null ? '' : text);
-        if (origWriteText) {
-          try { origWriteText(s).catch(function() {}); } catch (_) {}
-        }
-        return writeNativeClipboard(s);
-      },
-      readText: function() {
-        return readNativeClipboard().then(function(t) {
-          if (t) return t;
-          if (origReadText) {
-            return origReadText().catch(function() { return ''; });
-          }
-          return '';
-        });
-      }
-    };
-
-    if (origClipboard) {
-      try {
-        origClipboard.writeText = customClipboard.writeText;
-        origClipboard.readText = customClipboard.readText;
-      } catch (_) {}
-    }
-    try {
-      Object.defineProperty(navigator, 'clipboard', {
-        configurable: true,
-        get: function() { return origClipboard || customClipboard; }
-      });
-    } catch (_) {}
-  } catch (_) {}
-
-  function getSelectedDomText() {
-    try {
-      var active = document.activeElement;
-      if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA')) {
-        if (typeof active.selectionStart === 'number' && typeof active.selectionEnd === 'number' && active.selectionStart !== active.selectionEnd) {
-          return String(active.value || '').substring(active.selectionStart, active.selectionEnd);
-        }
-      }
-      var sel = window.getSelection ? window.getSelection() : null;
-      if (sel && sel.rangeCount > 0) {
-        var str = sel.toString();
-        if (str) return str;
-      }
-    } catch (_) {}
-    return '';
-  }
-
-  document.addEventListener('copy', function() {
-    var sel = getSelectedDomText();
-    if (sel) writeNativeClipboard(sel);
-  }, true);
-
-  document.addEventListener('cut', function() {
-    var sel = getSelectedDomText();
-    if (sel) writeNativeClipboard(sel);
-  }, true);
-
-  window.addEventListener('keydown', function(e) {
-    if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
-    var k = String(e.key || '').toLowerCase();
-    if (!e.shiftKey && k === 'c') {
-      var sel = getSelectedDomText();
-      if (sel) {
-        writeNativeClipboard(sel);
-      }
-    } else if (!e.shiftKey && k === 'x') {
-      var cutSel = getSelectedDomText();
-      if (cutSel) {
-        writeNativeClipboard(cutSel);
-      }
-    }
-  }, true);
-
-  document.addEventListener('mousedown', function(e) {
-    if (e.button !== 0) return;
-    var el = e.target;
-    if (!el || typeof el.closest !== 'function') return;
-    if (el.closest('.draggable-none, button, a, input, textarea, select, [role="button"], [role="menuitem"], [role="tab"], [contenteditable="true"]')) {
-      return;
-    }
-    if (el.closest('.draggable, .df-titlebar, #desktop-boot-drag-strip')) {
-      try {
-        origFetch('app://localhost/__eipc__/window-action', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: e.detail === 2 ? 'toggle_maximize' : 'drag' })
-        }).catch(function(){});
-      } catch (_) {}
-    }
-  }, false);
-
-  // QuixiDesk Native Computer Use & Accessibility Automation Bridge
-  function collectInteractiveElements() {
-    var nodes = Array.prototype.slice.call(
-      document.querySelectorAll('button, a, input, textarea, select, [role="button"], [role="tab"], [role="menuitem"], [role="option"], [contenteditable="true"]')
-    );
-    var out = [];
-    var idx = 1;
-    for (var i = 0; i < nodes.length; i++) {
-      var el = nodes[i];
-      if (!el || !el.getBoundingClientRect) continue;
-      var rect = el.getBoundingClientRect();
-      if (rect.width < 2 || rect.height < 2) continue;
-      var style = window.getComputedStyle ? window.getComputedStyle(el) : null;
-      if (style && (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity || '1') === 0)) {
-        continue;
-      }
-      var hiddenAncestor = false;
-      var anc = el.parentElement;
-      while (anc && anc !== document.body) {
-        var ancStyle = window.getComputedStyle ? window.getComputedStyle(anc) : null;
-        if (ancStyle && (ancStyle.display === 'none' || ancStyle.visibility === 'hidden' || parseFloat(ancStyle.opacity || '1') === 0)) {
-          hiddenAncestor = true;
-          break;
-        }
-        anc = anc.parentElement;
-      }
-      if (hiddenAncestor) continue;
-      var tag = (el.tagName || '').toLowerCase();
-      var role = el.getAttribute('role') || (
-        tag === 'button' ? 'AXButton' :
-        tag === 'a' ? 'AXLink' :
-        (tag === 'input' || tag === 'textarea') ? 'AXTextField' : 'AXElement'
-      );
-      var label = (
-        el.getAttribute('aria-label') ||
-        el.getAttribute('title') ||
-        el.getAttribute('placeholder') ||
-        el.innerText ||
-        el.textContent ||
-        el.value ||
-        ''
-      ).replace(/\s+/g, ' ').trim().slice(0, 120);
-      el.setAttribute('data-quixi-ax-idx', String(idx));
-      out.push({
-        index: idx,
-        tag: tag,
-        role: role,
-        text: label,
-        placeholder: el.getAttribute('placeholder') || '',
-        x: Math.round(rect.left),
-        y: Math.round(rect.top),
-        width: Math.round(rect.width),
-        height: Math.round(rect.height),
-        centerX: Math.round(rect.left + rect.width / 2),
-        centerY: Math.round(rect.top + rect.height / 2)
-      });
-      idx++;
-      if (out.length >= 120) break;
-    }
-    return out;
-  }
-
-  window.__quixi_automation__ = {
-    getState: function() {
-      var els = collectInteractiveElements();
-      var textSample = document.body
-        ? (document.body.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 1200)
-        : '';
-      return {
-        ok: true,
-        title: document.title || 'QuixiDesk',
-        url: location.href,
-        pathname: location.pathname,
-        width: window.innerWidth,
-        height: window.innerHeight,
-        elementsCount: els.length,
-        elements: els,
-        textSample: textSample
-      };
-    },
-    performAction: function(payload) {
-      payload = payload || {};
-      var act = String(payload.action || 'click').toLowerCase();
-      var els = collectInteractiveElements();
-      var targetEl = null;
-
-      var elIdx = typeof payload.element_index === 'number' ? payload.element_index : (typeof payload.index === 'number' ? payload.index : 0);
-      if (elIdx > 0) {
-        targetEl = document.querySelector('[data-quixi-ax-idx="' + elIdx + '"]');
-      }
-      if (!targetEl && payload.selector) {
-        try { targetEl = document.querySelector(payload.selector); } catch (_) {}
-      }
-      var queryStr = payload.query || (act !== 'type' && act !== 'key' ? payload.text : null);
-      if (!targetEl && queryStr) {
-        var q = String(queryStr).toLowerCase();
-        for (var i = 0; i < els.length; i++) {
-          if ((els[i].text || '').toLowerCase().indexOf(q) !== -1) {
-            targetEl = document.querySelector('[data-quixi-ax-idx="' + els[i].index + '"]');
-            break;
-          }
-        }
-      }
-
-      if (act === 'navigate') {
-        var dest = String(payload.path || payload.url || '/new');
-        window.history.pushState({}, '', dest);
-        window.dispatchEvent(new PopStateEvent('popstate'));
-        return { ok: true, action: 'navigate', path: location.pathname };
-      }
-
-      if (act === 'eval' || act === 'evaluate') {
-        try {
-          var codeStr = String(payload.script || payload.expression || payload.code || 'document.title');
-          var evalRes = (0, eval)(codeStr);
-          return { ok: true, action: 'eval', result: evalRes };
-        } catch (err) {
-          return { ok: false, action: 'eval', error: String(err) };
-        }
-      }
-
-      if (act === 'click' || act === 'left_click' || act === 'double_click' || act === 'right_click') {
-        var x = typeof payload.x === 'number' ? payload.x : 640;
-        var y = typeof payload.y === 'number' ? payload.y : 400;
-        if (targetEl) {
-          var r = targetEl.getBoundingClientRect();
-          x = Math.round(r.left + r.width / 2);
-          y = Math.round(r.top + r.height / 2);
-        } else {
-          targetEl = document.elementFromPoint(x, y);
-        }
-        if (targetEl) {
-          var clickable = (typeof targetEl.closest === 'function' && targetEl.closest('button, a, [role="button"], [role="tab"], [role="menuitem"], [role="option"], input, textarea, [contenteditable="true"]')) || targetEl;
-          try {
-            var evOpts = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, button: 0 };
-            clickable.dispatchEvent(new PointerEvent('pointerdown', evOpts));
-            clickable.dispatchEvent(new MouseEvent('mousedown', evOpts));
-            if (typeof clickable.focus === 'function') clickable.focus();
-            clickable.dispatchEvent(new PointerEvent('pointerup', evOpts));
-            clickable.dispatchEvent(new MouseEvent('mouseup', evOpts));
-            if (typeof clickable.click === 'function') {
-              clickable.click();
-            } else {
-              clickable.dispatchEvent(new MouseEvent('click', evOpts));
-            }
-          } catch (_) {
-            try { if (typeof clickable.click === 'function') clickable.click(); } catch (_) {}
-          }
-          var desc = (clickable.getAttribute && (clickable.getAttribute('aria-label') || clickable.innerText || clickable.tagName)) || '';
-          return {
-            ok: true,
-            action: act,
-            x: x,
-            y: y,
-            clickedTag: (clickable.tagName || '').toLowerCase(),
-            clickedText: String(desc).replace(/\s+/g, ' ').trim().slice(0, 80),
-            pathname: location.pathname
-          };
-        }
-        return { ok: false, action: act, x: x, y: y, error: 'no_element_at_point' };
-      }
-
-      if (act === 'type') {
-        var txt = String(payload.text || '');
-        if (!targetEl) {
-          var active = document.activeElement;
-          if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.getAttribute('contenteditable') === 'true')) {
-            targetEl = active;
-          } else {
-            targetEl = document.querySelector('textarea, [contenteditable="true"], input[type="text"], input:not([type="hidden"])');
-          }
-        }
-        if (targetEl) {
-          if (typeof targetEl.focus === 'function') targetEl.focus();
-          if (targetEl.getAttribute && targetEl.getAttribute('contenteditable') === 'true') {
-            var inserted = false;
-            try {
-              document.execCommand('selectAll', false, null);
-              inserted = document.execCommand('insertText', false, txt);
-            } catch (_) {}
-            if (!inserted) {
-              targetEl.textContent = txt;
-              targetEl.dispatchEvent(new InputEvent('input', { bubbles: true, data: txt, inputType: 'insertText' }));
-            }
-          } else if (targetEl.tagName === 'TEXTAREA') {
-            var taSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value');
-            if (taSetter && taSetter.set) taSetter.set.call(targetEl, txt);
-            else targetEl.value = txt;
-            targetEl.dispatchEvent(new Event('input', { bubbles: true }));
-            targetEl.dispatchEvent(new Event('change', { bubbles: true }));
-          } else {
-            var inSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
-            if (inSetter && inSetter.set) inSetter.set.call(targetEl, txt);
-            else targetEl.value = txt;
-            targetEl.dispatchEvent(new Event('input', { bubbles: true }));
-            targetEl.dispatchEvent(new Event('change', { bubbles: true }));
-          }
-          return { ok: true, action: 'type', length: txt.length, tag: (targetEl.tagName || '').toLowerCase() };
-        }
-        return { ok: false, action: 'type', error: 'no_input_element' };
-      }
-
-      if (act === 'key') {
-        var rawCombo = String(payload.key || payload.combo || payload.text || 'Enter');
-        var lower = rawCombo.toLowerCase();
-        var keyName = lower === 'return' || lower === 'enter' ? 'Enter' :
-                      lower === 'escape' || lower === 'esc' ? 'Escape' :
-                      lower === 'tab' ? 'Tab' :
-                      lower === 'backspace' || lower === 'delete' ? 'Backspace' :
-                      rawCombo.split('+').pop() || 'Enter';
-        var keyTarget = document.activeElement || document.body;
-        var kev = {
-          key: keyName,
-          code: keyName === 'Enter' ? 'Enter' : keyName === 'Escape' ? 'Escape' : 'Key' + keyName.toUpperCase(),
-          bubbles: true,
-          cancelable: true,
-          metaKey: lower.indexOf('cmd') !== -1 || lower.indexOf('meta') !== -1,
-          ctrlKey: lower.indexOf('ctrl') !== -1,
-          shiftKey: lower.indexOf('shift') !== -1,
-          altKey: lower.indexOf('alt') !== -1 || lower.indexOf('opt') !== -1
-        };
-        keyTarget.dispatchEvent(new KeyboardEvent('keydown', kev));
-        keyTarget.dispatchEvent(new KeyboardEvent('keyup', kev));
-        return { ok: true, action: 'key', key: keyName };
-      }
-
-      return { ok: true, action: act };
-    }
-  };
-})();
-"#,
-    );
-
-    init_script.push_str(include_str!("provider_ui.js"));
-    init_script.push_str(include_str!("local_artifacts_ui.js"));
-    init_script.push_str(include_str!("storage_ui.js"));
-
-    // The E2E harness needs the live workspace root, not a baked-in developer path.
-    init_script = init_script.replace(
-        "__QUIXI_WORKSPACE__",
-        &quixi_proto::paths::default_workspace_str().replace('\\', "\\\\").replace('\'', "\\'"),
-    );
-    // Keep IPC URLs and the reused preload's trusted-origin checks consistent
-    // with the origin exposed by the platform webview.
-    init_script = init_script.replace("app://localhost", APP_ORIGIN);
+    // Only original, repository-owned UI code runs in the main frame.
+    let init_script = include_str!("native_bridge.js").replace("__QUIXI_APP_ORIGIN__", APP_ORIGIN)
+        + include_str!("storage_ui.js");
 
     #[cfg(target_os = "macos")]
     {
@@ -1454,7 +842,7 @@ fn main() -> anyhow::Result<()> {
     let protocol_router = router.clone();
     let protocol_proxy = proxy.clone();
 
-    let user_agent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) QuixiDesk/3.6556.2 Claude/3.6556.2 Electron/44.9.3 Safari/605.1.15";
+    let user_agent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) QuixiDesk/3.6556.2 Safari/605.1.15";
 
     let mut web_context = wry::WebContext::new(quixi_proto::paths::test_profile().map(|p| p.join("website-data")));
     let mut webview_builder = if test_profile.is_some() { WebViewBuilder::with_web_context(&mut web_context) } else { WebViewBuilder::new() };
@@ -1475,7 +863,9 @@ fn main() -> anyhow::Result<()> {
             let protocol_engine = protocol_engine.clone();
             let protocol_router = protocol_router.clone();
             let protocol_proxy = protocol_proxy.clone();
-            let is_ipc = request.uri().path().starts_with("/__eipc__/");
+            let is_ipc = request.uri().path().starts_with("/__eipc__/")
+                || request.uri().path().starts_with("/api/")
+                || request.uri().path().starts_with("/edge-api/");
             let handle = move || {
                 let method = request.method().as_str().to_uppercase();
                 let uri = request.uri();
@@ -1494,6 +884,26 @@ fn main() -> anyhow::Result<()> {
                 }
 
                 // 1. Native Window Actions, Clipboard & Diagnostics
+                if path == "/__eipc__/open-external" && method == "POST" {
+                    let parsed = serde_json::from_slice::<Value>(request.body()).ok()
+                        .and_then(|body| body["url"].as_str().and_then(|s| url::Url::parse(s).ok()));
+                    let Some(url) = parsed.filter(|u| matches!(u.scheme(), "http" | "https") && u.username().is_empty() && u.password().is_none()) else {
+                        return build_http_response(400, "application/json", b"{\"error\":\"Only HTTP and HTTPS links are supported\"}".to_vec());
+                    };
+                    #[cfg(target_os = "macos")]
+                    let mut command = std::process::Command::new("/usr/bin/open");
+                    #[cfg(target_os = "linux")]
+                    let mut command = std::process::Command::new("xdg-open");
+                    #[cfg(target_os = "windows")]
+                    let mut command = {
+                        let mut c = std::process::Command::new("rundll32.exe");
+                        c.arg("url.dll,FileProtocolHandler"); c
+                    };
+                    return match command.arg(url.as_str()).spawn() {
+                        Ok(_) => build_http_response(200, "application/json", b"{\"ok\":true}".to_vec()),
+                        Err(_) => build_http_response(500, "application/json", b"{\"error\":\"Could not open the system browser\"}".to_vec()),
+                    };
+                }
                 if path == "/__eipc__/diag" {
                     if let Ok(val) = serde_json::from_slice::<Value>(request.body()) {
                         tracing::info!("[WebView Diag] {}", val);
@@ -1608,7 +1018,7 @@ fn main() -> anyhow::Result<()> {
                     return build_http_response(status, &content_type, body);
                 }
 
-                // 4. Static assets & SPA fallback (`ion-dist`, `renderer`, `fonts`)
+                // 4. Static assets & SPA fallback (the original interface, `renderer`, `fonts`)
                 serve_static_or_spa(&protocol_resources, path)
             };
             // Native pickers and other IPC work may block; asset delivery stays ordered.
@@ -1676,7 +1086,7 @@ fn main() -> anyhow::Result<()> {
                     let _ = tx.send(result);
                 }
                 UserEvent::OpenSettings => {
-                    let _ = webview.evaluate_script("location.hash='settings/general'; window.dispatchEvent(new PopStateEvent('popstate'));");
+                    let _ = webview.evaluate_script("window.quixiNavigate?.('settings');");
                 }
                 UserEvent::EmitIpc { channel, payload } => {
                     if let (Ok(ch_str), Ok(pay_str)) = (

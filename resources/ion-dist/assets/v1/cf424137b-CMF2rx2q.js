@@ -1,1 +1,0 @@
-var e=class extends Error{constructor(e){super(e==="cancelled"?"Request not sent: the hCaptcha puzzle was closed.":"Request not sent: when the hCaptcha check finished, the form was gone or the page had switched to another account."),this.name="ClientAttestationCancelledError",this.status=e}};function t(t){return t instanceof e}export{t as n,e as t};

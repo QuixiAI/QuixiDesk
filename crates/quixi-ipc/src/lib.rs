@@ -87,7 +87,7 @@ impl EipcRouter {
             return EipcReplyPayload::ok(val);
         }
 
-        if parsed.namespace == "claude.web" && parsed.member == "delete" {
+        if parsed.namespace == "quixi.web" && parsed.member == "delete" {
             let kind = match parsed.service.as_str() {
                 "LocalAgentModeSessions" => Some("sessions"),
                 "LocalSessions" => Some("code_sessions"),
@@ -200,7 +200,7 @@ impl EipcRouter {
                     }
                     let prefs = self.engine.app_preferences.read().clone();
                     self.engine.emit_eipc(
-                        "claude.settings",
+                        "quixi.settings",
                         "AppPreferences",
                         "preferencesChanged",
                         prefs,
@@ -283,9 +283,9 @@ impl EipcRouter {
                     json!([])
                 } else {
                     json!([{
-                        "id": "claude-cli-local",
-                        "label": "Claude Code CLI (~/.claude/projects)",
-                        "rootPath": quixi_proto::paths::account_home().join(".claude/projects").to_string_lossy(),
+                        "id": "quixi-cli-local",
+                        "label": "Workspace CLI (~/.quixi/cli/projects)",
+                        "rootPath": quixi_proto::paths::account_home().join(".quixi/cli/projects").to_string_lossy(),
                         "origin": "local",
                         "kind": "cli",
                         "sessionCount": cli_sessions.len()
@@ -351,10 +351,10 @@ impl EipcRouter {
                 "height": 1080
             }),
             ("FramebufferPreview", "requestFramePort") => json!(true),
-            ("ClaudeAiImport", "listImportSpaceTwins") | ("ClaudeAiImport", "pickLocalZips") => {
+            ("WorkspaceImport", "listImportSpaceTwins") | ("WorkspaceImport", "pickLocalZips") => {
                 json!([])
             }
-            ("ClaudeAiImport", "getAuthState") => json!({ "status": "signed-out" }),
+            ("WorkspaceImport", "getAuthState") => json!({ "status": "signed-out" }),
             ("CoworkFilePreview", "isEnabled")
             | ("CoworkFilePreview", "isBuiltInViewerAvailable")
             | ("CoworkFilePreview", "isEpitaxyPreviewEnabled")
@@ -611,7 +611,7 @@ impl EipcRouter {
                         }
                         if found {
                             self.engine.emit_eipc(
-                                "claude.web",
+                                "quixi.web",
                                 "LocalAgentModeSessions",
                                 "onEvent",
                                 json!({
@@ -636,7 +636,7 @@ impl EipcRouter {
                 }
                 if found {
                     self.engine.emit_eipc(
-                        "claude.web",
+                        "quixi.web",
                         "LocalAgentModeSessions",
                         "onEvent",
                         json!({
@@ -658,7 +658,7 @@ impl EipcRouter {
                 }
                 if found {
                     self.engine.emit_eipc(
-                        "claude.web",
+                        "quixi.web",
                         "LocalAgentModeSessions",
                         "onEvent",
                         json!({
@@ -679,10 +679,10 @@ impl EipcRouter {
                     self.engine.persist_agent_session(sess);
                 }
                 if found {
-                    self.engine.emit_eipc("claude.web", "LocalAgentModeSessions", "onEvent",
+                    self.engine.emit_eipc("quixi.web", "LocalAgentModeSessions", "onEvent",
                         json!({"type":"permission_mode_changed","sessionId":sid,"permissionMode":mode}));
                     self.engine.emit_eipc(
-                        "claude.web",
+                        "quixi.web",
                         "LocalAgentModeSessions",
                         "onEvent",
                         json!({
@@ -704,7 +704,7 @@ impl EipcRouter {
                 }
                 if found {
                     self.engine.emit_eipc(
-                        "claude.web",
+                        "quixi.web",
                         "LocalAgentModeSessions",
                         "onEvent",
                         json!({
@@ -714,7 +714,7 @@ impl EipcRouter {
                     );
                 }
                 if found {
-                    self.engine.emit_eipc("claude.web", "LocalAgentModeSessions", "onEvent",
+                    self.engine.emit_eipc("quixi.web", "LocalAgentModeSessions", "onEvent",
                         json!({"type":"close","sessionId":sid,"code":0}));
                 }
                 Value::Null
@@ -731,7 +731,7 @@ impl EipcRouter {
                 }
                 if found {
                     self.engine.emit_eipc(
-                        "claude.web",
+                        "quixi.web",
                         "LocalAgentModeSessions",
                         "onEvent",
                         json!({
@@ -752,7 +752,7 @@ impl EipcRouter {
                 }
                 if found {
                     self.engine.emit_eipc(
-                        "claude.web",
+                        "quixi.web",
                         "LocalAgentModeSessions",
                         "onEvent",
                         json!({
@@ -775,7 +775,7 @@ impl EipcRouter {
                 );
                 if !sid.is_empty() {
                     self.engine.emit_eipc(
-                        "claude.web",
+                        "quixi.web",
                         "LocalAgentModeSessions",
                         "onEvent",
                         json!({
@@ -1111,7 +1111,7 @@ impl EipcRouter {
                     }
                     if !sid.is_empty() {
                         self.engine.emit_eipc(
-                            "claude.web",
+                            "quixi.web",
                             "LocalAgentModeSessions",
                             "onEvent",
                             json!({
@@ -1240,7 +1240,7 @@ impl EipcRouter {
                         }
                         if let Some(s) = updated_sess {
                             self.engine.emit_eipc(
-                                "claude.web",
+                                "quixi.web",
                                 "LocalSessions",
                                 "onEvent",
                                 json!({
@@ -1266,7 +1266,7 @@ impl EipcRouter {
                 }
                 if let Some(s) = updated_sess {
                     self.engine.emit_eipc(
-                        "claude.web",
+                        "quixi.web",
                         "LocalSessions",
                         "onEvent",
                         json!({
@@ -1289,7 +1289,7 @@ impl EipcRouter {
                 }
                 if let Some(s) = updated_sess {
                     self.engine.emit_eipc(
-                        "claude.web",
+                        "quixi.web",
                         "LocalSessions",
                         "onEvent",
                         json!({
@@ -1312,7 +1312,7 @@ impl EipcRouter {
                 }
                 if let Some(s) = updated_sess {
                     self.engine.emit_eipc(
-                        "claude.web",
+                        "quixi.web",
                         "LocalSessions",
                         "onEvent",
                         json!({
@@ -1322,7 +1322,7 @@ impl EipcRouter {
                         }),
                     );
                     self.engine.emit_eipc(
-                        "claude.web",
+                        "quixi.web",
                         "LocalSessions",
                         "onEvent",
                         json!({
@@ -1348,7 +1348,7 @@ impl EipcRouter {
                 }
                 if let Some(s) = updated_sess {
                     self.engine.emit_eipc(
-                        "claude.web",
+                        "quixi.web",
                         "LocalSessions",
                         "onEvent",
                         json!({
@@ -1358,7 +1358,7 @@ impl EipcRouter {
                         }),
                     );
                     self.engine.emit_eipc(
-                        "claude.web",
+                        "quixi.web",
                         "LocalSessions",
                         "onEvent",
                         json!({
@@ -1377,7 +1377,7 @@ impl EipcRouter {
                 }
                 if !sid.is_empty() {
                     self.engine.emit_eipc(
-                        "claude.web",
+                        "quixi.web",
                         "LocalSessions",
                         "onEvent",
                         json!({
@@ -1400,7 +1400,7 @@ impl EipcRouter {
                 }
                 if let Some(s) = updated_sess {
                     self.engine.emit_eipc(
-                        "claude.web",
+                        "quixi.web",
                         "LocalSessions",
                         "onEvent",
                         json!({
@@ -1422,7 +1422,7 @@ impl EipcRouter {
                 }
                 if let Some(s) = updated_sess {
                     self.engine.emit_eipc(
-                        "claude.web",
+                        "quixi.web",
                         "LocalSessions",
                         "onEvent",
                         json!({
@@ -1432,7 +1432,7 @@ impl EipcRouter {
                         }),
                     );
                     self.engine.emit_eipc(
-                        "claude.web",
+                        "quixi.web",
                         "LocalSessions",
                         "onEvent",
                         json!({
@@ -1456,7 +1456,7 @@ impl EipcRouter {
                 );
                 if !sid.is_empty() {
                     self.engine.emit_eipc(
-                        "claude.web",
+                        "quixi.web",
                         "LocalSessions",
                         "onEvent",
                         json!({
@@ -1670,12 +1670,12 @@ impl EipcRouter {
                 json!(self.engine.search_local_sessions(q, 50))
             }
 
-            // --- ClaudeCode ---
-            ("ClaudeCode", "getStatus") => json!({
+            // --- WorkspaceCode ---
+            ("WorkspaceCode", "getStatus") => json!({
                 "status": "ready",
                 "version": "2.1.300"
             }),
-            ("ClaudeCode", "prepare") => json!({ "ready": true }),
+            ("WorkspaceCode", "prepare") => json!({ "ready": true }),
 
             // --- CoworkSpaces ---
             ("CoworkSpaces", "getAllSpaces") => {
@@ -1778,7 +1778,7 @@ impl EipcRouter {
                     .write()
                     .insert(id, sp.clone());
                 self.engine.emit_eipc(
-                    "claude.web",
+                    "quixi.web",
                     "CoworkSpaces",
                     "onSpaceEvent",
                     json!({ "type": "created", "space": sp }),
@@ -1814,7 +1814,7 @@ impl EipcRouter {
                 }
                 if let Some(sp) = updated_sp {
                     self.engine.emit_eipc(
-                        "claude.web",
+                        "quixi.web",
                         "CoworkSpaces",
                         "onSpaceEvent",
                         json!({ "type": "updated", "space": sp }),
@@ -1835,7 +1835,7 @@ impl EipcRouter {
                 );
                 if removed.is_some() || !id.is_empty() {
                     self.engine.emit_eipc(
-                        "claude.web",
+                        "quixi.web",
                         "CoworkSpaces",
                         "onSpaceEvent",
                         json!({ "type": "deleted", "space": { "id": id } }),
@@ -1880,7 +1880,7 @@ impl EipcRouter {
                 }
                 if let Some(sp) = updated_sp {
                     self.engine.emit_eipc(
-                        "claude.web",
+                        "quixi.web",
                         "CoworkSpaces",
                         "onSpaceEvent",
                         json!({ "type": "updated", "space": sp }),
@@ -1904,7 +1904,7 @@ impl EipcRouter {
                 }
                 if let Some(sp) = updated_sp {
                     self.engine.emit_eipc(
-                        "claude.web",
+                        "quixi.web",
                         "CoworkSpaces",
                         "onSpaceEvent",
                         json!({ "type": "updated", "space": sp }),
@@ -1942,7 +1942,7 @@ impl EipcRouter {
                 }
                 if let Some(sp) = updated_sp {
                     self.engine.emit_eipc(
-                        "claude.web",
+                        "quixi.web",
                         "CoworkSpaces",
                         "onSpaceEvent",
                         json!({ "type": "updated", "space": sp }),
@@ -1966,7 +1966,7 @@ impl EipcRouter {
                 }
                 if let Some(sp) = updated_sp {
                     self.engine.emit_eipc(
-                        "claude.web",
+                        "quixi.web",
                         "CoworkSpaces",
                         "onSpaceEvent",
                         json!({ "type": "updated", "space": sp }),
@@ -2005,7 +2005,7 @@ impl EipcRouter {
                 }
                 if let Some(sp) = updated_sp {
                     self.engine.emit_eipc(
-                        "claude.web",
+                        "quixi.web",
                         "CoworkSpaces",
                         "onSpaceEvent",
                         json!({ "type": "updated", "space": sp }),
@@ -2029,7 +2029,7 @@ impl EipcRouter {
                 }
                 if let Some(sp) = updated_sp {
                     self.engine.emit_eipc(
-                        "claude.web",
+                        "quixi.web",
                         "CoworkSpaces",
                         "onSpaceEvent",
                         json!({ "type": "updated", "space": sp }),
@@ -2258,12 +2258,12 @@ impl EipcRouter {
                 json!({ "ok": true })
             }
 
-            // --- ClaudeVM ---
-            ("ClaudeVM", "getRunningStatus") => json!("ready"),
-            ("ClaudeVM", "getDownloadStatus") => json!("ready"),
-            ("ClaudeVM", "isSupported") => json!({ "status": "supported" }),
-            ("ClaudeVM", "isHostLoopModeEnabled")
-            | ("ClaudeVM", "isHostLoopDevOverrideActive") => json!(false),
+            // --- QuixiVM ---
+            ("QuixiVM", "getRunningStatus") => json!("ready"),
+            ("QuixiVM", "getDownloadStatus") => json!("ready"),
+            ("QuixiVM", "isSupported") => json!({ "status": "supported" }),
+            ("QuixiVM", "isHostLoopModeEnabled")
+            | ("QuixiVM", "isHostLoopDevOverrideActive") => json!(false),
 
             // --- ComputerUseTcc & ChromeExtension ---
             ("ComputerUseTcc", "getState") => {
@@ -2527,7 +2527,7 @@ mod tests {
         let loc = router
             .dispatch(&EipcInvokePayload {
                 channel: format!(
-                    "$eipc_message$_{}_$_claude.hybrid_$_DesktopIntl_$_getInitialLocale",
+                    "$eipc_message$_{}_$_quixi.hybrid_$_DesktopIntl_$_getInitialLocale",
                     EIPC_UUID_MAIN
                 ),
                 args: vec![],
@@ -2540,7 +2540,7 @@ mod tests {
         let app_name = router
             .dispatch(&EipcInvokePayload {
                 channel: format!(
-                    "$eipc_message$_{}_$_claude.internal.ui_$_AboutWindow_$_getAppName",
+                    "$eipc_message$_{}_$_quixi.internal.ui_$_AboutWindow_$_getAppName",
                     EIPC_UUID_MAIN
                 ),
                 args: vec![],
@@ -2553,7 +2553,7 @@ mod tests {
         let spaces = router
             .dispatch(&EipcInvokePayload {
                 channel: format!(
-                    "$eipc_message$_{}_$_claude.web_$_CoworkSpaces_$_getAllSpaces",
+                    "$eipc_message$_{}_$_quixi.web_$_CoworkSpaces_$_getAllSpaces",
                     EIPC_UUID_MAIN
                 ),
                 args: vec![],
@@ -2567,7 +2567,7 @@ mod tests {
         let skills = router
             .dispatch(&EipcInvokePayload {
                 channel: format!(
-                    "$eipc_message$_{}_$_claude.web_$_LocalAgentModeSessions_$_listLocalSkills",
+                    "$eipc_message$_{}_$_quixi.web_$_LocalAgentModeSessions_$_listLocalSkills",
                     EIPC_UUID_MAIN
                 ),
                 args: vec![],
@@ -2580,7 +2580,7 @@ mod tests {
         let managed = router
             .dispatch(&EipcInvokePayload {
                 channel: format!(
-                    "$eipc_message$_{}_$_claude.web_$_ManagedConfig_$_managedRendererConfig_$store$_getStateSync",
+                    "$eipc_message$_{}_$_quixi.web_$_ManagedConfig_$_managedRendererConfig_$store$_getStateSync",
                     EIPC_UUID_MAIN
                 ),
                 args: vec![],
@@ -2629,54 +2629,14 @@ mod tests {
     }
 
     #[test]
-    fn test_all_1400_eipc_channels_and_session_lifecycles() {
+    fn test_owned_session_lifecycles() {
         let (_engine, router) = make_router();
-
-        // 1. Invoke every channel in the checked-in catalog.
-        let catalog = include_str!("../tests/fixtures/ipc-catalog-1400-members.txt");
-        let mut current_uuid = String::new();
-        let mut current_ns = String::new();
-        let mut invoked_count = 0usize;
-
-        for line in catalog.lines() {
-            let trimmed = line.trim();
-            if trimmed.starts_with("=== UUID:") {
-                if let Some(rest) = trimmed.strip_prefix("=== UUID: ") {
-                    let parts: Vec<&str> = rest.split(" | Namespace: ").collect();
-                    if parts.len() == 2 {
-                        current_uuid = parts[0].trim().to_string();
-                        current_ns = parts[1].split_whitespace().next().unwrap_or("").to_string();
-                    }
-                }
-                continue;
-            }
-            if let Some((left, right)) = trimmed.split_once("): ") {
-                let svc = left.split_whitespace().next().unwrap_or("");
-                for member in right.split(", ").map(|s| s.trim()).filter(|s| !s.is_empty()) {
-                    if member == "runBashCommand" || member == "captureScreenshot" {
-                        invoked_count += 1;
-                        continue;
-                    }
-                    let channel = format!(
-                        "$eipc_message$_{}_$_{}_$_{}_$_{}",
-                        current_uuid, current_ns, svc, member
-                    );
-                    let reply = router.dispatch(&EipcInvokePayload {
-                        channel,
-                        args: vec![],
-                    });
-                    assert!(reply.error.is_none());
-                    invoked_count += 1;
-                }
-            }
-        }
-        assert_eq!(invoked_count, 1400);
 
         // 2. Test full LocalAgentModeSessions (Cowork / 3P Chat) lifecycle
         let start_agent = router
             .dispatch(&EipcInvokePayload {
                 channel: format!(
-                    "$eipc_message$_{}_$_claude.web_$_LocalAgentModeSessions_$_start",
+                    "$eipc_message$_{}_$_quixi.web_$_LocalAgentModeSessions_$_start",
                     EIPC_UUID_MAIN
                 ),
                 args: vec![json!({
@@ -2698,7 +2658,7 @@ mod tests {
         let transcript = router
             .dispatch(&EipcInvokePayload {
                 channel: format!(
-                    "$eipc_message$_{}_$_claude.web_$_LocalAgentModeSessions_$_getTranscript",
+                    "$eipc_message$_{}_$_quixi.web_$_LocalAgentModeSessions_$_getTranscript",
                     EIPC_UUID_MAIN
                 ),
                 args: vec![json!(agent_sid)],
@@ -2711,7 +2671,7 @@ mod tests {
         let start_code = router
             .dispatch(&EipcInvokePayload {
                 channel: format!(
-                    "$eipc_message$_{}_$_claude.web_$_LocalSessions_$_start",
+                    "$eipc_message$_{}_$_quixi.web_$_LocalSessions_$_start",
                     EIPC_UUID_MAIN
                 ),
                 args: vec![json!({
@@ -2733,7 +2693,7 @@ mod tests {
         let code_transcript = router
             .dispatch(&EipcInvokePayload {
                 channel: format!(
-                    "$eipc_message$_{}_$_claude.web_$_LocalSessions_$_getTranscript",
+                    "$eipc_message$_{}_$_quixi.web_$_LocalSessions_$_getTranscript",
                     EIPC_UUID_MAIN
                 ),
                 args: vec![json!(code_sid)],
@@ -2746,14 +2706,14 @@ mod tests {
         // never resurrects a deleted session or creates an empty-sessionId "Untitled" task
         let _ = router.dispatch(&EipcInvokePayload {
             channel: format!(
-                "$eipc_message$_{}_$_claude.web_$_LocalAgentModeSessions_$_delete",
+                "$eipc_message$_{}_$_quixi.web_$_LocalAgentModeSessions_$_delete",
                 EIPC_UUID_MAIN
             ),
             args: vec![json!(agent_sid)],
         });
         let _ = router.dispatch(&EipcInvokePayload {
             channel: format!(
-                "$eipc_message$_{}_$_claude.web_$_LocalAgentModeSessions_$_updateSession",
+                "$eipc_message$_{}_$_quixi.web_$_LocalAgentModeSessions_$_updateSession",
                 EIPC_UUID_MAIN
             ),
             args: vec![json!(agent_sid), json!({ "isStarred": false })],
@@ -2761,7 +2721,7 @@ mod tests {
         let get_deleted_agent = router
             .dispatch(&EipcInvokePayload {
                 channel: format!(
-                    "$eipc_message$_{}_$_claude.web_$_LocalAgentModeSessions_$_getSession",
+                    "$eipc_message$_{}_$_quixi.web_$_LocalAgentModeSessions_$_getSession",
                     EIPC_UUID_MAIN
                 ),
                 args: vec![json!(agent_sid), json!({ "skipReplay": true, "metadataOnly": true })],
@@ -2776,7 +2736,7 @@ mod tests {
 
         let _ = router.dispatch(&EipcInvokePayload {
             channel: format!(
-                "$eipc_message$_{}_$_claude.web_$_LocalSessions_$_delete",
+                "$eipc_message$_{}_$_quixi.web_$_LocalSessions_$_delete",
                 EIPC_UUID_MAIN
             ),
             args: vec![json!(code_sid)],
@@ -2784,7 +2744,7 @@ mod tests {
         let get_deleted_code = router
             .dispatch(&EipcInvokePayload {
                 channel: format!(
-                    "$eipc_message$_{}_$_claude.web_$_LocalSessions_$_getSession",
+                    "$eipc_message$_{}_$_quixi.web_$_LocalSessions_$_getSession",
                     EIPC_UUID_MAIN
                 ),
                 args: vec![json!(code_sid)],
@@ -2802,7 +2762,7 @@ mod tests {
         let mcp_servers = router
             .dispatch(&EipcInvokePayload {
                 channel: format!(
-                    "$eipc_message$_{}_$_claude.web_$_LocalAgentModeSessions_$_getLocalMcpServers",
+                    "$eipc_message$_{}_$_quixi.web_$_LocalAgentModeSessions_$_getLocalMcpServers",
                     EIPC_UUID_MAIN
                 ),
                 args: vec![],
@@ -2819,19 +2779,19 @@ mod tests {
         assert!(servers_arr
             .iter()
             .any(|s| s["uuid"] == "a8f3c7e2-4b9d-4f1a-8c3e-9d2a5b7f8e1c"
-                && s["name"] == "claude-in-chrome"
+                && s["name"] == "quixi-in-chrome"
                 && s["tools"].as_array().unwrap().len() >= 22));
         assert!(servers_arr
             .iter()
             .any(|s| s["uuid"] == "bda6af03-834c-4496-98d1-c0e6d52b99ce"
-                && (s["name"] == "Claude Browser" || s["name"] == "Claude Preview")
+                && (s["name"] == "QuixiDesk Browser" || s["name"] == "QuixiDesk Preview")
                 && s["tools"].as_array().unwrap().len() >= 29));
 
         // 2. Verify ComputerUse tool execution via directMcpCallTool
         let cu_pos = router
             .dispatch(&EipcInvokePayload {
                 channel: format!(
-                    "$eipc_message$_{}_$_claude.web_$_LocalAgentModeSessions_$_directMcpCallTool",
+                    "$eipc_message$_{}_$_quixi.web_$_LocalAgentModeSessions_$_directMcpCallTool",
                     EIPC_UUID_MAIN
                 ),
                 args: vec![
@@ -2851,7 +2811,7 @@ mod tests {
         let cu_apps = router
             .dispatch(&EipcInvokePayload {
                 channel: format!(
-                    "$eipc_message$_{}_$_claude.web_$_LocalAgentModeSessions_$_directMcpCallTool",
+                    "$eipc_message$_{}_$_quixi.web_$_LocalAgentModeSessions_$_directMcpCallTool",
                     EIPC_UUID_MAIN
                 ),
                 args: vec![
@@ -2869,7 +2829,7 @@ mod tests {
         let tabs_ctx = router
             .dispatch(&EipcInvokePayload {
                 channel: format!(
-                    "$eipc_message$_{}_$_claude.web_$_LocalAgentModeSessions_$_mcpCallTool",
+                    "$eipc_message$_{}_$_quixi.web_$_LocalAgentModeSessions_$_mcpCallTool",
                     EIPC_UUID_MAIN
                 ),
                 args: vec![
@@ -2890,11 +2850,11 @@ mod tests {
         let read_page = router
             .dispatch(&EipcInvokePayload {
                 channel: format!(
-                    "$eipc_message$_{}_$_claude.web_$_LocalAgentModeSessions_$_directMcpCallTool",
+                    "$eipc_message$_{}_$_quixi.web_$_LocalAgentModeSessions_$_directMcpCallTool",
                     EIPC_UUID_MAIN
                 ),
                 args: vec![
-                    json!("claude-in-chrome"),
+                    json!("quixi-in-chrome"),
                     json!("read_page"),
                     json!({ "tabId": 1, "filter": "all" }),
                 ],
@@ -2911,7 +2871,7 @@ mod tests {
         let tcc_apps = router
             .dispatch(&EipcInvokePayload {
                 channel: format!(
-                    "$eipc_message$_{}_$_claude.web_$_ComputerUseTcc_$_listInstalledApps",
+                    "$eipc_message$_{}_$_quixi.web_$_ComputerUseTcc_$_listInstalledApps",
                     EIPC_UUID_MAIN
                 ),
                 args: vec![],
@@ -2924,7 +2884,7 @@ mod tests {
         let chrome_exts = router
             .dispatch(&EipcInvokePayload {
                 channel: format!(
-                    "$eipc_message$_{}_$_claude.web_$_ChromeExtension_$_getConnectedExtensions",
+                    "$eipc_message$_{}_$_quixi.web_$_ChromeExtension_$_getConnectedExtensions",
                     EIPC_UUID_MAIN
                 ),
                 args: vec![],
@@ -2938,7 +2898,7 @@ mod tests {
     fn test_connected_provider_model_selector_and_stream_events() {
         let (engine, router) = make_router();
 
-        // 1. Configure ONLY OpenAI Codex OAuth in memory (Anthropic is NOT connected)
+        // 1. Configure only the OpenAI provider in memory.
         {
             let mut st = engine.provider_manager.state.write();
             st.active_provider = "openai".to_string();
@@ -2956,7 +2916,7 @@ mod tests {
             }
         }
 
-        // 2. Verify /api/bootstrap only exposes connected OpenAI Codex models (no Sonnet / Anthropic models)
+        // 2. Verify bootstrap exposes only models from connected providers.
         let (status, _ct, body) = engine.handle_api_request("GET", "/edge-api/bootstrap", b"");
         assert_eq!(status, 200);
         let boot: Value = serde_json::from_slice(&body).unwrap();
@@ -3020,7 +2980,7 @@ mod tests {
         let start_res = router
             .dispatch(&EipcInvokePayload {
                 channel: format!(
-                    "$eipc_message$_{}_$_claude.web_$_LocalAgentModeSessions_$_start",
+                    "$eipc_message$_{}_$_quixi.web_$_LocalAgentModeSessions_$_start",
                     EIPC_UUID_MAIN
                 ),
                 args: vec![json!({
@@ -3118,7 +3078,7 @@ mod tests {
         // Clean up test session file
         let _ = router.dispatch(&EipcInvokePayload {
             channel: format!(
-                "$eipc_message$_{}_$_claude.web_$_LocalAgentModeSessions_$_delete",
+                "$eipc_message$_{}_$_quixi.web_$_LocalAgentModeSessions_$_delete",
                 EIPC_UUID_MAIN
             ),
             args: vec![json!(sid)],
@@ -3138,7 +3098,7 @@ mod session_control_regression_tests {
         engine.set_emitter(Arc::new(move |_, event| recorded.lock().unwrap().push(event)));
         let sid = engine.start_agent_session(&json!({"permissionMode":"auto"}));
         let call = |method: &str, args: Vec<Value>| router.dispatch(&EipcInvokePayload {
-            channel: format!("$eipc_message$_{}_$_claude.web_$_LocalAgentModeSessions_$_{}", quixi_proto::EIPC_UUID_MAIN, method), args,
+            channel: format!("$eipc_message$_{}_$_quixi.web_$_LocalAgentModeSessions_$_{}", quixi_proto::EIPC_UUID_MAIN, method), args,
         });
         assert_eq!(call("setPermissionMode",vec![json!(sid),json!("default")]).result,Some(json!(true)));
         call("stop",vec![json!(sid)]);

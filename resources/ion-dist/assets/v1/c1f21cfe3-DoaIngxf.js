@@ -1,1 +1,0 @@
-var e='[role="feed"]',t='[role="article"][aria-posinset]',n=`${e} ${t}`;function r(e){let t=null,r=-1;for(let i of e?.querySelectorAll(n)??[]){let e=Number(i.getAttribute("aria-posinset"));e>r&&(t=i,r=e)}return t}export{r as i,e as n,n as r,t};

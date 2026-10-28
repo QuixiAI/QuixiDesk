@@ -1,1 +1,0 @@
-import{LC as e}from"./shared-78-D5Fw2h0a.js";function t(){return e("claude_ai_product_feedback").isAvailable}export{t};

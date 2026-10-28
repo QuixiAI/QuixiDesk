@@ -1,1 +1,0 @@
-var e={reactionRow:null,onToolbarAddReaction:void 0,editedMarker:null,onlyYouMarker:null};function t(e){return e.channel?.channelId!==void 0}export{t as n,e as t};

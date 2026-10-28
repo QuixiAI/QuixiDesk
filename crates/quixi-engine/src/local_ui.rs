@@ -143,7 +143,7 @@ impl QuixiEngine {
         artifacts.insert(id.to_string(), updated);
         drop(artifacts);
         self.emit_eipc(
-            "claude.web",
+            "quixi.web",
             "CoworkArtifacts",
             "onArtifactsChanged",
             json!({}),
@@ -160,7 +160,7 @@ impl QuixiEngine {
         }
         self.artifacts.write().remove(id);
         self.emit_eipc(
-            "claude.web",
+            "quixi.web",
             "CoworkArtifacts",
             "onArtifactsChanged",
             json!({}),
@@ -188,7 +188,7 @@ impl QuixiEngine {
         }
         self.artifacts.write().insert(id.clone(), artifact);
         self.emit_eipc(
-            "claude.web",
+            "quixi.web",
             "CoworkArtifacts",
             "onArtifactsChanged",
             json!({}),

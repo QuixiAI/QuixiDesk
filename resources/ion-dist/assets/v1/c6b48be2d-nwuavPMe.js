@@ -1,1 +1,0 @@
-var e="/images/spotlights/kindling-hero.png";export{e as t};

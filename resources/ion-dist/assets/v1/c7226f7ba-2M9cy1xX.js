@@ -1,1 +1,0 @@
-import{ku as e}from"./shared-52-uHFNjl7C.js";var t=/\bmeta\s*=\s*\{[^}]*?\bname\s*:\s*['"]([^'"]+)['"]/,n=4096;function r(r){if(typeof r.name=="string"&&r.name)return r.name;if(typeof r.script=="string"){let e=r.script.slice(0,n).match(t);if(e)return e[1]}if(typeof r.scriptPath=="string"&&r.scriptPath)return e(r.scriptPath)}export{r as t};

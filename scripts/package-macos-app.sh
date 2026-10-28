@@ -12,7 +12,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROFILE="${1:-release}"
 TARGET_DIR="$ROOT_DIR/target/$PROFILE"
-APP_BUNDLE="$ROOT_DIR/dist/QuixiDesk.app"
+APP_BUNDLE="${QUIXI_APP_BUNDLE:-$ROOT_DIR/dist/QuixiDesk.app}"
 CONTENTS="$APP_BUNDLE/Contents"
 VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT_DIR/Cargo.toml" | head -1)"
 VERSION="${VERSION:-0.0.0}"
@@ -24,9 +24,9 @@ fi
 
 echo "[0/5] Building Rust workspace ($PROFILE, version $VERSION)..."
 if [ "$PROFILE" = "release" ]; then
-    cargo build --manifest-path "$ROOT_DIR/Cargo.toml" --release --workspace
+    cargo build --locked --manifest-path "$ROOT_DIR/Cargo.toml" --release --workspace
 else
-    cargo build --manifest-path "$ROOT_DIR/Cargo.toml" --workspace
+    cargo build --locked --manifest-path "$ROOT_DIR/Cargo.toml" --workspace
 fi
 
 echo "[1/5] Creating QuixiDesk.app bundle structure at $APP_BUNDLE..."
@@ -104,18 +104,17 @@ for helper in quixi-disclaimer quixi-chrome-native-host quixi-ssh-askpass quixi-
 done
 
 # Expose the built-in MCP server on PATH for external agents/tools.
-install -d "$HOME/.local/bin"
-if [ -f "$TARGET_DIR/quixi-mcp-builtin" ]; then
+if [ "${QUIXI_INSTALL_HELPERS:-1}" = "1" ] && [ -f "$TARGET_DIR/quixi-mcp-builtin" ]; then
+    install -d "$HOME/.local/bin"
     rm -f "$HOME/.local/bin/quixi-mcp-builtin"
     cp "$TARGET_DIR/quixi-mcp-builtin" "$HOME/.local/bin/quixi-mcp-builtin"
     chmod +x "$HOME/.local/bin/quixi-mcp-builtin"
     codesign -s - -f "$HOME/.local/bin/quixi-mcp-builtin" 2>/dev/null || true
 fi
 
-# Compatibility symlinks matching the Claude.app helper names.
+# Short helper aliases used by the native runtime.
 ln -sf quixi-disclaimer "$CONTENTS/Helpers/disclaimer"
 ln -sf quixi-chrome-native-host "$CONTENTS/Helpers/chrome-native-host"
-ln -sf quixi-ssh-askpass "$CONTENTS/Helpers/claude-ssh-askpass"
 ln -sf quixi-guest-daemon "$CONTENTS/Helpers/sdk-daemon"
 
 echo "[4/5] Installing Resources into Contents/Resources..."
@@ -132,8 +131,8 @@ copy_res() { # copy_res <relative-path>
     fi
 }
 
-for res in quixi.icns quixi-logo.svg quixi-mark.svg quixi-spinner.gif en-US.json \
-           ion-dist renderer preload bootstrap fonts bundled-skills \
+for res in quixi.icns quixi-logo.svg quixi-mark.svg \
+           ui bootstrap bundled-skills \
            bundled-skills-extracted artifact-libs; do
     copy_res "$res"
 done

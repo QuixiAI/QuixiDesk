@@ -54,7 +54,7 @@ function Start-App {
 }
 function Check([string]$name,[bool]$ok) { $results.Add(@{name=$name;pass=$ok}); if(!$ok){throw "Failed: $name"} }
 function Native-Close([bool]$expectExit=$true) { Eval "fetch('/__eipc__/window-action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'close'})});'requested'" | Out-Null;if($expectExit){[void]$app.WaitForExit(10000)}else{Start-Sleep -Seconds 1} }
-$ipc="function(method,args){return fetch('/__eipc__/invoke',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({channel:'`$eipc_message`$_5de9b164-2257-4603-a1e1-e00cdb72056c_`$_claude.web_`$_LocalAgentModeSessions_`$_'+method,args:args})}).then(async r=>{if(!r.ok)throw Error('IPC '+r.status);return (await r.json()).result})}"
+$ipc="function(method,args){return fetch('/__eipc__/invoke',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({channel:'`$eipc_message`$_6d3e7708-9b4b-4d8a-9274-060f783c110b_`$_quixi.web_`$_LocalAgentModeSessions_`$_'+method,args:args})}).then(async r=>{if(!r.ok)throw Error('IPC '+r.status);return (await r.json()).result})}"
 try {
  Start-App
  Eval "window.__storageIpc=$ipc;true"|Out-Null
@@ -67,6 +67,10 @@ try {
  $status=Probe "fetch('/api/quixi/storage/status').then(r=>r.json())"
  Check 'primary failure creates durable recovery' (($status.issues.Count -eq 1) -and $status.issues[0].recoverySaved -and (Test-Path "$profile\data\recovery\sessions\$sid.json"))
  Check 'backup notice is visible in live DOM' ([bool](Eval "document.getElementById('quixi-storage-warning')?.innerText.includes('saved in recovery storage')"))
+ Eval "Array.from(document.querySelectorAll('#quixi-storage-warning button')).find(b=>b.textContent==='Copy recovery data').click();true" | Out-Null
+ Start-Sleep -Milliseconds 600
+ $copied=Get-Clipboard -Raw | ConvertFrom-Json
+ Check 'recovery copy reaches the native Windows clipboard' ($copied.sessions.Count -eq 1 -and $copied.sessions[0].title -eq ('Recovered Windows caf'+[char]0xe9+' '+[char]0xd83c+[char]0xdf32))
  Native-Close
  Check 'durable recovery permits native close event' $app.HasExited
  Start-App

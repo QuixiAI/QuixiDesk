@@ -1,1 +1,0 @@
-var e={diffStyle:"unified",expandUnchanged:!1,hunkSeparators:"simple",overflow:"wrap",disableFileHeader:!0},t={"--diffs-gap-inline":"var(--cds-pad-md)","--diffs-gap-block":"var(--cds-pad-xs)"};export{t as n,e as t};

@@ -1,1 +1,0 @@
-import{Va as e}from"./shared-78-D5Fw2h0a.js";import{Bh as t}from"./shared-3-BCEbd8Fv.js";import{ef as n}from"./shared-182-BI1KJccu.js";var r="claudeai_annatto_main",i="sensitive-topics";function a(){let n=e(r),{memoryOn:i,mode:a,isBlocked:o}=t();return n&&i&&a==="melange"&&!o}function o(){let t=e(r),i=n();return t&&i===!0}export{a as i,r as n,o as r,i as t};

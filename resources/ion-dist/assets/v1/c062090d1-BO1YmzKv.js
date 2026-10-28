@@ -1,1 +1,0 @@
-import{lp as e}from"./shared-25-DOWZRSlq.js";function t(t){let n=t?.closest('[role="dialog"]'),r=!1;for(let i=t?.parentElement;i&&n?.contains(i);i=i.parentElement)r&&i.scrollTop>0&&i.scrollTo({top:0,behavior:"instant"}),r||=e(i).getComputedStyle(i).position==="sticky";t?.focus()}export{t};

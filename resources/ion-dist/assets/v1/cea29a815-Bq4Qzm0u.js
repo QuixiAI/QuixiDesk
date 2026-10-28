@@ -1,1 +1,0 @@
-function e(e,t,n){let r,i=new Promise(e=>{r=setTimeout(()=>e(n),t)});return Promise.race([e,i]).finally(()=>clearTimeout(r))}export{e as t};

@@ -1,1 +1,0 @@
-import{og as e}from"./shared-52-uHFNjl7C.js";function t(t){return e("type")?t.replace("text-heading-semibold","text-heading"):t}export{t};

@@ -1,1 +1,0 @@
-import{Oh as e}from"./shared-3-BCEbd8Fv.js";var t=/\/snap_\d{10}-[^/]*\/[^/]+$/;function n(n,r){let i=n.srcs.get(r),a=n.looks.get(r)?.typeSlug;return i!==void 0&&typeof a=="string"&&e(a,"pages")&&!t.test(new URL(i).pathname)?void 0:i}var r=6e5,i=new Map;function a(e){let t=i.get(e);return t!==void 0&&Date.now()-t<r}function o(e){i.set(e,Date.now())}export{o as n,n as r,a as t};

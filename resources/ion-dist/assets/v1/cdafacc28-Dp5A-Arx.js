@@ -1,1 +1,0 @@
-import{B_ as e,C_ as t,I_ as n}from"./shared-0-DDOOdL6P.js";var r=/-1m\b|\[1m\]/i;function i(i){if(i===void 0)return;let a=i.toLowerCase();if(t.has(a))return a;let o=e(i);return o===null||n(o)===null?"off_catalog":r.test(i)?`${o}[1m]`:o}export{i as t};

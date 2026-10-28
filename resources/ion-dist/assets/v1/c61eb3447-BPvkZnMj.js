@@ -1,1 +1,0 @@
-import{fo as e}from"./vendor-frame-CnSY1sxv.js";import{Yh as t}from"./shared-25-DOWZRSlq.js";import{sd as n}from"./shared-182-BI1KJccu.js";function r(){let r=t("claudeai_linden_transom"),{readOnlyTranscript:i}=e(n);return r&&!(i!==void 0&&i)}export{r as t};

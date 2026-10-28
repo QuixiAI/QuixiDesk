@@ -1,1 +1,0 @@
-import{Ou as e}from"./shared-52-uHFNjl7C.js";function t(t){let n=e(t??"");return n==="powershell.exe"||n==="pwsh.exe"}export{t};

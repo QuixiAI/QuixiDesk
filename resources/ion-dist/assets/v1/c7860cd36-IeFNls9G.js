@@ -1,1 +1,0 @@
-var e=new Set;function t(t){e.add(t)}function n(t){return e.has(t)}function r(t){e.delete(t)}export{n,t as r,r as t};

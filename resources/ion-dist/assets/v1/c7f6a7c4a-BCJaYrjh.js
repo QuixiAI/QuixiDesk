@@ -1,1 +1,0 @@
-import{gS as e}from"./shared-0-DDOOdL6P.js";var t=1e4,n;function r(t,r){n=e(r.artifactUuid)?{projectId:t,request:r}:void 0}function i(e,r=Date.now()){return n?.projectId===e&&r-n.request.askedAtMs<=t}function a(e,t=Date.now()){let r=i(e,t),a=n?.projectId===e?n.request:void 0;return a!==void 0&&(n=void 0),r?a:void 0}export{r as n,a as r,i as t};

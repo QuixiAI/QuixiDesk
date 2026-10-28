@@ -1,1 +1,0 @@
-var e="work_prompt",t=`/create/team?src=${e}`,n="team_work_prompt_arrival";function r(t){let r=t.get("src")===e;try{r?sessionStorage.setItem(n,"1"):sessionStorage.removeItem(n)}catch{}return r}function i(){try{return sessionStorage.getItem(n)==="1"}catch{return!1}}export{r as n,i as r,t};

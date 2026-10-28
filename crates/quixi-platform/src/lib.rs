@@ -9,6 +9,9 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 
+#[cfg(target_os = "windows")]
+mod windows_clipboard;
+
 /// The desktop host supplies an AppKit sheet picker; CLI callers retain the fallback.
 type FolderPicker = std::sync::Arc<dyn Fn(Option<&str>, bool) -> Vec<String> + Send + Sync>;
 static FOLDER_PICKER: OnceLock<FolderPicker> = OnceLock::new();
@@ -16,7 +19,7 @@ pub fn set_folder_picker(picker: FolderPicker) {
     let _ = FOLDER_PICKER.set(picker);
 }
 
-/// 1. SafeFsProvider (replaces `claude-native-binding.node` *Beneath / CC-2885)
+/// 1. Safe filesystem operations beneath a trusted root.
 /// Enforces O_NOFOLLOW component-by-component traversal beneath a trusted root directory.
 pub struct SafeFs;
 
@@ -114,7 +117,7 @@ impl SafeFs {
     }
 }
 
-/// 2. SecurityAndSpawnProvider (replaces `disclaimer` & `claude-native-binding.node` spawn/keychain)
+/// 2. Native process spawning and platform security helpers.
 pub struct SecurityAndSpawn;
 
 impl SecurityAndSpawn {
@@ -656,6 +659,8 @@ impl ComputerUse {
     }
 
     pub fn read_clipboard() -> String {
+        #[cfg(target_os = "windows")]
+        if let Ok(text) = windows_clipboard::read() { return text; }
         #[cfg(target_os = "macos")]
         {
             if let Ok(out) = Command::new("/usr/bin/pbpaste").output() {
@@ -671,6 +676,8 @@ impl ComputerUse {
     }
 
     pub fn write_clipboard(text: &str) -> Result<()> {
+        #[cfg(target_os = "windows")]
+        windows_clipboard::write(text)?;
         #[cfg(target_os = "macos")]
         {
             use std::process::Stdio;
@@ -1005,7 +1012,7 @@ impl ComputerUse {
     }
 }
 
-/// 4. BrowserUseProvider (backs `claude-in-chrome`, `Claude Browser`, and `Claude Preview` MCP tools)
+/// 4. Browser navigation, preview, and inspection tools.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BrowserElementRef {

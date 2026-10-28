@@ -1,1 +1,0 @@
-import{xs as e}from"./shared-11-_AVGLHEz.js";function t(t){return e(t)?{id:t,type:"cli"}:{id:t,type:t.startsWith("local_")?"local":"remote"}}export{t};

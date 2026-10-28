@@ -1,1 +1,0 @@
-import{fo as e,to as t}from"./vendor-frame-CnSY1sxv.js";var n=t(void 0);function r(){return e(n)}export{r as n,n as t};

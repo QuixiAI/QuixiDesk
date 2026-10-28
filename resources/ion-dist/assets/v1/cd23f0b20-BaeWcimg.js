@@ -1,1 +1,0 @@
-import{vh as e}from"./shared-25-DOWZRSlq.js";import{Bv as t,Hv as n,Vv as r,pv as i,xv as a}from"./shared-78-D5Fw2h0a.js";function o(){let n=e(),o=r(),s=t(),c=i(),l=a();return n?o==="pending"||s?"pending":c?l.loading?"pending":l.considerEnabledForNonUI?"live":"off":"off":"off"}function s(){let t=o(),r=e(),i=n();return t!=="off"||r&&i}export{o as n,s as t};

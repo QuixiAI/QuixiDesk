@@ -2,7 +2,7 @@
 
 QuixiDesk needs tests that launch the packaged Rust application, operate its WKWebView and native controls, and verify the resulting files, requests, sessions, and process state. The highest priorities are preventing actions after Stop, enforcing the permission mode shown to the user, preserving conversations, and making provider and tool failures understandable.
 
-**Status:** proposed suite and implementation specification, based on `main` at `7651df1`, extended through interactive exploration of Claude for Mac 4.29.0 (260974). This document does not claim the proposed runner, fixtures, hooks, CI jobs, or cases already exist. The catalog includes both regression coverage for implemented behavior and acceptance targets that may initially expose missing functionality. A capability must be implemented and pass its acceptance cases before being advertised as tested.
+**Status:** proposed suite and implementation specification, based on `main` at `7651df1`. This document does not claim the proposed runner, fixtures, hooks, CI jobs, or cases already exist. The catalog includes both regression coverage for implemented behavior and acceptance targets that may initially expose missing functionality. A capability must be implemented and pass its acceptance cases before being advertised as tested.
 
 ## Test architecture
 
@@ -32,7 +32,7 @@ Do not depend on the interactive agent runtime or a paid model for routine CI. A
 | `is_headless_test_env` in [`quixi-platform`](../../crates/quixi-platform/src/lib.rs) | Deterministic picker substitutes | Native picker behavior; the E2E flag deliberately changes these paths |
 | [`package-macos-app.sh`](../../scripts/package-macos-app.sh) | Bundle construction, resource copying and ad-hoc signing attempts | Successful signing, relocation, absence of missing resources or safe installation |
 
-The architecture and design documents contain reconstruction material for Claude.app. Treat executable QuixiDesk source and product requirements as the authority for this suite, rather than assuming every feature in those documents exists in QuixiDesk.
+Treat executable QuixiDesk source and product requirements as the authority for this suite. Proposed feature cases require implementation checks before qualification.
 
 ### Journey boundaries
 
@@ -429,11 +429,11 @@ Scheduled execution cases require an actual scheduler and clock seam. Current ta
 | PERF-07 | P1 | Sleep/wake, offline/online and fixture restart recover without duplicate requests or stuck task state. |
 | PERF-08 | P1 | Broken automation bridge cannot turn a hung renderer into a passing test through a healthy Rust process. |
 
-## Claude UI exploration additions
+## Additional interface cases
 
-Interactive exploration of Claude for Mac **4.29.0 (260974)** identified the following additional cases. The [observation register](CLAUDE_UI_EXPLORATION.md) records the inspected controls, exploration limits and provenance. The reference build is newer than QuixiDesk's bundled renderer baseline. These cases are proposed requirements, not results from QuixiDesk or proof that every reference feature should be copied.
+The following additional cases specify interface behavior. They are requirements and do not establish that a feature is implemented or validated.
 
-**Core** means a correctness boundary for existing app concepts. **Conditional** applies when the feature is implemented/advertised. **Policy** requires an explicit product decision before the expected behavior becomes a gate. Every row has a priority and observable oracle. Fixture-based failure variants are designed from the inspected UI, not claimed as behavior exercised in Claude.
+**Core** means a correctness boundary for existing app concepts. **Conditional** applies when the feature is implemented/advertised. **Policy** requires an explicit product decision before the expected behavior becomes a gate. Every row has a priority and observable oracle. Fixture-based failure variants are designed from the inspected UI, not claimed as validated QuixiDesk behavior.
 
 ### Composer context and effort
 

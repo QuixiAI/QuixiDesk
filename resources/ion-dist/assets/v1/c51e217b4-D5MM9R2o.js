@@ -1,1 +1,0 @@
-var e={"hello claude how are you today":"/dev-loop/hello-claude.wav"};export{e as DEV_UTTERANCES};

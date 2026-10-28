@@ -1,1 +1,0 @@
-var e={type:"url",inputMode:"url",autoCapitalize:"none",autoCorrect:"off",spellCheck:!1,autoComplete:"off"},t={autoCapitalize:"none",autoCorrect:"off",spellCheck:!1,autoComplete:"off"};export{t as n,e as t};

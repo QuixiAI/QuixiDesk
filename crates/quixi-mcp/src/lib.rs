@@ -48,11 +48,11 @@ impl McpHost {
                     "command": "quixi-mcp-builtin",
                     "args": ["--computer-use"]
                 },
-                "claude-in-chrome": {
+                "quixi-in-chrome": {
                     "command": "quixi-mcp-builtin",
                     "args": ["--browser-use"]
                 },
-                "Claude Browser": {
+                "QuixiDesk Browser": {
                     "command": "quixi-mcp-builtin",
                     "args": ["--in-app-browser"]
                 },
@@ -96,11 +96,34 @@ impl McpHost {
                 .ok_or(())
             {
                 let mut changed = false;
+                // Application-owned browser adapters are identified by their
+                // executable and flags, rather than historical display names.
+                // External user-defined server names are never rewritten.
+                let renamed: Vec<_> = parsed.mcp_servers.iter().filter_map(|(name, entry)| {
+                    if !entry.command.contains("quixi-mcp-builtin") { return None; }
+                    let canonical = if entry.args.iter().any(|a| a == "--browser-use") { "quixi-in-chrome" }
+                        else if entry.args.iter().any(|a| a == "--in-app-browser") { "QuixiDesk Browser" }
+                        else { return None; };
+                    (name != canonical && !name.starts_with(&format!("{canonical} (")))
+                        .then(|| (name.clone(), canonical.to_string(), entry.clone()))
+                }).collect();
+                for (old, canonical, entry) in renamed {
+                    // Keep every customized adapter if two old names converge.
+                    let mut new = canonical.clone();
+                    let mut suffix = 2;
+                    while parsed.mcp_servers.contains_key(&new) {
+                        new = format!("{canonical} ({suffix})");
+                        suffix += 1;
+                    }
+                    parsed.mcp_servers.insert(new, entry);
+                    parsed.mcp_servers.remove(&old);
+                    changed = true;
+                }
                 for (name, arg) in [
                     ("quixi-workspace", "--workspace"),
                     ("computer-use", "--computer-use"),
-                    ("claude-in-chrome", "--browser-use"),
-                    ("Claude Browser", "--in-app-browser"),
+                    ("quixi-in-chrome", "--browser-use"),
+                    ("QuixiDesk Browser", "--in-app-browser"),
                     ("applescript", "--applescript"),
                     ("pdf", "--pdf"),
                     ("memory", "--memory"),
@@ -144,10 +167,10 @@ impl McpHost {
         Ok(())
     }
 
-    /// Exact UUID mapping for all internal MCP servers from `Claude.app` (`m0e` in `index.chunk-jPKPzV-P.js`).
+    /// Stable identifiers for application-owned MCP connections.
     pub fn internal_server_uuid(name: &str) -> Option<&'static str> {
         match name {
-            "claude-in-chrome" => Some("a8f3c7e2-4b9d-4f1a-8c3e-9d2a5b7f8e1c"),
+            "quixi-in-chrome" => Some("a8f3c7e2-4b9d-4f1a-8c3e-9d2a5b7f8e1c"),
             "office" | "office365" => Some("a1b2c3d4-e5f6-7890-abcd-ef1234567890"),
             "computer-use" => Some("b0a3b6e5-7ca0-462a-8e6f-bac087408b17"),
             "workspace" | "quixi-workspace" => Some("a05f2752-b0d0-4e5e-97f4-0c85957a5eb7"),
@@ -156,8 +179,8 @@ impl McpHost {
             "skills" => Some("5f89cf73-627e-46ed-893a-750e52d0a50b"),
             "cowork-onboarding" => Some("9105c415-238f-4baa-8790-396b4db1be09"),
             "dev-debug" => Some("7e5c02ee-f301-4a0f-918e-d324e58d554f"),
-            "Claude Preview" => Some("cda6af03-834c-4496-98d1-c0e6d52b99cf"),
-            "Claude Browser" => Some("bda6af03-834c-4496-98d1-c0e6d52b99ce"),
+            "QuixiDesk Preview" => Some("cda6af03-834c-4496-98d1-c0e6d52b99cf"),
+            "QuixiDesk Browser" => Some("bda6af03-834c-4496-98d1-c0e6d52b99ce"),
             "Framebuffer" => Some("10013aa5-ba71-498e-9a4e-10c1504a45c1"),
             "visualize" => Some("34c3fca1-1148-457c-893f-b629d47bc9d7"),
             "Window Halo" => Some("636ab6f5-a669-4adb-b932-26595ced3e89"),
@@ -173,8 +196,8 @@ impl McpHost {
             "ccd_view" => Some("6f4f70a3-2c58-4f8e-9d7a-3b1c5e2a9c41"),
             "ccd_settings" => Some("2b7c91e4-5d3a-4f6e-8c1b-9a0d7e3f5b62"),
             "terminal" => Some("b94dfe7c-203b-402b-9c46-4dcd448f0c3b"),
-            "Claude Code iOS Simulator" => Some("57ee2155-2a58-490d-a966-7ccf8491571c"),
-            "Claude Code Android Emulator" => Some("07f65f9d-33a1-4654-ba37-5f9e10aa5689"),
+            "QuixiDesk iOS Simulator" => Some("57ee2155-2a58-490d-a966-7ccf8491571c"),
+            "QuixiDesk Android Emulator" => Some("07f65f9d-33a1-4654-ba37-5f9e10aa5689"),
             "remote-devices" => Some("63c20b00-cc9f-44b6-b75f-b541980465b7"),
             "scheduled-tasks" => Some("13d93732-2129-4781-a001-691c71b69d63"),
             "applescript" => Some("d41f8a22-91c3-4e7b-8f12-3b5c9e7d1a40"),
@@ -503,7 +526,7 @@ impl McpHost {
             .collect()
     }
 
-    pub fn claude_in_chrome_tools() -> Vec<Value> {
+    pub fn browser_tools() -> Vec<Value> {
         let defs = [
             ("javascript_tool", "Execute JavaScript code in the context of the current page.", json!({
                 "type": "object",
@@ -696,14 +719,14 @@ impl McpHost {
                     "name": name,
                     "description": desc,
                     "inputSchema": schema,
-                    "_meta": { "anthropic/maxResultSizeChars": 60000 }
+                    "_meta": { "quixi/maxResultSizeChars": 60000 }
                 })
             })
             .collect()
     }
 
-    pub fn claude_browser_and_preview_tools() -> Vec<Value> {
-        let mut tools = Self::claude_in_chrome_tools();
+    pub fn browser_and_preview_tools() -> Vec<Value> {
+        let mut tools = Self::browser_tools();
         let extra = [
             ("tabs_context", "Get open tabs in the Browser pane.", json!({
                 "type": "object",
@@ -728,7 +751,7 @@ impl McpHost {
                 "properties": { "url": { "type": "string" } },
                 "required": ["url"]
             })),
-            ("preview_start", "Start a dev server by name from .claude/launch.json or open a URL in the Browser pane.", json!({
+            ("preview_start", "Start a dev server by name from .quixi/launch.json or open a URL in the Browser pane.", json!({
                 "type": "object",
                 "properties": { "name": { "type": "string" }, "url": { "type": "string" } }
             })),
@@ -995,13 +1018,13 @@ impl McpHost {
                 "--computer-use",
             ),
             (
-                "claude-in-chrome",
+                "quixi-in-chrome",
                 "Browser Use (In-App & Chrome)",
                 "Built-in in-app browser & Chrome automation: navigate, read_page, form_input, click, and inspect DOM.",
                 "--browser-use",
             ),
             (
-                "Claude Browser",
+                "QuixiDesk Browser",
                 "QuixiDesk In-App Browser & Preview",
                 "Interactive side-pane web browser and live local dev server preview inside QuixiDesk.",
                 "--in-app-browser",
@@ -1088,8 +1111,8 @@ impl McpHost {
     /// Returns all internal MCP servers (`isInternal: true`) matching `InternalMcpServerManager.getAppServersInfo()`
     pub fn list_internal_servers(&self) -> Vec<Value> {
         let cu_tools = Self::computer_use_tools();
-        let chrome_tools = Self::claude_in_chrome_tools();
-        let browser_tools = Self::claude_browser_and_preview_tools();
+        let chrome_tools = Self::browser_tools();
+        let browser_tools = Self::browser_and_preview_tools();
         let ws_tools = Self::workspace_tools();
         let o365_tools = Self::office365_tools();
 
@@ -1100,17 +1123,17 @@ impl McpHost {
                 cu_tools,
             ),
             (
-                "claude-in-chrome",
+                "quixi-in-chrome",
                 "a8f3c7e2-4b9d-4f1a-8c3e-9d2a5b7f8e1c",
                 chrome_tools,
             ),
             (
-                "Claude Browser",
+                "QuixiDesk Browser",
                 "bda6af03-834c-4496-98d1-c0e6d52b99ce",
                 browser_tools.clone(),
             ),
             (
-                "Claude Preview",
+                "QuixiDesk Preview",
                 "cda6af03-834c-4496-98d1-c0e6d52b99cf",
                 browser_tools,
             ),
@@ -1217,7 +1240,7 @@ impl McpHost {
                 ],
             ),
             (
-                "Claude Code iOS Simulator",
+                "QuixiDesk iOS Simulator",
                 "57ee2155-2a58-490d-a966-7ccf8491571c",
                 vec![
                     json!({ "name": "control", "description": "Control iOS Simulator (attach, launch, screenshot, inspect, tap, swipe, text, button, rotate, detach).", "inputSchema": { "type": "object", "properties": { "action": { "type": "string" }, "udid": { "type": "string" } }, "required": ["action"] } }),
@@ -1227,7 +1250,7 @@ impl McpHost {
                 ],
             ),
             (
-                "Claude Code Android Emulator",
+                "QuixiDesk Android Emulator",
                 "07f65f9d-33a1-4654-ba37-5f9e10aa5689",
                 vec![
                     json!({ "name": "control", "description": "Control Android Emulator (attach, launch, screenshot, inspect, tap, swipe, text, button, detach).", "inputSchema": { "type": "object", "properties": { "action": { "type": "string" } }, "required": ["action"] } }),
@@ -1350,8 +1373,8 @@ impl McpHost {
                 "ccd_settings",
                 "2b7c91e4-5d3a-4f6e-8c1b-9a0d7e3f5b62",
                 vec![
-                    json!({ "name": "get_settings", "description": "Read the user's Claude Code settings.", "inputSchema": { "type": "object", "properties": {} } }),
-                    json!({ "name": "set_setting", "description": "Change a Claude Code setting.", "inputSchema": { "type": "object", "properties": { "key": { "type": "string" }, "value": {} }, "required": ["key", "value"] } }),
+                    json!({ "name": "get_settings", "description": "Read the user's QuixiDesk settings.", "inputSchema": { "type": "object", "properties": {} } }),
+                    json!({ "name": "set_setting", "description": "Change a QuixiDesk setting.", "inputSchema": { "type": "object", "properties": { "key": { "type": "string" }, "value": {} }, "required": ["key", "value"] } }),
                 ],
             ),
             (
@@ -1410,8 +1433,8 @@ impl McpHost {
         for (name, entry) in entries {
             let tools = match name.as_str() {
                 "computer-use" => Self::computer_use_tools(),
-                "claude-in-chrome" => Self::claude_in_chrome_tools(),
-                "Claude Browser" | "Claude Preview" => Self::claude_browser_and_preview_tools(),
+                "quixi-in-chrome" => Self::browser_tools(),
+                "QuixiDesk Browser" | "QuixiDesk Preview" => Self::browser_and_preview_tools(),
                 "applescript" => Self::applescript_tools(),
                 "pdf" => Self::pdf_tools(),
                 "memory" => Self::memory_tools(),
@@ -2044,7 +2067,7 @@ impl McpHost {
             }
 
             // =========================================================================
-            // 3. BROWSER USE TOOLS (`claude-in-chrome`, `Claude Browser`, `Claude Preview`)
+            // 3. BROWSER USE TOOLS (`quixi-in-chrome`, `QuixiDesk Browser`, `QuixiDesk Preview`)
             // =========================================================================
             "tabs_context_mcp" | "tabs_context" => {
                 let create_if_empty = args
@@ -2347,7 +2370,7 @@ impl McpHost {
                         "results": [
                             { "name": "quixi-workspace", "description": "Workspace filesystem & shell", "connected": true },
                             { "name": "computer-use", "description": "Desktop screen & input automation", "connected": true },
-                            { "name": "claude-in-chrome", "description": "Browser automation & DOM inspection", "connected": true },
+                            { "name": "quixi-in-chrome", "description": "Browser automation & DOM inspection", "connected": true },
                             { "name": "github", "description": "GitHub repositories, PRs & issues", "connected": true },
                             { "name": "office365", "description": "Microsoft 365 Outlook, Calendar & OneDrive", "connected": true }
                         ]
@@ -2417,19 +2440,29 @@ impl McpHost {
                 }))
             }
             "store_memory" | "recall_memory" => {
-                let mem_file = self.config_path.parent().unwrap().join("memory/CLAUDE.md");
+                let mem_file = self.config_path.parent().unwrap().join("memory/MEMORY.md");
+                // Keep earlier application-owned notes available without binding
+                // the current format to a particular model product's filename.
+                let read_notes = || {
+                    if let Ok(notes) = fs::read_to_string(&mem_file) { return notes; }
+                    let mut files: Vec<_> = fs::read_dir(mem_file.parent().unwrap()).into_iter().flatten()
+                        .flatten().map(|entry| entry.path()).filter(|path| path.is_file() && path.extension().is_some_and(|ext| ext == "md")).collect();
+                    files.sort();
+                    files.iter().filter_map(|path| fs::read_to_string(path).ok()).collect::<Vec<_>>().join("\n")
+                };
                 if tool_name == "store_memory" {
                     let k = args.get("key").and_then(|v| v.as_str()).unwrap_or("note");
                     let v = args.get("value").and_then(|v| v.as_str()).unwrap_or("");
-                    let mut existing = fs::read_to_string(&mem_file).unwrap_or_default();
+                    let mut existing = read_notes();
                     existing.push_str(&format!("\n- **{}**: {}\n", k, v));
-                    let _ = fs::write(&mem_file, &existing);
+                    fs::create_dir_all(mem_file.parent().unwrap())?;
+                    fs::write(&mem_file, &existing)?;
                     Ok(json!({
                         "content": [{ "type": "text", "text": format!("Stored '{}' in memory.", k) }],
                         "isError": false
                     }))
                 } else {
-                    let existing = fs::read_to_string(&mem_file).unwrap_or_default();
+                    let existing = read_notes();
                     Ok(json!({
                         "content": [{ "type": "text", "text": if existing.is_empty() { "No stored memory notes yet.".to_string() } else { existing } }],
                         "isError": false
@@ -2471,7 +2504,7 @@ mod tests {
         let all_local = host.list_local_mcp_servers();
         assert!(all_local.len() >= 25);
 
-        // Verify computer-use and claude-in-chrome internal servers exist with exact UUIDs
+        // Verify computer-use and quixi-in-chrome internal servers exist with exact UUIDs
         let has_cu = all_local.iter().any(|s| {
             s["name"] == "computer-use"
                 && s["uuid"] == "b0a3b6e5-7ca0-462a-8e6f-bac087408b17"
@@ -2480,7 +2513,7 @@ mod tests {
         assert!(has_cu);
 
         let has_chrome = all_local.iter().any(|s| {
-            s["name"] == "claude-in-chrome"
+            s["name"] == "quixi-in-chrome"
                 && s["uuid"] == "a8f3c7e2-4b9d-4f1a-8c3e-9d2a5b7f8e1c"
                 && s["isInternal"] == true
         });
@@ -2515,9 +2548,9 @@ mod tests {
             .unwrap();
         assert_eq!(apps_res["isError"], false);
 
-        // 3. Browser Use tools (claude-in-chrome & Claude Browser)
+        // 3. Browser Use tools (quixi-in-chrome & QuixiDesk Browser)
         let tabs_res = host
-            .call_tool("claude-in-chrome", "tabs_context_mcp", &json!({ "createIfEmpty": true }), cwd)
+            .call_tool("quixi-in-chrome", "tabs_context_mcp", &json!({ "createIfEmpty": true }), cwd)
             .unwrap();
         assert_eq!(tabs_res["isError"], false);
         assert!(tabs_res["content"][0]["text"]
@@ -2526,7 +2559,7 @@ mod tests {
             .contains("tabGroupId"));
 
         let read_page_res = host
-            .call_tool("claude-in-chrome", "read_page", &json!({ "tabId": 1 }), cwd)
+            .call_tool("quixi-in-chrome", "read_page", &json!({ "tabId": 1 }), cwd)
             .unwrap();
         assert_eq!(read_page_res["isError"], false);
         assert!(read_page_res["content"][0]["text"]
@@ -2536,7 +2569,7 @@ mod tests {
 
         let batch_res = host
             .call_tool(
-                "claude-in-chrome",
+                "quixi-in-chrome",
                 "browser_batch",
                 &json!({
                     "actions": [
@@ -2548,5 +2581,60 @@ mod tests {
             )
             .unwrap();
         assert_eq!(batch_res["isError"], false);
+    }
+}
+
+#[cfg(test)]
+mod resource_migration_tests {
+    use super::*;
+    #[test]
+    fn owned_browser_names_migrate_without_changing_external_commands() {
+        let root = std::env::temp_dir().join(format!("quixi-mcp-migration-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir_all(&root).unwrap();
+        let input = json!({"mcpServers": {
+            "previous-browser-name":{"command":"quixi-mcp-builtin","args":["--browser-use"],"env":{"KEEP":"fixture"}},
+            "private-external-server":{"command":"external-tool","args":["--custom"],"env":{"KEEP":"external"}}
+        }});
+        fs::write(root.join("quixi_desktop_config.json"), serde_json::to_vec(&input).unwrap()).unwrap();
+        let host = McpHost::new_with_data_dir(&root);
+        let cfg = host.read_config();
+        assert!(!cfg.mcp_servers.contains_key("previous-browser-name"));
+        assert_eq!(cfg.mcp_servers["quixi-in-chrome"].env["KEEP"], "fixture");
+        assert_eq!(cfg.mcp_servers["private-external-server"].command, "external-tool");
+        assert_eq!(cfg.mcp_servers["private-external-server"].env["KEEP"], "external");
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn colliding_browser_names_keep_both_configurations_after_restart() {
+        let root = std::env::temp_dir().join(format!("quixi-mcp-collision-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir_all(&root).unwrap();
+        let input = json!({"mcpServers": {
+            "previous-browser-name":{"command":"quixi-mcp-builtin","args":["--browser-use"],"env":{"KEEP":"old"}},
+            "quixi-in-chrome":{"command":"quixi-mcp-builtin","args":["--browser-use"],"env":{"KEEP":"current"}}
+        }});
+        fs::write(root.join("quixi_desktop_config.json"), serde_json::to_vec(&input).unwrap()).unwrap();
+        for _ in 0..2 {
+            let host = McpHost::new_with_data_dir(&root);
+            let cfg = host.read_config();
+            assert_eq!(cfg.mcp_servers["quixi-in-chrome"].env["KEEP"], "current");
+            assert_eq!(cfg.mcp_servers["quixi-in-chrome (2)"].env["KEEP"], "old");
+            assert!(!cfg.mcp_servers.contains_key("quixi-in-chrome (3)"));
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn earlier_memory_notes_survive_the_current_filename() {
+        let root = std::env::temp_dir().join(format!("quixi-memory-migration-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir_all(root.join("memory")).unwrap();
+        let previous = root.join("memory/previous-notes.md");
+        fs::write(&previous, "KEEP-OLDER-NOTES").unwrap();
+        let host = McpHost::new_with_data_dir(&root);
+        let recalled = host.call_tool("memory", "recall_memory", &json!({}), &root).unwrap();
+        assert!(recalled["content"][0]["text"].as_str().unwrap().contains("KEEP-OLDER-NOTES"));
+        host.call_tool("memory", "store_memory", &json!({"key":"new","value":"KEEP-NEW-NOTE"}), &root).unwrap();
+        let saved = fs::read_to_string(root.join("memory/MEMORY.md")).unwrap();
+        assert!(saved.contains("KEEP-OLDER-NOTES") && saved.contains("KEEP-NEW-NOTE"));
+        assert_eq!(fs::read_to_string(previous).unwrap(), "KEEP-OLDER-NOTES");
+        fs::remove_dir_all(root).unwrap();
     }
 }

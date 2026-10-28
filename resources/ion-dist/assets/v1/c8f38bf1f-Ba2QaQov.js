@@ -1,1 +1,0 @@
-import{Lb as e}from"./shared-0-DDOOdL6P.js";import{Vv as t}from"./shared-182-BI1KJccu.js";var n=e(()=>/^[\s\p{Cf}]$/u);function r(e){let r=0;for(;r<e.length;){let i=String.fromCodePoint(e.codePointAt(r)??0);if(!n().test(i)&&!t(i))break;r+=i.length}return e.slice(r)}function i(e){return/^[/!]/.test(r(e))}export{r as n,i as t};

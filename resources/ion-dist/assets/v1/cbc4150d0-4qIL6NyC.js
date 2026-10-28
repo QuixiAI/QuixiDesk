@@ -1,1 +1,0 @@
-import{Ba as e,Ha as t}from"./vendor-frame-CnSY1sxv.js";function n({className:n,...r}){return t("div",{...r,className:e("text-center text-muted-as-secondary text-sm",n)})}function r({className:n,...r}){return t("div",{role:"alert",className:e("text-danger text-center text-sm",n),...r})}export{r as n,n as t};

@@ -1,1 +1,0 @@
-import{$f as J2,ip as J9,sp as K2}from"./shared-frame-6jtSkIit.js";import{Yh as e,rg as t,zr as n}from"./shared-25-DOWZRSlq.js";var r="__gb__1618169098";function i(){let $=J9(3),{account:i}=n(),a=i?.settings?.ccr_autofix_on_pr_create??void 0,o=e("ccr_autofix_ui"),s=t(r,o&&a===void 0),c=a??s,l=a!==void 0;return J2($,0,c,l)?K2($,0,c,l,{enabled:c,explicit:l}):$[2]}export{i as t};

@@ -1,1 +1,0 @@
-import{dh as e}from"./shared-0-DDOOdL6P.js";function t(t,n){e?.setAutoFixOwnPrsWanted?.(t,n)?.catch(()=>void 0)}export{t};

@@ -1,1 +1,0 @@
-function e(e){try{let t=JSON.parse(e);return!t||typeof t!="object"||t.suggest!==!0||t.setting!=="web_search"?null:{suggest:!0}}catch{return null}}export{e as t};

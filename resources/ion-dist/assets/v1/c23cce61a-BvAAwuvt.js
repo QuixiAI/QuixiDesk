@@ -1,1 +1,0 @@
-import{Ha as e}from"./vendor-frame-CnSY1sxv.js";import{Zf as J0,ad as t,ap as K0,ip as J9}from"./shared-frame-6jtSkIit.js";import{l as n}from"./vendor-intl-DYfox5Co.js";function r(){let $=J9(1);return J0($,0)?K0($,0,e(t,{variant:"neutral",size:"sm",children:e(n,{defaultMessage:"Ant only",id:"7QT7WO8Wtz"})})):$[0]}export{r as t};

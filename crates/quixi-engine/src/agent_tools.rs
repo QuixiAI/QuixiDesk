@@ -394,8 +394,8 @@ pub fn execute(
 /// aliases and UUIDs share the same gate; unknown tools require confirmation.
 fn mcp_tool_needs_confirm(server: &str, tool: &str) -> bool {
     let server = server.to_ascii_lowercase();
-    let gui_names = ["computer-use", "browser-use", "claude-in-chrome",
-        "Claude Browser", "Claude Preview", "Framebuffer", "Window Halo"];
+    let gui_names = ["computer-use", "browser-use", "quixi-in-chrome",
+        "QuixiDesk Browser", "QuixiDesk Preview", "Framebuffer", "Window Halo"];
     let server_is_gui = gui_names.iter().any(|name| {
         server == name.to_ascii_lowercase()
             || McpHost::internal_server_uuid(name)
@@ -499,7 +499,7 @@ mod regression_tests {
     use super::*;
     #[test]
     fn gui_actions_and_aliases_require_permission() {
-        for server in ["computer-use", "COMPUTER-USE", "b0a3b6e5-7ca0-462a-8e6f-bac087408b17", "Claude Browser", "Framebuffer"] {
+        for server in ["computer-use", "COMPUTER-USE", "b0a3b6e5-7ca0-462a-8e6f-bac087408b17", "QuixiDesk Browser", "Framebuffer"] {
             for tool in ["left_click", "triple_click", "middle_click", "left_click_drag", "new_action"] {
                 assert!(mcp_tool_needs_confirm(server, tool), "{server}/{tool}");
             }

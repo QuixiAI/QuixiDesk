@@ -1,1 +1,0 @@
-import{Fl as e,Il as t,Nl as n}from"./shared-104-CTONUSaz.js";function r(r){return n(r)?"cancelled":t(r)?"running":e(r)?"failed":"succeeded"}export{r as t};

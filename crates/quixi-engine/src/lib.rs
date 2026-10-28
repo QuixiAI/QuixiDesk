@@ -193,8 +193,8 @@ impl QuixiEngine {
                 "chromeExtensionEnabled": true,
                 "coworkPreferredBrowser": "built_in",
                 "launchEnabled": true,
-                "claudeIosSimulatorAccessEnabled": true,
-                "claudeAndroidEmulatorAccessEnabled": true,
+                "iosSimulatorAccessEnabled": true,
+                "androidEmulatorAccessEnabled": true,
                 "bypassPermissionsModeEnabled": true,
                 "menuBarEnabled": true,
             })),
@@ -600,12 +600,12 @@ impl QuixiEngine {
     // CoworkMemory, CoworkArtifacts, CoworkScheduledTasks, CoworkStorage
     // =========================================================================
     pub fn read_global_memory(&self) -> String {
-        let p = self.data_dir.join("memory/CLAUDE.md");
+        let p = self.data_dir.join("memory/MEMORY.md");
         fs::read_to_string(p).unwrap_or_default()
     }
 
     pub fn write_global_memory(&self, content: &str) -> bool {
-        let p = self.data_dir.join("memory/CLAUDE.md");
+        let p = self.data_dir.join("memory/MEMORY.md");
         fs::write(p, content).is_ok()
     }
 
@@ -760,13 +760,13 @@ impl QuixiEngine {
             "scheduledTask": task
         });
         self.emit_eipc(
-            "claude.web",
+            "quixi.web",
             "CoworkScheduledTasks",
             "onScheduledTaskEvent",
             ev_payload.clone(),
         );
         self.emit_eipc(
-            "claude.web",
+            "quixi.web",
             "CCDScheduledTasks",
             "onScheduledTaskEvent",
             ev_payload,
@@ -785,13 +785,13 @@ impl QuixiEngine {
                 "scheduledTask": { "id": id }
             });
             self.emit_eipc(
-                "claude.web",
+                "quixi.web",
                 "CoworkScheduledTasks",
                 "onScheduledTaskEvent",
                 ev_payload.clone(),
             );
             self.emit_eipc(
-                "claude.web",
+                "quixi.web",
                 "CCDScheduledTasks",
                 "onScheduledTaskEvent",
                 ev_payload,
@@ -821,13 +821,13 @@ impl QuixiEngine {
                 "scheduledTask": task
             });
             self.emit_eipc(
-                "claude.web",
+                "quixi.web",
                 "CoworkScheduledTasks",
                 "onScheduledTaskEvent",
                 ev_payload.clone(),
             );
             self.emit_eipc(
-                "claude.web",
+                "quixi.web",
                 "CCDScheduledTasks",
                 "onScheduledTaskEvent",
                 ev_payload,
@@ -886,8 +886,8 @@ impl QuixiEngine {
         json!({
             "computedAt": now_ms,
             "runtime": {
-                "claudeCodeVersionCount": 1,
-                "claudeCodeBytes": 1024 * 1024 * 12
+                "workspaceVersionCount": 1,
+                "workspaceBytes": 1024 * 1024 * 12
             },
             "app": {
                 "webCacheBytes": 1024 * 512,
@@ -1007,6 +1007,27 @@ impl QuixiEngine {
         } else {
             serde_json::from_slice(body).unwrap_or_else(|_| json!({}))
         };
+
+        if clean_path == "/api/quixi/workspace/inspect" && method == "POST" {
+            let path = PathBuf::from(body_json["path"].as_str().unwrap_or(""));
+            if !path.is_absolute() { return Self::json_resp(400, &json!({"error":"Folder path must be absolute."})); }
+            return match path.canonicalize() {
+                Ok(path) if path.is_absolute() && path.is_dir() => Self::json_resp(200, &json!({"exists":true,"path":path.to_string_lossy()})),
+                _ => Self::json_resp(400, &json!({"error":"Enter an existing absolute directory."})),
+            };
+        }
+        if clean_path == "/api/quixi/workspace/read" && method == "POST" {
+            let path = PathBuf::from(body_json["path"].as_str().unwrap_or(""));
+            if !path.is_absolute() { return Self::json_resp(400, &json!({"error":"File path must be absolute."})); }
+            return match fs::metadata(&path).and_then(|meta| {
+                if !meta.is_file() { return Err(std::io::Error::other("Not a regular file")); }
+                if meta.len() > 1_000_000 { return Err(std::io::Error::other("Preview is limited to 1 MB")); }
+                fs::read_to_string(&path)
+            }) {
+                Ok(contents) => Self::json_resp(200, &json!({"contents":contents,"path":path.to_string_lossy()})),
+                Err(error) => Self::json_resp(400, &json!({"error":format!("Cannot read file: {error}")})),
+            };
+        }
 
         if clean_path == "/api/quixi/storage/status" {
             return Self::json_resp(200, &self.session_storage_status());
@@ -1827,7 +1848,7 @@ impl QuixiEngine {
         }
         for sid in updated_agent_ids {
             self.emit_eipc(
-                "claude.web",
+                "quixi.web",
                 "LocalAgentModeSessions",
                 "onEvent",
                 json!({
@@ -1852,7 +1873,7 @@ impl QuixiEngine {
         }
         for sid in updated_code_ids {
             self.emit_eipc(
-                "claude.web",
+                "quixi.web",
                 "LocalSessions",
                 "onEvent",
                 json!({
@@ -2155,7 +2176,7 @@ impl QuixiEngine {
             });
             if fresh_calls.iter().any(|fresh| *fresh) { on_message(assistant_msg.clone()); }
             // The provider conversation needs the real OpenAI tool-call shape, not our
-            // Claude-style transcript blocks: assistant.tool_calls + role=tool results.
+            // Provider transcript blocks: assistant.tool_calls + role=tool results.
             let mut provider_tool_calls: Vec<Value> = Vec::new();
             for call in &turn.tool_calls {
                 provider_tool_calls.push(json!({
@@ -2339,7 +2360,7 @@ impl QuixiEngine {
             .insert(session_id.clone(), sess);
 
         self.emit_eipc(
-            "claude.web",
+            "quixi.web",
             "LocalAgentModeSessions",
             "onEvent",
             json!({
@@ -2456,7 +2477,7 @@ impl QuixiEngine {
             if cancelled.load(Ordering::SeqCst) { return; }
 
             eng.emit_eipc(
-                "claude.web",
+                "quixi.web",
                 "LocalAgentModeSessions",
                 "onEvent",
                 json!({
@@ -2471,7 +2492,7 @@ impl QuixiEngine {
                 obj.insert("isReplay".to_string(), json!(true));
             }
             eng.emit_eipc(
-                "claude.web",
+                "quixi.web",
                 "LocalAgentModeSessions",
                 "onEvent",
                 json!({
@@ -2482,7 +2503,7 @@ impl QuixiEngine {
                 }),
             );
             eng.emit_eipc(
-                "claude.web",
+                "quixi.web",
                 "LocalAgentModeSessions",
                 "onEvent",
                 json!({
@@ -2491,9 +2512,9 @@ impl QuixiEngine {
                 }),
             );
 
-            // 1. Emit Claude.app `stream_event` -> `message_start` & `content_block_start`
+            // 1. Emit workspace `stream_event` -> `message_start` & `content_block_start`
             eng.emit_eipc(
-                "claude.web",
+                "quixi.web",
                 "LocalAgentModeSessions",
                 "onEvent",
                 json!({
@@ -2527,7 +2548,7 @@ impl QuixiEngine {
                 }),
             );
             eng.emit_eipc(
-                "claude.web",
+                "quixi.web",
                 "LocalAgentModeSessions",
                 "onEvent",
                 json!({
@@ -2591,7 +2612,7 @@ impl QuixiEngine {
                         StreamChunk::Thinking(thinking) => ("thinking_delta", "thinking", thinking),
                     };
                     eng_emit.emit_eipc(
-                        "claude.web",
+                        "quixi.web",
                         "LocalAgentModeSessions",
                         "onEvent",
                         json!({
@@ -2626,7 +2647,7 @@ impl QuixiEngine {
                         .unwrap_or(false);
                     if has_tool_use {
                         eng_tools.emit_eipc(
-                            "claude.web",
+                            "quixi.web",
                             "LocalAgentModeSessions",
                             "onEvent",
                             json!({
@@ -2647,7 +2668,7 @@ impl QuixiEngine {
                         eng_tools.persist_agent_session(sess);
                     }
                     eng_tools.emit_eipc(
-                        "claude.web",
+                        "quixi.web",
                         "LocalAgentModeSessions",
                         "onEvent",
                         json!({
@@ -2664,7 +2685,7 @@ impl QuixiEngine {
 
             // 3. Emit `content_block_stop`
             eng.emit_eipc(
-                "claude.web",
+                "quixi.web",
                 "LocalAgentModeSessions",
                 "onEvent",
                 json!({
@@ -2726,7 +2747,7 @@ impl QuixiEngine {
 
 
             eng.emit_eipc(
-                "claude.web",
+                "quixi.web",
                 "LocalAgentModeSessions",
                 "onEvent",
                 json!({
@@ -2737,7 +2758,7 @@ impl QuixiEngine {
                 }),
             );
             eng.emit_eipc(
-                "claude.web",
+                "quixi.web",
                 "LocalAgentModeSessions",
                 "onEvent",
                 json!({
@@ -2755,7 +2776,7 @@ impl QuixiEngine {
                 }),
             );
             eng.emit_eipc(
-                "claude.web",
+                "quixi.web",
                 "LocalAgentModeSessions",
                 "onEvent",
                 json!({
@@ -2766,7 +2787,7 @@ impl QuixiEngine {
                 }),
             );
             eng.emit_eipc(
-                "claude.web",
+                "quixi.web",
                 "LocalAgentModeSessions",
                 "onEvent",
                 json!({
@@ -2774,7 +2795,7 @@ impl QuixiEngine {
                     "sessionId": sid
                 }),
             );
-            eng.emit_eipc("claude.web", "LocalAgentModeSessions", "onEvent",
+            eng.emit_eipc("quixi.web", "LocalAgentModeSessions", "onEvent",
                 json!({"type":"close", "sessionId":sid, "code":0}));
 
         });
@@ -2866,7 +2887,7 @@ impl QuixiEngine {
             .or_default();
 
         self.emit_eipc(
-            "claude.web",
+            "quixi.web",
             "LocalSessions",
             "onEvent",
             json!({
@@ -2876,7 +2897,7 @@ impl QuixiEngine {
             }),
         );
         self.emit_eipc(
-            "claude.web",
+            "quixi.web",
             "LocalSessions",
             "onEvent",
             json!({
@@ -2966,7 +2987,7 @@ impl QuixiEngine {
             if cancelled.load(Ordering::SeqCst) { return; }
 
             eng.emit_eipc(
-                "claude.web",
+                "quixi.web",
                 "LocalSessions",
                 "onEvent",
                 json!({
@@ -2981,7 +3002,7 @@ impl QuixiEngine {
                 obj.insert("isReplay".to_string(), json!(true));
             }
             eng.emit_eipc(
-                "claude.web",
+                "quixi.web",
                 "LocalSessions",
                 "onEvent",
                 json!({
@@ -2994,7 +3015,7 @@ impl QuixiEngine {
 
             // 1. Emit `stream_event` -> `message_start` & `content_block_start`
             eng.emit_eipc(
-                "claude.web",
+                "quixi.web",
                 "LocalSessions",
                 "onEvent",
                 json!({
@@ -3027,7 +3048,7 @@ impl QuixiEngine {
                 }),
             );
             eng.emit_eipc(
-                "claude.web",
+                "quixi.web",
                 "LocalSessions",
                 "onEvent",
                 json!({
@@ -3086,7 +3107,7 @@ impl QuixiEngine {
                         StreamChunk::Thinking(thinking) => ("thinking_delta", "thinking", thinking),
                     };
                     eng_emit.emit_eipc(
-                        "claude.web",
+                        "quixi.web",
                         "LocalSessions",
                         "onEvent",
                         json!({
@@ -3119,7 +3140,7 @@ impl QuixiEngine {
                         eng_tools.persist_code_session(session);
                     }
                     eng_tools.emit_eipc(
-                        "claude.web",
+                        "quixi.web",
                         "LocalSessions",
                         "onEvent",
                         json!({
@@ -3134,7 +3155,7 @@ impl QuixiEngine {
             if cancelled.load(Ordering::SeqCst) { return; }
 
             eng.emit_eipc(
-                "claude.web",
+                "quixi.web",
                 "LocalSessions",
                 "onEvent",
                 json!({
@@ -3199,7 +3220,7 @@ impl QuixiEngine {
             }
 
             eng.emit_eipc(
-                "claude.web",
+                "quixi.web",
                 "LocalSessions",
                 "onEvent",
                 json!({
@@ -3209,7 +3230,7 @@ impl QuixiEngine {
                 }),
             );
             eng.emit_eipc(
-                "claude.web",
+                "quixi.web",
                 "LocalSessions",
                 "onEvent",
                 json!({
@@ -3226,7 +3247,7 @@ impl QuixiEngine {
                 }),
             );
             eng.emit_eipc(
-                "claude.web",
+                "quixi.web",
                 "LocalSessions",
                 "onEvent",
                 json!({
@@ -3236,7 +3257,7 @@ impl QuixiEngine {
                 }),
             );
             eng.emit_eipc(
-                "claude.web",
+                "quixi.web",
                 "LocalSessions",
                 "onEvent",
                 json!({
@@ -3246,7 +3267,7 @@ impl QuixiEngine {
                 }),
             );
             eng.emit_eipc(
-                "claude.web",
+                "quixi.web",
                 "LocalSessions",
                 "onEvent",
                 json!({

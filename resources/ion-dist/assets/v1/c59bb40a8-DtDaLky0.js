@@ -1,1 +1,0 @@
-import{Ha as e,Va as t}from"./vendor-frame-CnSY1sxv.js";import{Is as n}from"./shared-78-D5Fw2h0a.js";import{p as r}from"./vendor-intl-DYfox5Co.js";var i="Claude Tag";function a(){let e=r();return n({id:"1ov2v8r",intl:e}).trim()||i}function o(){return e(t,{children:a()})}export{a as n,o as t};

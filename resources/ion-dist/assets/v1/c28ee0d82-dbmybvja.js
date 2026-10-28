@@ -1,1 +1,0 @@
-import{Yh as e}from"./shared-25-DOWZRSlq.js";import{dh as t}from"./shared-0-DDOOdL6P.js";import{zc as n}from"./shared-28-DNYlf4wu.js";function r(){return e("epitaxy_pr_panel")&&!!t?.getPrOverview}var i="epitaxy-open-prs-in-browser";function a(){return n(i,!1)}export{r as n,a as t};

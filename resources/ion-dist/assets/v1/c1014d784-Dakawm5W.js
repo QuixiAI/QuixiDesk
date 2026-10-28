@@ -1,1 +1,0 @@
-import{Qf as J1,ip as J9,op as K1}from"./shared-frame-6jtSkIit.js";import{Br as e}from"./shared-25-DOWZRSlq.js";function t(){let $=J9(2),t=e()?.activeOrganization?.capabilities??[];return J1($,0,t)?K1($,0,t,t.includes("raven")&&!t.includes("single_seat_team")):$[1]}export{t};

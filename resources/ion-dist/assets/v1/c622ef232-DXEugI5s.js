@@ -1,1 +1,0 @@
-import{Qf as J1,ip as J9,op as K1}from"./shared-frame-6jtSkIit.js";import{Is as e}from"./shared-78-D5Fw2h0a.js";import{p as t}from"./vendor-intl-DYfox5Co.js";function n(){let $=J9(2),n=t();return J1($,0,n)?K1($,0,n,(t,r)=>e(r===void 0?{id:t,intl:n}:{id:t,intl:n,dangerouslyVisiblePublicValues:r})):$[1]}export{n as t};

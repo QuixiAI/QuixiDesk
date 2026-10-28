@@ -1,1 +1,0 @@
-import{fo as e}from"./vendor-frame-CnSY1sxv.js";import{_ as t,r as n}from"./vendor-motion-DlXQpU4V.js";function r(){let r=n(),{reducedMotion:i}=e(t);return i==="never"?!1:i==="always"||r}export{r as t};

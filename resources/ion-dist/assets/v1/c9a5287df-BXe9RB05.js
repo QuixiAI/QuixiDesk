@@ -1,1 +1,0 @@
-function e(e){return Object.values(e?.seat_tier_quantities??{}).reduce((e,t)=>e+(t??0),0)}function t(e,t,n){return t&&!t.unlimited_members?Math.min(e,Math.max(t.members_limit-n,0)):e}export{e as n,t};

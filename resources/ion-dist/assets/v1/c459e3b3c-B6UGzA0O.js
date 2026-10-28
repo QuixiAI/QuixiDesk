@@ -1,1 +1,0 @@
-import{r as e,t}from"./cad5f82e8-Bre4IVum.js";function n(n){return e(n)===null?n.startsWith("*.")?t(n.slice(2)):t(n):!0}function r(t){return e(t)??t}export{r as n,n as t};

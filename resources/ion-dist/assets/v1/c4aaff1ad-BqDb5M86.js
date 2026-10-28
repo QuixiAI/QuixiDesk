@@ -1,1 +1,0 @@
-import{Ha as e}from"./vendor-frame-CnSY1sxv.js";import{cp as K3,ep as J3,ip as J9}from"./shared-frame-6jtSkIit.js";import{F as t}from"./shared-19-DIKJVT7c.js";function n(n){let $=J9(4),{isOpen:r,onClose:i,space:a}=n;return J3($,0,r,i,a)?K3($,0,r,i,a,e(t,{isOpen:r,onClose:i,space:a})):$[3]}export{n as FreePlanArchiveDialog};
