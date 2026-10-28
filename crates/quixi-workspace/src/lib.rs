@@ -719,7 +719,7 @@ mod tests {
 
     #[test]
     fn test_file_index_git_and_shell_engines() {
-        let root = Path::new("/Users/eric/quixi-desk");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap();
         let files = FileIndexEngine::list_files(root, Some("Cargo.toml"), 20);
         assert!(!files.is_empty());
 

@@ -2480,7 +2480,7 @@ mod tests {
         });
         assert!(has_chrome);
 
-        let cwd = Path::new("/Users/eric/quixi-desk");
+        let cwd = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap();
 
         // 1. Workspace tools
         let read_res = host
