@@ -225,7 +225,7 @@ impl EipcRouter {
             }),
             ("DesktopInfo", "getDefaultBrowserName") => json!("Safari"),
             ("DesktopInfo", "getSystemInfo") => json!({
-                "app_version": "3.6556.4",
+                "app_version": "3.6556.5",
                 "os_version": "15.0",
                 "os_pretty_name": "macOS Sequoia",
                 "cpu_model": "Apple Silicon",
@@ -437,7 +437,7 @@ impl EipcRouter {
                 "isNestBuild": false,
                 "commitTimestamp": "2026-10-26T00:00:00.000Z",
                 "buildType": "prod",
-                "appVersion": "3.6556.4"
+                "appVersion": "3.6556.5"
             }),
             ("AboutWindow", "ancientJournal") => Value::Null,
 

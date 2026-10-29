@@ -162,7 +162,7 @@ impl QuixiEngine {
             "scope": "user",
             "enabled": true,
             "description": "Built-in QuixiDesk workspace, git, and document skills plugin",
-            "version": "3.6556.4",
+            "version": "3.6556.5",
             "skills": [],
             "commands": [],
             "mcpServers": [],
@@ -1348,7 +1348,7 @@ impl QuixiEngine {
                                         "available": true,
                                         "enabled": true,
                                         "description": "Built-in QuixiDesk workspace, git, and document skills plugin",
-                                        "version": "3.6556.4"
+                                        "version": "3.6556.5"
                                     }
                                 ]
                             }

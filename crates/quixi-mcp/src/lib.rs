@@ -1089,7 +1089,7 @@ impl McpHost {
                         "dxt_version": "0.1",
                         "name": id,
                         "display_name": display_name,
-                        "version": "3.6556.4",
+                        "version": "3.6556.5",
                         "description": desc,
                         "author": {
                             "name": "QuixiDesk"
@@ -1527,7 +1527,7 @@ impl McpHost {
                 "params": {
                     "protocolVersion": "2025-11-25",
                     "capabilities": {},
-                    "clientInfo": { "name": "QuixiDesk", "version": "3.6556.4" }
+                    "clientInfo": { "name": "QuixiDesk", "version": "3.6556.5" }
                 }
             });
             let notify_init = json!({
