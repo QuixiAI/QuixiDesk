@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 pub const TOOL_BASH: &str = "Bash";
 pub const TOOL_READ: &str = "Read";
 pub const TOOL_LIST: &str = "ListDirectory";
+pub const TOOL_GREP: &str = "Grep";
 pub const TOOL_WRITE: &str = "Write";
 pub const TOOL_EDIT: &str = "Edit";
 pub const TOOL_WEB_FETCH: &str = "WebFetch";
@@ -65,6 +66,22 @@ pub fn tool_schemas() -> Value {
                         "path": {"type": "string", "description": "Directory path; relative paths resolve against the selected workspace. Defaults to '.' ."}
                     },
                     "required": []
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": TOOL_GREP,
+                "description": "Search text files in the workspace for an exact or case-insensitive substring and return matching file paths and line numbers. Available in Manual mode without approval. Prefer Grep over reading large files blindly.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string", "description": "Substring or symbol to search for." },
+                        "path": { "type": "string", "description": "Optional directory or file path within the workspace (defaults to '.')." },
+                        "case_sensitive": { "type": "boolean", "description": "Match case exactly (default false)." }
+                    },
+                    "required": ["query"]
                 }
             }
         },
@@ -155,7 +172,92 @@ pub fn requires_approval(name: &str, input: &Value, mode: &str) -> bool {
 }
 
 pub fn permission_context(mode: &str) -> String {
-    format!("Current permission mode: {mode}. ListDirectory and Read can inspect the selected workspace without approval in every mode. Use them to explore relevant project files. Write, Edit, Bash and other action tools are available: in Manual mode, requesting an action pauses the task and shows the user an approval card; continue when they approve. Do not claim editing tools are unavailable or ask the user to repeat their request or change settings. Allow file edits permits Write and Edit for this task; shell commands and other actions still ask. Auto permits actions without individual approval. If the user denies an action, do not retry or bypass it. A denied shell command does not mean workspace reads are blocked.")
+    format!("Current permission mode: {mode}. ListDirectory, Grep, and Read can inspect the selected workspace without approval in every mode. Use them to explore relevant project files. Write, Edit, Bash and other action tools are available: in Manual mode, requesting an action pauses the task and shows the user an approval card; continue when they approve. Do not claim editing tools are unavailable or ask the user to repeat their request or change settings. Allow file edits permits Write and Edit for this task; shell commands and other actions still ask. Auto permits actions without individual approval. If the user denies an action, do not retry or bypass it. A denied shell command does not mean workspace reads are blocked.")
+}
+
+fn grep_workspace(target: &Path, root: &Path, query: &str, case_sensitive: bool) -> (String, bool) {
+    if query.is_empty() {
+        return ("Query must not be empty.".to_string(), true);
+    }
+    let needle = if case_sensitive {
+        query.to_string()
+    } else {
+        query.to_lowercase()
+    };
+    let mut matches = Vec::new();
+    let max_matches = 120usize;
+
+    let search_file = |file_path: &Path, matches: &mut Vec<String>| {
+        if matches.len() >= max_matches {
+            return;
+        }
+        let Ok(meta) = std::fs::symlink_metadata(file_path) else {
+            return;
+        };
+        if meta.file_type().is_symlink() || !meta.is_file() || meta.len() > 2_000_000 {
+            return;
+        }
+        let Ok(text) = std::fs::read_to_string(file_path) else {
+            return;
+        };
+        let display = file_path
+            .strip_prefix(root)
+            .unwrap_or(file_path)
+            .to_string_lossy();
+        for (idx, line) in text.lines().enumerate() {
+            let hit = if case_sensitive {
+                line.contains(&needle)
+            } else {
+                line.to_lowercase().contains(&needle)
+            };
+            if hit {
+                let snippet: String = line.chars().take(220).collect();
+                matches.push(format!("{}:{}: {}", display, idx + 1, snippet));
+                if matches.len() >= max_matches {
+                    break;
+                }
+            }
+        }
+    };
+
+    if target.is_file() {
+        search_file(target, &mut matches);
+    } else if target.is_dir() {
+        let walker = ignore::WalkBuilder::new(target)
+            .hidden(false)
+            .git_ignore(true)
+            .follow_links(false)
+            .max_depth(Some(10))
+            .build();
+        for entry in walker.flatten() {
+            if matches.len() >= max_matches {
+                break;
+            }
+            let p = entry.path();
+            if p.components().any(|c| {
+                let s = c.as_os_str();
+                s == ".git" || s == "node_modules" || s == "target" || s == "dist"
+            }) {
+                continue;
+            }
+            if p.is_file() {
+                search_file(p, &mut matches);
+            }
+        }
+    } else {
+        return (format!("Cannot search {}: path does not exist", target.display()), true);
+    }
+
+    if matches.is_empty() {
+        (format!("No matches for `{query}`."), false)
+    } else {
+        let truncated_note = if matches.len() >= max_matches {
+            format!("\n\n[Showing first {max_matches} matches]")
+        } else {
+            String::new()
+        };
+        (format!("{}{}", matches.join("\n"), truncated_note), false)
+    }
 }
 
 fn list_directory(target: &Path) -> (String, bool) {
@@ -240,6 +342,7 @@ pub fn validate_input(name: &str, input: &Value) -> Result<(), String> {
             Some("string") => value.is_string(),
             Some("object") => value.is_object(),
             Some("integer") => value.as_u64().is_some(),
+            Some("boolean") => value.is_boolean(),
             _ => true,
         };
         if !valid { return Err(format!("Invalid argument `{key}`.")); }
@@ -247,21 +350,46 @@ pub fn validate_input(name: &str, input: &Value) -> Result<(), String> {
     Ok(())
 }
 
-pub fn repeatable_observation(name:&str,input:&Value)->bool {
-    matches!(name,TOOL_READ|TOOL_LIST|TOOL_WEB_FETCH) || (name==TOOL_MCP_CALL && !mcp_tool_needs_confirm(input["server"].as_str().unwrap_or_default(),input["tool"].as_str().unwrap_or_default()))
+pub fn repeatable_observation(name: &str, input: &Value) -> bool {
+    matches!(name, TOOL_READ | TOOL_LIST | TOOL_GREP | TOOL_WEB_FETCH)
+        || (name == TOOL_MCP_CALL
+            && !mcp_tool_needs_confirm(
+                input["server"].as_str().unwrap_or_default(),
+                input["tool"].as_str().unwrap_or_default(),
+            ))
 }
 
-/// Cache results so repeated calls (including calls in the same batch) cannot act twice.
+/// Cache results so accidental duplicate calls in the same state cannot act twice,
+/// while invalidating cached command results whenever workspace files are modified.
 #[derive(Default)]
 pub struct ToolResults(std::collections::HashMap<String, (String, bool)>);
 impl ToolResults {
-    fn cacheable(name: &str, input: &Value) -> bool { !repeatable_observation(name,input) }
-    pub fn contains(&self, name: &str, input: &Value) -> bool { Self::cacheable(name,input) && self.0.contains_key(&format!("{name}|{input}")) }
+    pub fn is_file_mutation(name: &str) -> bool {
+        matches!(name, TOOL_WRITE | TOOL_EDIT)
+    }
+    fn cacheable(name: &str, input: &Value) -> bool {
+        !repeatable_observation(name, input)
+    }
+    pub fn contains(&self, name: &str, input: &Value) -> bool {
+        Self::cacheable(name, input) && self.0.contains_key(&format!("{name}|{input}"))
+    }
     pub fn run(&mut self, name: &str, input: &Value, action: impl FnOnce() -> (String, bool)) -> (String, bool) {
-        // Reads are observations, not effects: an intervening mutation may change them.
-        if !Self::cacheable(name,input) { return action(); }
+        // Reads/searches are observations, not effects: an intervening mutation may change them.
+        if !Self::cacheable(name, input) {
+            return action();
+        }
         let key = format!("{name}|{input}");
-        self.0.entry(key).or_insert_with(action).clone()
+        if let Some(existing) = self.0.get(&key) {
+            return existing.clone();
+        }
+        let out = action();
+        // A successful file edit/write changes workspace state, so clear earlier cached Bash/Edit checks
+        // while recording this exact mutation so an immediate duplicate in the same batch won't re-run.
+        if Self::is_file_mutation(name) && !out.1 {
+            self.0.clear();
+        }
+        self.0.insert(key, out.clone());
+        out
     }
 }
 
@@ -325,6 +453,15 @@ pub fn execute_cancellable(name: &str,input: &Value,cwd: &str,permission_mode: &
         TOOL_LIST => {
             let raw = input.get("path").and_then(Value::as_str).unwrap_or(".");
             list_directory(&resolve_path(raw, cwd))
+        }
+        TOOL_GREP => {
+            let query = input.get("query").and_then(Value::as_str).unwrap_or("");
+            let raw = input.get("path").and_then(Value::as_str).unwrap_or(".");
+            let case_sensitive = input
+                .get("case_sensitive")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            grep_workspace(&resolve_path(raw, cwd), Path::new(cwd), query, case_sensitive)
         }
         TOOL_READ => {
             let raw = input
@@ -573,9 +710,19 @@ mod regression_tests {
         assert!(!results.run("Edit", &edit, || execute("Edit", &edit, cwd, "auto", &host)).1);
         assert!(!results.contains("Read", &read));
         assert!(results.run("Read", &read, || execute("Read", &read, cwd, "auto", &host)).0.contains("BETA"));
-        results.run("Write", &write, || panic!("do not repeat mutation"));
+        // Immediate duplicate of the just-run Edit stays deduplicated, while an earlier Bash command can re-run fresh after Edit.
+        results.run("Edit", &edit, || panic!("do not repeat identical mutation immediately"));
         assert_eq!(std::fs::read_to_string(file).unwrap(), "BETA");
         std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn bash_commands_rerun_fresh_after_file_edits() {
+        let mut results = ToolResults::default();
+        let check = json!({"command": "cargo check"});
+        assert_eq!(results.run("Bash", &check, || ("compile error".into(), true)), ("compile error".into(), true));
+        assert_eq!(results.run("Bash", &check, || panic!("same state must reuse cached result")), ("compile error".into(), true));
+        assert!(!results.run("Edit", &json!({"file_path":"src/lib.rs","old_string":"a","new_string":"b"}), || ("Edited src/lib.rs".into(), false)).1);
+        assert_eq!(results.run("Bash", &check, || ("compiled cleanly".into(), false)), ("compiled cleanly".into(), false));
     }
     #[test]
     fn invalid_arguments_are_rejected_before_execution() {

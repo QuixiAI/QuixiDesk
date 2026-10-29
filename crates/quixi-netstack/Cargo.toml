@@ -9,5 +9,6 @@ serde.workspace = true
 serde_json.workspace = true
 dirs.workspace = true
 url.workspace = true
+uuid.workspace = true
 quixi-platform.workspace = true
 quixi-proto.workspace = true

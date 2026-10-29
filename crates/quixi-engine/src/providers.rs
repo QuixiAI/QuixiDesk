@@ -1038,15 +1038,26 @@ impl ProviderManager {
     }
 
     pub fn get_public_state(&self) -> Value {
+        let resolved_model = self.resolve_connected_model(None);
         let st = self.state.read();
         let configured_count = st.providers.iter().filter(|p| p.configured).count();
+        let active_provider = if configured_count > 0 {
+            st.active_provider.clone()
+        } else {
+            String::new()
+        };
+        let active_model = if configured_count > 0 {
+            resolved_model
+        } else {
+            String::new()
+        };
         json!({
             "credentialStorageError": self.credential_error.read().clone(),
             "onboardingCompleted": st.onboarding_completed && configured_count > 0,
             "hasConfiguredProvider": configured_count > 0,
             "configuredCount": configured_count,
-            "activeProvider": st.active_provider,
-            "activeModel": st.active_model,
+            "activeProvider": active_provider,
+            "activeModel": active_model,
             "subagentProvider": st.subagent_provider,
             "subagentModel": st.subagent_model,
             "providers": st.providers,
@@ -2965,6 +2976,7 @@ pub struct ProviderToolTurn {
     pub tool_calls: Vec<ProviderToolCall>,
     pub provider_name: String,
     pub model_id: String,
+    pub stream_error: Option<String>,
 }
 
 impl ProviderManager {
@@ -3090,9 +3102,15 @@ impl ProviderManager {
         let (text, thinking, tool_calls) = match parse_tool_stream(BufReader::new(resp), &mut on_chunk) {
             Ok(turn) => turn,
             Err(error) => {
-                let text = format!("Provider turn failed: {error}");
+                let fallback_text = format!("Provider turn failed: {error}");
                 return Some(ProviderToolTurn {
-                    text, thinking: String::new(), tool_calls: Vec::new(), response_items: Vec::new(), provider_name, model_id,
+                    text: if text_or_empty(&fallback_text) { fallback_text } else { String::new() },
+                    thinking: String::new(),
+                    tool_calls: Vec::new(),
+                    response_items: Vec::new(),
+                    provider_name,
+                    model_id,
+                    stream_error: Some(error),
                 });
             }
         };
@@ -3110,8 +3128,13 @@ impl ProviderManager {
             tool_calls,
             provider_name,
             model_id,
+            stream_error: None,
         })
     }
+}
+
+fn text_or_empty(s: &str) -> bool {
+    !s.is_empty()
 }
 
 fn parse_tool_stream<R: std::io::BufRead, F: FnMut(StreamChunk)>(reader: R, mut on_chunk: F)
@@ -3186,25 +3209,28 @@ fn parse_tool_stream<R: std::io::BufRead, F: FnMut(StreamChunk)>(reader: R, mut 
         }
 
         if !matches!(finish_reason.as_deref(), Some("stop" | "tool_calls")) {
-            return Err("Provider stream did not complete successfully; no tools were executed.".to_string());
+            return Err(format!(
+                "Provider stream did not complete successfully (finish_reason={:?}); no tools were executed.",
+                finish_reason
+            ));
         }
-        for call in &calls {
-            if call.name.is_empty() || call.id.is_empty() {
+        for call in &mut calls {
+            if call.name.is_empty() {
                 return Err("Incomplete tool call in provider stream.".to_string());
             }
+            if call.id.is_empty() {
+                call.id = format!("call_{}", &Uuid::new_v4().to_string().replace('-', "")[..16]);
+            }
+            if call.arguments.trim().is_empty() {
+                call.arguments = "{}".to_string();
+            }
             let input: Value = serde_json::from_str(&call.arguments)
-                .map_err(|error| format!("Invalid tool arguments: {error}"))?;
+                .map_err(|error| format!("Invalid tool arguments for `{}`: {error}", call.name))?;
             crate::agent_tools::validate_input(&call.name, &input)?;
         }
         let tool_calls: Vec<ProviderToolCall> = calls
             .into_iter()
             .filter(|c| !c.name.is_empty())
-            .map(|mut c| {
-                if c.id.is_empty() {
-                    c.id = format!("call_{}", &Uuid::new_v4().to_string().replace('-', "")[..16]);
-                }
-                c
-            })
             .collect();
 
         Ok((text, thinking, tool_calls))

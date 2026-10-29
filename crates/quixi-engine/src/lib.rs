@@ -2038,13 +2038,12 @@ impl QuixiEngine {
         let system_prompt = format!(
             "You are QuixiDesk, a native Rust desktop agent running on {platform}. Active workspace: {cwd}.\n\
              You can act, not just advise: call Bash to run shell commands (including `open -a`, `osascript`, git, builds), \
-             ListDirectory to inspect the selected folder and Read/Write/Edit to work with files, WebFetch for pages, and McpCall for the built-in Computer Use and \
+             Grep and ListDirectory to search and inspect the workspace, Read/Write/Edit to work with files, WebFetch for pages, and McpCall for the built-in Computer Use and \
              Browser Use servers (screenshots, clicks, typing, tabs).\n\
-             Read workspace files only when relevant to the user request; honor requests not to use tools or inspect files. Prefer doing the work over describing it, keep answers short, and \
+             Read workspace files only when relevant to the user request; honor requests not to use tools or inspect files. Prefer Grep to locate symbols quickly before reading slices of large files. Prefer doing the work over describing it, keep answers concise, and \
              mention the real result (output, path, app state) instead of instructions the user could run themselves.\n\
-             Rules: do not repeat a successful side effect unnecessarily; use fresh observations to verify results; \
-             never close windows, discard drafts or quit applications unless the user asked for exactly that; \
-             do not investigate further once the requested effect is confirmed - report and stop.\n\n\
+             Completion & safety rules: complete every part of the user's request before finishing your turn—for coding and multi-step tasks, iterate through editing, building, and testing (re-running checks after edits) until everything requested is complete and verified; \
+             for desktop GUI/app actions, do not repeat a click or side effect that already succeeded, and never close windows, discard drafts, or quit applications unless the user asked for exactly that.\n\n\
              Use Artifact to create private local HTML previews. Nothing is published or uploaded. If asked to publish, explain that publishing is unavailable and offer a local preview.{project_instructions}{workspace_instructions}",
             platform = std::env::consts::OS
         );
@@ -2074,6 +2073,7 @@ impl QuixiEngine {
         let mut used_tools = false;
         let mut seen_calls: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut repeats = 0usize;
+        let mut stream_retries = 0usize;
         let mut tool_results = agent_tools::ToolResults::default();
 
         for round in 0..MAX_ROUNDS {
@@ -2118,6 +2118,26 @@ impl QuixiEngine {
                 "agent loop round"
             );
             final_model = turn.model_id.clone();
+
+            if let Some(ref err) = turn.stream_error {
+                let recoverable = (err.contains("Invalid tool arguments")
+                    || err.contains("Incomplete tool call")
+                    || err.contains("finish_reason=Some(\"length\")"))
+                    && stream_retries < 2;
+                if recoverable {
+                    stream_retries += 1;
+                    tracing::warn!(round, stream_retries, error = %err, "agent loop: retrying recoverable tool stream error");
+                    messages.push(json!({
+                        "role": "user",
+                        "content": format!(
+                            "Your previous tool call could not be parsed or was truncated ({err}). Make smaller, valid tool calls (e.g. smaller Edit blocks) and continue completing the request."
+                        )
+                    }));
+                    continue;
+                }
+            }
+            stream_retries = 0;
+
             if !turn.text.trim().is_empty() {
                 final_text = turn.text.clone();
             }
@@ -2128,23 +2148,23 @@ impl QuixiEngine {
             }
             used_tools = true;
 
-            // Guard against the model looping on the same call (e.g. re-verifying a
-            // side effect or retrying a localized mailbox name forever).
+            // Guard against the model looping on the exact same side-effecting call with no
+            // intervening file changes (e.g. retrying a GUI click or failed command forever).
             let repeated = turn
                 .tool_calls
                 .iter()
                 .filter(|c| !agent_tools::repeatable_observation(&c.name,&serde_json::from_str::<Value>(&c.arguments).unwrap_or(Value::Null)) && !seen_calls.insert(format!("{}|{}", c.name, c.arguments)))
                 .count();
-            if repeated > 0 {
+            let mut repeat_warning = false;
+            if repeated == turn.tool_calls.len() {
                 repeats += 1;
-                if repeats >= 2 {
-                    tracing::warn!("agent loop: repeated tool calls, stopping early");
+                if repeats >= 3 {
+                    tracing::warn!("agent loop: repeated identical tool calls with no state change, stopping early");
                     break;
                 }
-                messages.push(json!({
-                    "role": "user",
-                    "content": "That exact tool call already ran. Do not repeat it. If the requested effect is done, reply with a short final answer now."
-                }));
+                repeat_warning = true;
+            } else if repeated == 0 {
+                repeats = 0;
             }
 
             let mut displayed = std::collections::HashSet::new();
@@ -2204,6 +2224,7 @@ impl QuixiEngine {
 
             // 2. Execute each requested tool and report the result back.
             let mut result_blocks: Vec<Value> = Vec::new();
+            let mut mutated_files = false;
             for call in &turn.tool_calls {
                 if cancelled.load(Ordering::SeqCst) { return (String::new(), final_model); }
                 let (output, is_error) = match serde_json::from_str::<Value>(&call.arguments) {
@@ -2217,12 +2238,21 @@ impl QuixiEngine {
                     }),
                     Err(error) => (format!("Invalid tool arguments: {error}"), true),
                 };
+                if agent_tools::ToolResults::is_file_mutation(&call.name) && !is_error {
+                    mutated_files = true;
+                }
                 result_blocks.push(json!({
                     "type": "tool_result",
                     "tool_use_id": call.id,
                     "is_error": is_error,
                     "content": output
                 }));
+            }
+            if mutated_files {
+                // Workspace files changed: allow previously-run build/test commands (`cargo check`, `npm test`, etc.)
+                // to run fresh on subsequent rounds without triggering the duplicate-call breaker.
+                seen_calls.clear();
+                repeats = 0;
             }
             let result_msg = json!({
                 "type": "user",
@@ -2241,6 +2271,12 @@ impl QuixiEngine {
                     "role": "tool",
                     "tool_call_id": call.id,
                     "content": block.get("content").and_then(|v| v.as_str()).unwrap_or_default()
+                }));
+            }
+            if repeat_warning {
+                messages.push(json!({
+                    "role": "user",
+                    "content": "That exact tool call already ran with no intervening file changes. Do not repeat identical calls without modifying state; continue with the next step or summarize your completed work."
                 }));
             }
 

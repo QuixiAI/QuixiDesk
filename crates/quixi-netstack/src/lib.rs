@@ -1,7 +1,34 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::fs;
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use uuid::Uuid;
+
+fn write_private_file(path: &Path, bytes: &[u8]) {
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    let _ = fs::create_dir_all(parent);
+    let tmp = parent.join(format!(".{}.tmp", Uuid::new_v4()));
+    let res = (|| -> std::io::Result<()> {
+        let mut opts = fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut f = opts.open(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        fs::rename(&tmp, path)?;
+        Ok(())
+    })();
+    if res.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -63,7 +90,7 @@ impl NetstackPolicy {
         let mut cfg = self.load();
         cfg.api_key = Some(api_key.trim().to_string());
         if let Ok(s) = serde_json::to_string_pretty(&cfg) {
-            let _ = fs::write(&self.config_file, s);
+            write_private_file(&self.config_file, s.as_bytes());
         }
     }
 

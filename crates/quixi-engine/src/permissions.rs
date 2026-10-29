@@ -11,8 +11,8 @@ pub(crate) struct PendingToolApproval {
 
 // Resolve existing symlinks and normalize missing descendants before checking scope.
 fn file_access_outside_workspace(name:&str,input:&Value,cwd:&str)->bool {
-    if !matches!(name,"Read"|"ListDirectory"|"Write"|"Edit") {return false;}
-    let raw=input[if name=="ListDirectory" {"path"}else{"file_path"}].as_str().unwrap_or(".");
+    if !matches!(name,"Read"|"ListDirectory"|"Grep"|"Write"|"Edit") {return false;}
+    let raw=input[if matches!(name,"ListDirectory"|"Grep") {"path"}else{"file_path"}].as_str().unwrap_or(".");
     let path=Path::new(raw);let path=if path.is_absolute(){path.to_path_buf()}else{Path::new(cwd).join(path)};
     fn resolved(path:&Path)->Option<PathBuf>{
         if let Ok(p)=path.canonicalize(){return Some(p);}

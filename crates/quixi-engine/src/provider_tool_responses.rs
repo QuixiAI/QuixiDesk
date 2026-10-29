@@ -7,6 +7,7 @@ fn tool_failure(error: String, provider: &str, model: &str) -> ProviderToolTurn 
         response_items: Vec::new(),
         provider_name: provider.into(),
         model_id: model.into(),
+        stream_error: Some(error),
     }
 }
 
@@ -202,6 +203,7 @@ impl ProviderManager {
                 response_items,
                 provider_name: "OpenAI".into(),
                 model_id: model.into(),
+                stream_error: None,
             },
             Err(error) => tool_failure(error, "OpenAI", model),
         }

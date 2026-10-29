@@ -1280,7 +1280,7 @@
   function toolActivity(group, active, opened) {
     const failed = group.steps.filter((s) => s.result?.is_error).length;
     const fileOnly = group.steps.every((s) =>
-      ["Read", "ListDirectory"].includes(s.call?.name),
+      ["Read", "ListDirectory", "Grep"].includes(s.call?.name),
     );
     const label = fileOnly
       ? active
@@ -1332,6 +1332,8 @@
           (path === "."
             ? sPath().split(/[\\/]/).filter(Boolean).pop() || "folder"
             : basename);
+      else if (call?.name === "Grep")
+        title = "Search " + (input.query || "workspace");
       else if (call?.name === "Bash")
         title = input.description || "Run command";
       else if (["Write", "Edit"].includes(call?.name))

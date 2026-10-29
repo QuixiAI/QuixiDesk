@@ -2878,6 +2878,7 @@ dependencies = [
  "cron",
  "dashmap",
  "dirs",
+ "ignore",
  "keyring",
  "parking_lot",
  "quixi-mcp",
@@ -2962,6 +2963,7 @@ dependencies = [
  "serde",
  "serde_json",
  "url",
+ "uuid",
 ]
 
 [[package]]
