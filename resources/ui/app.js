@@ -791,18 +791,18 @@
     const current = currentFolder();
     const input = el("input", {
       value: current,
-      placeholder: "Absolute workspace folder path",
+      placeholder: "e.g. ~/Projects/my-project",
       "aria-label": "Workspace folder path",
     });
     const error = el("div", { class: "form-error", role: "alert" });
-    const browse = button("Browse folders", async () => {
+    const browse = button("Choose folder", async () => {
       const folder = await rpc(
         "LocalAgentModeSessions",
         "browseAndAddTrustedFolder",
         ["Choose a workspace folder"],
       );
       if (folder) input.value = folder;
-      else toast("No folder selected. You can also enter an absolute path.");
+      else toast("No folder selected. You can also enter a path below.");
     });
     const d = dialog("Choose workspace", [
       el(
@@ -826,7 +826,7 @@
                 path,
               });
               if (!checked.exists)
-                throw new Error("Enter an existing absolute directory.");
+                throw new Error("Choose an existing folder.");
               state.folder = checked.path;
               state.project =
                 state.projects.find((p) =>
@@ -1737,6 +1737,18 @@
     );
   }
   function projectDetail(p) {
+    const folderError = el("p", { class: "form-error", role: "alert" });
+    const addFolder = async (path) => {
+      const check = await api("/api/quixi/workspace/inspect", { path });
+      if (!check.exists) throw new Error("Choose an existing folder.");
+      if (p.folders?.some((folder) => folder.path === check.path))
+        throw new Error("This folder is already in the project.");
+      const added = await rpc("CoworkSpaces", "addFolderToSpace", [p.id, check.path]);
+      if (!added) throw new Error("The folder could not be added. Try again.");
+      await loadProjects();
+      d.close();
+      projectDetail(state.projects.find((x) => x.id === p.id));
+    };
     const rows = el(
       "div",
       { class: "field-stack" },
@@ -1774,22 +1786,27 @@
         : null,
       el("h3", {}, "Folders"),
       rows,
-      button("Add folder", () =>
+      el("div", { class: "form-actions" },
+      button("Add folder", async (event) => {
+        const button = event.currentTarget;
+        button.disabled = true;
+        folderError.textContent = "";
+        try {
+          const path = await rpc("LocalAgentModeSessions", "browseAndAddTrustedFolder", ["Add a project folder"]);
+          if (path) await addFolder(path);
+        } catch (error) { folderError.textContent = error.message; }
+        finally { button.disabled = false; }
+      }, "primary", "folder"),
+      button("Enter path", () =>
         formDialog(
           "Add project folder",
-          [{ name: "path", label: "Absolute folder path", required: true }],
-          async (values) => {
-            const check = await api("/api/quixi/workspace/inspect", {
-              path: values.path,
-            });
-            if (!check.exists) throw new Error("Choose an existing directory.");
-            await rpc("CoworkSpaces", "addFolderToSpace", [p.id, check.path]);
-            await loadProjects();
-            d.close();
-            projectDetail(state.projects.find((x) => x.id === p.id));
-          },
+          [{ name: "path", label: "Folder path", required: true,
+            placeholder: "e.g. ~/Projects/my-project", hint: "Paste a full path or use ~ for your home folder." }],
+          async (values) => addFolder(values.path),
+          { submit: "Add folder" },
         ),
-      ),
+      "quiet")),
+      folderError,
       el("hr"),
       el(
         "div",

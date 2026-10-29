@@ -54,6 +54,8 @@ The native runtime development and analysis benefited from **[REA](https://githu
 
 Select a workspace folder before sending a file task. **Manual** allows directory listings and file reads, then pauses for approval before changes or commands. **Allow once** approves the displayed action; **Allow file edits** permits edits in that conversation while commands continue to ask. **Auto** permits tool actions without individual approval. Approving an action resumes the current request.
 
+In a project, **Add folder** opens the native folder chooser. **Enter path** also accepts home-folder shortcuts such as `~/Projects/my-project`, paths with spaces, and quoted paths copied from your file manager.
+
 Tool calls and their results appear together in a collapsible activity group. **Stop** cancels pending approvals and preserves any answer text already received. Follow-up requests retain earlier tool results, and artifact revisions can update the existing preview without changing its link.
 
 ---

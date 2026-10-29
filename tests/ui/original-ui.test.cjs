@@ -16,6 +16,8 @@ async function fixture({
   permissions = [],
   schedules = [],
   catalogModels = [],
+  pickedFolder = null,
+  folderPaths = {},
 } = {}) {
   const dom = new JSDOM(
     '<!doctype html><div id="app"></div><div id="toasts"></div>',
@@ -51,6 +53,7 @@ async function fixture({
     },
   ];
   const calls = [];
+  const projects = [{id:"project-a",name:"Project A",instructions:"PRIVATE-PROJECT-A",folders:[{path:"/project-a"}]}];
   const providers = {
     configuredCount: 1,
     hasConfiguredProvider: true,
@@ -72,15 +75,13 @@ async function fixture({
     calls.push({ service, member, args });
     if (member === "getAll")
       return service === "LocalSessions" ? [] : structuredClone(sessions);
-    if (member === "getAllSpaces")
-      return [
-        {
-          id: "project-a",
-          name: "Project A",
-          instructions: "PRIVATE-PROJECT-A",
-          folders: [{ path: "/project-a" }],
-        },
-      ];
+    if (member === "getAllSpaces") return structuredClone(projects);
+    if (member === "browseAndAddTrustedFolder") return pickedFolder;
+    if (member === "addFolderToSpace") {
+      const project = projects.find((p) => p.id === args[0]);
+      project.folders.push({path:args[1]});
+      return structuredClone(project);
+    }
     if (member === "getDefaultWorkspaceFolders") return ["/workspace"];
     if (member === "getSession")
       return structuredClone(sessions.find((s) => s.sessionId === args[0]));
@@ -157,7 +158,7 @@ async function fixture({
         html: '<script>parent.document.body.innerHTML="OWNED"</script>',
       };
     if (route === "/api/quixi/workspace/inspect")
-      return { exists: true, path: body.path };
+      return { exists: true, path: folderPaths[body.path] || body.path };
     if (route === "/api/quixi/providers/save") {
       const p = providers.providers.find((p) => p.id === body.providerId);
       if (body.customModel) {
@@ -206,7 +207,7 @@ async function fixture({
     input.dispatchEvent(new w.Event("input", { bubbles: true }));
     return input;
   };
-  return { w, sessions, calls, click, type, close: () => dom.window.close() };
+  return { w, sessions, projects, calls, click, type, close: () => dom.window.close() };
 }
 
 test("unsent drafts survive navigation and provider names are not application branding", async () => {
@@ -379,6 +380,40 @@ test("choosing a project passes its context into the new task", async () => {
   } finally {
     f.close();
   }
+});
+
+test("adding a project folder opens the native picker and cancellation changes nothing", async () => {
+  for (const pickedFolder of [null, "/native/College club"]) {
+    const f = await fixture({pickedFolder});
+    try {
+      await f.click("Projects");
+      await f.click("Open project");
+      await f.click("Add folder");
+      assert.ok(f.calls.some((c) => c.member === "browseAndAddTrustedFolder"));
+      const added = f.calls.filter((c) => c.member === "addFolderToSpace");
+      assert.equal(added.length, pickedFolder ? 1 : 0);
+      if (pickedFolder) {
+        assert.equal(added[0].args[1], pickedFolder);
+        assert.match(f.w.document.querySelector("dialog").textContent, /native\/College club/);
+      } else assert.equal(f.projects[0].folders.length, 1);
+    } finally { f.close(); }
+  }
+});
+
+test("project folder entry accepts home shorthand and saves the resolved path", async () => {
+  const f = await fixture({folderPaths:{"~/College club":"/home/test/College club"}});
+  try {
+    await f.click("Projects");
+    await f.click("Open project");
+    await f.click("Enter path");
+    const input = f.type('input[name="path"]', "~/College club");
+    assert.ok(input.placeholder.includes("~/"));
+    const form = input.closest("form");
+    form.dispatchEvent(new f.w.Event("submit", {bubbles:true,cancelable:true}));
+    await wait();
+    const added = f.calls.find((c) => c.member === "addFolderToSpace");
+    assert.equal(added.args[1], "/home/test/College club");
+  } finally { f.close(); }
 });
 
 test("running a schedule clears the previously selected project", async () => {

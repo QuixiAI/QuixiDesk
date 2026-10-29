@@ -1019,11 +1019,9 @@ impl QuixiEngine {
         };
 
         if clean_path == "/api/quixi/workspace/inspect" && method == "POST" {
-            let path = PathBuf::from(body_json["path"].as_str().unwrap_or(""));
-            if !path.is_absolute() { return Self::json_resp(400, &json!({"error":"Folder path must be absolute."})); }
-            return match path.canonicalize() {
-                Ok(path) if path.is_absolute() && path.is_dir() => Self::json_resp(200, &json!({"exists":true,"path":path.to_string_lossy()})),
-                _ => Self::json_resp(400, &json!({"error":"Enter an existing absolute directory."})),
+            return match local_ui::resolve_folder_path(body_json["path"].as_str().unwrap_or(""), &quixi_proto::paths::home_dir()) {
+                Ok(path) => Self::json_resp(200, &json!({"exists":true,"path":path.to_string_lossy()})),
+                Err(error) => Self::json_resp(400, &json!({"error":error})),
             };
         }
         if clean_path == "/api/quixi/workspace/read" && method == "POST" {

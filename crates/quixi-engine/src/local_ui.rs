@@ -1,6 +1,27 @@
 //! Local search and private HTML artifacts shared by IPC and the agent tool loop.
 use super::*;
 
+pub(crate) fn resolve_folder_path(raw: &str, home: &Path) -> Result<PathBuf, String> {
+    let raw = raw.trim();
+    let raw = if raw.len() >= 2 && ((raw.starts_with('"') && raw.ends_with('"'))
+        || (raw.starts_with('\'') && raw.ends_with('\''))) { &raw[1..raw.len()-1] } else { raw };
+    if raw.is_empty() { return Err("Choose a folder or enter its path.".into()); }
+    let path = if raw == "~" { home.to_path_buf() }
+        else if let Some(rest) = raw.strip_prefix("~/") { home.join(rest.trim_start_matches('/')) }
+        else if cfg!(target_os = "windows") && raw.starts_with("~\\") { home.join(raw[2..].trim_start_matches(['/', '\\'])) }
+        else { PathBuf::from(raw) };
+    if !path.is_absolute() { return Err("Enter a full folder path, or use ~/ for your home folder.".into()); }
+    match path.canonicalize() {
+        Ok(path) if path.is_dir() => Ok(path),
+        Ok(_) => Err("That location is a file. Choose a folder instead.".into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound =>
+            Err("Folder not found. Check the path or use Choose folder to browse.".into()),
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied =>
+            Err("QuixiDesk cannot access this folder. Check its permissions or choose another folder.".into()),
+        Err(error) => Err(format!("Could not open this folder: {error}")),
+    }
+}
+
 fn matching_snippet(query: &str, title: &str, messages: &[Value]) -> Option<String> {
     std::iter::once(title.to_string())
         .chain(messages.iter().flat_map(|m| {
@@ -218,6 +239,26 @@ impl QuixiEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn folder_paths_accept_home_shorthand_spaces_and_quotes_without_creating_folders() {
+        let root = std::env::temp_dir().join(format!("quixi-folder-input-{}",Uuid::new_v4()));
+        fs::create_dir_all(root.join("College club")).unwrap();
+        fs::write(root.join("file.txt"),"example").unwrap();
+        let expected = root.join("College club").canonicalize().unwrap();
+        for input in ["~/College club", "  ~/College club  ", "\"~/College club\"", "'~/College club'"] {
+            assert_eq!(resolve_folder_path(input,&root).unwrap(),expected);
+        }
+        assert_eq!(resolve_folder_path("~",&root).unwrap(),root.canonicalize().unwrap());
+        assert_eq!(resolve_folder_path(expected.to_str().unwrap(),&root).unwrap(),expected);
+        assert!(resolve_folder_path("~/missing",&root).unwrap_err().contains("not found"));
+        assert!(!root.join("missing").exists());
+        assert!(resolve_folder_path("~/file.txt",&root).unwrap_err().contains("is a file"));
+        assert!(resolve_folder_path("relative/path",&root).unwrap_err().contains("~/"));
+        assert!(resolve_folder_path("",&root).is_err());
+        #[cfg(target_os = "windows")]
+        assert_eq!(resolve_folder_path("~\\College club",&root).unwrap(),expected);
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn mock_accounts_are_profile_local_and_invalid_fixtures_do_not_replace_them() {
         let roots: Vec<_>=(0..2).map(|_| std::env::temp_dir().join(format!("quixi-account-{}",Uuid::new_v4()))).collect();
