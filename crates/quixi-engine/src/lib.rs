@@ -3301,7 +3301,8 @@ mod cancellation_regression_tests {
     use super::*;
     #[test]
     fn stopping_and_replacing_turns_invalidates_old_workers() {
-        let engine = QuixiEngine::new(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../resources"));
+        let test_data = std::env::temp_dir().join(format!("quixi-isolated-test-{}", uuid::Uuid::new_v4()));
+        let engine = QuixiEngine::new_with_data_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../resources"), test_data);
         let first = engine.begin_turn("cancel-test");
         engine.cancel_turn("cancel-test");
         assert!(first.load(Ordering::SeqCst));
@@ -3315,7 +3316,8 @@ mod cancellation_regression_tests {
     }
     #[test]
     fn new_agent_session_retains_permission_mode() {
-        let engine = QuixiEngine::new(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../resources"));
+        let test_data = std::env::temp_dir().join(format!("quixi-isolated-test-{}", uuid::Uuid::new_v4()));
+        let engine = QuixiEngine::new_with_data_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../resources"), test_data);
         let sid = engine.start_agent_session(&json!({"permissionMode":"auto"}));
         assert_eq!(engine.agent_sessions.read()[&sid].permission_mode,"auto");
         engine.agent_sessions.write().remove(&sid);

@@ -122,6 +122,11 @@ pub struct ProviderManager {
 impl ProviderManager {
     pub fn new(data_dir: &PathBuf) -> Self {
         let config_path = data_dir.join("providers.json");
+        #[cfg(test)]
+        assert!(
+            !data_dir.starts_with(quixi_proto::paths::home_dir().join(".quixi")),
+            "Tests must use an isolated provider data directory"
+        );
         let default_catalog = Self::default_catalog();
 
         let mut credential_error = None;

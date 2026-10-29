@@ -3101,7 +3101,8 @@ mod session_control_regression_tests {
     use super::*;
     #[test]
     fn permission_changes_and_stop_publish_renderer_events() {
-        let engine = QuixiEngine::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../resources"));
+        let test_data = std::env::temp_dir().join(format!("quixi-isolated-test-{}", uuid::Uuid::new_v4()));
+        let engine = QuixiEngine::new_with_data_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../resources"), test_data);
         let router = EipcRouter::new(engine.clone());
         let events = Arc::new(std::sync::Mutex::new(Vec::new()));
         let recorded = events.clone();
