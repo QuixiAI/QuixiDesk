@@ -1609,7 +1609,7 @@ impl BrowserUse {
                 "--max-time",
                 "5",
                 "-A",
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) QuixiDesk/3.6556.3",
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) QuixiDesk/3.6556.4",
                 url,
             ])
             .output();
