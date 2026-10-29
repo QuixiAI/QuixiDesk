@@ -10,7 +10,12 @@ const source = fs.readFileSync(
 );
 const wait = () => new Promise((resolve) => setTimeout(resolve, 40));
 
-async function fixture({ artifacts = [], providerId = "custom" } = {}) {
+async function fixture({
+  artifacts = [],
+  providerId = "custom",
+  permissions = [],
+  schedules = [],
+} = {}) {
   const dom = new JSDOM(
     '<!doctype html><div id="app"></div><div id="toasts"></div>',
     {
@@ -90,6 +95,16 @@ async function fixture({ artifacts = [], providerId = "custom" } = {}) {
       sessions.push(s);
       return structuredClone(s);
     }
+    if (member === "getToolPermissions") return structuredClone(permissions);
+    if (member === "resolveToolPermission") {
+      const index = permissions.findIndex((p) => p.requestId === args[1]);
+      if (index < 0) return { error: "No pending approval" };
+      permissions.splice(index, 1);
+      if (args[2] === "allow_file_edits")
+        sessions.find((s) => s.sessionId === args[0]).permissionMode =
+          "acceptEdits";
+      return { ok: true };
+    }
     if (member === "sendMessage") {
       const s = sessions.find((s) => s.sessionId === args[0]);
       s.isRunning = true;
@@ -109,6 +124,7 @@ async function fixture({ artifacts = [], providerId = "custom" } = {}) {
         .filter((s) => s.title.toLowerCase().includes(args[0].toLowerCase()))
         .map((s) => ({ sessionId: s.sessionId, snippet: "Matched message" }));
     if (member === "getAllArtifacts") return structuredClone(artifacts);
+    if (member === "getAllScheduledTasks") return structuredClone(schedules);
     if (
       member === "listLocalSkills" ||
       member === "getLocalMcpServers" ||
@@ -357,6 +373,38 @@ test("choosing a project passes its context into the new task", async () => {
   }
 });
 
+test("running a schedule clears the previously selected project", async () => {
+  const f = await fixture({ schedules: [{id: "schedule-one", displayName: "Checklist", prompt: "Independent task", cwd: "/scheduled-work", enabled: true}] });
+  try {
+    await f.click("Projects");
+    await f.click("Open project");
+    await f.click("Start task");
+    await f.click("Schedules");
+    await f.click("Run now");
+    assert.equal(f.w.document.querySelector("#prompt").value, "Independent task");
+    await f.click("Send");
+    const start = f.calls.find((c) => c.member === "start");
+    assert.equal(start.args[0].spaceId, null);
+    assert.equal(start.args[0].cwd, "/scheduled-work");
+  } finally { f.close(); }
+});
+
+test("opening a search result restores that conversation's workspace", async () => {
+  const f = await fixture();
+  try {
+    await f.click("Projects");
+    await f.click("Open project");
+    await f.click("Start task");
+    await f.click("Search");
+    const result = f.w.document.querySelector("#search-results button");
+    assert.ok(result);
+    result.click();
+    await wait();
+    await f.click("workspace");
+    assert.equal(f.w.document.querySelector('[aria-label="Workspace folder path"]').value, "/workspace");
+  } finally { f.close(); }
+});
+
 test("out-of-order browser snapshots cannot create duplicate panels", async () => {
   const f = await fixture();
   try {
@@ -579,3 +627,167 @@ for (const providerId of ["custom", "openrouter"])
       f.close();
     }
   });
+
+test("tool calls and results share one compact disclosure that survives streaming", async () => {
+  const f = await fixture();
+  try {
+    const s = f.sessions[0];
+    s.isRunning = true;
+    s.bufferedMessages = [
+      {
+        type: "user",
+        uuid: "prompt-compact",
+        message: { content: [{ type: "text", text: "Explore this project" }] },
+      },
+      {
+        type: "assistant",
+        uuid: "calls",
+        message: {
+          content: [0, 1, 2, 3, 4].map((i) => ({
+            type: "tool_use",
+            id: "call-" + i,
+            name: i ? "Read" : "ListDirectory",
+            input: i ? { file_path: "file-" + i + ".md" } : { path: "." },
+          })),
+        },
+      },
+      {
+        type: "user",
+        uuid: "results",
+        message: {
+          content: [4, 3, 2, 1, 0].map((i) => ({
+            type: "tool_result",
+            tool_use_id: "call-" + i,
+            is_error: i === 3,
+            content: i === 3 ? "Permission denied" : "Contents " + i,
+          })),
+        },
+      },
+    ];
+    await f.click("Existing conversation");
+    const group = f.w.document.querySelector(".activity-group");
+    assert.ok(group);
+    assert.equal(group.open, false);
+    assert.match(
+      group.querySelector("summary").textContent,
+      /5 actions1 failed/,
+    );
+    assert.equal(f.w.document.querySelectorAll(".tool-step").length, 5);
+    assert.match(
+      f.w.document.querySelector(".tool-step.failed").textContent,
+      /Read file-3.md.*Permission denied/s,
+    );
+    group.open = true;
+    group.querySelector(".tool-step").open = true;
+    f.w.dispatchEvent(
+      new f.w.CustomEvent("quixi:event", {
+        detail: {
+          channel: "quixi.web.LocalAgentModeSessions",
+          payload: {
+            sessionId: s.sessionId,
+            message: {
+              type: "stream_event",
+              event: {
+                type: "content_block_delta",
+                delta: {
+                  type: "text_delta",
+                  text: "The project looks useful.",
+                },
+              },
+            },
+          },
+        },
+      }),
+    );
+    assert.equal(f.w.document.querySelector(".activity-group").open, true);
+    assert.equal(f.w.document.querySelector(".tool-step").open, true);
+    assert.equal(f.w.document.querySelectorAll(".activity-group").length, 1);
+  } finally {
+    f.close();
+  }
+});
+for (const decision of ["Allow file edits", "Deny"])
+  test(`pending edits can ${decision} without resending the prompt`, async () => {
+    const request = {
+      requestId: "approval-one",
+      toolCallId: "write-one",
+      toolName: "Write",
+      input: {
+        file_path: "README.md",
+        content: "<script>not executable</script>",
+      },
+    };
+    const f = await fixture({ permissions: [request] });
+    try {
+      f.sessions[0].isRunning = true;
+      f.sessions[0].bufferedMessages = [
+        {
+          type: "assistant",
+          message: {
+            content: [
+              {
+                type: "tool_use",
+                id: "write-one",
+                name: "Write",
+                input: request.input,
+              },
+            ],
+          },
+        },
+      ];
+      await f.click("Existing conversation");
+      const card = f.w.document.querySelector(".permission-card");
+      assert.ok(card);
+      assert.equal(card.querySelector("script"), null);
+      assert.match(card.textContent, /README.md/);
+      await f.click(decision);
+      assert.equal(f.w.document.querySelector(".permission-card"), null);
+      assert.equal(f.calls.filter((c) => c.member === "sendMessage").length, 0);
+      const call = f.calls.find((c) => c.member === "resolveToolPermission");
+      assert.equal(call.args[1], "approval-one");
+      assert.equal(
+        call.args[2],
+        decision === "Deny" ? "deny" : "allow_file_edits",
+      );
+      assert.equal(
+        f.w.document.querySelector('select[aria-label="Tool permission mode"]')
+          .value,
+        decision === "Deny" ? "default" : "acceptEdits",
+      );
+    } finally {
+      f.close();
+    }
+  });
+
+test("stopped response text stays readable after reopening a conversation", async () => {
+  const f = await fixture();
+  try {
+    f.sessions[0].bufferedMessages = [
+      {
+        type: "assistant",
+        message: {
+          stop_reason: "user_stop",
+          content: [
+            {
+              type: "text",
+              text: "A partial response that must remain saved.",
+            },
+          ],
+        },
+      },
+    ];
+    await f.click("Existing conversation");
+    assert.match(
+      f.w.document.querySelector(".message.assistant").textContent,
+      /QuixiDesk · Stopped.*partial response/s,
+    );
+    await f.click("Search");
+    await f.click("Existing conversation");
+    assert.match(
+      f.w.document.querySelector(".message.assistant").textContent,
+      /partial response/,
+    );
+  } finally {
+    f.close();
+  }
+});

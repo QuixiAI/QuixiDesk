@@ -2,6 +2,8 @@ pub mod agent_tools;
 pub mod providers;
 mod local_ui;
 mod storage;
+mod permissions;
+mod turns;
 
 use chrono::Utc;
 use parking_lot::RwLock;
@@ -52,14 +54,18 @@ pub struct QuixiEngine {
     pub emitter: RwLock<Option<EventCallback>>,
     turn_cancellations: RwLock<HashMap<String, Arc<AtomicBool>>>,
     storage: storage::SessionStorage,
+    pending_approvals: RwLock<HashMap<String, permissions::PendingToolApproval>>,
+    partial_replies: RwLock<HashMap<String, (Arc<AtomicBool>, String)>>,
 }
 
 impl QuixiEngine {
     fn begin_turn(&self, session_id: &str) -> Arc<AtomicBool> {
+        self.cancel_turn(session_id);
         let signal = Arc::new(AtomicBool::new(false));
         if let Some(previous) = self.turn_cancellations.write().insert(session_id.to_string(), signal.clone()) {
             previous.store(true, Ordering::SeqCst);
         }
+        self.partial_replies.write().insert(session_id.into(), (signal.clone(),String::new()));
         signal
     }
 
@@ -70,9 +76,11 @@ impl QuixiEngine {
     }
 
     pub fn cancel_turn(&self, session_id: &str) {
+        self.cancel_tool_approvals(session_id);
         if let Some(signal) = self.turn_cancellations.read().get(session_id) {
             signal.store(true, Ordering::SeqCst);
         }
+        self.save_stopped_partial(session_id);
     }
 
     pub fn new(resources_dir: PathBuf) -> Arc<Self> {
@@ -211,6 +219,8 @@ impl QuixiEngine {
             code_sessions: RwLock::new(HashMap::new()),
             code_transcripts: RwLock::new(HashMap::new()),
             storage: storage::SessionStorage::default(),
+            pending_approvals: RwLock::new(HashMap::new()),
+            partial_replies: RwLock::new(HashMap::new()),
             cowork_spaces: RwLock::new(spaces),
             chat_conversations: RwLock::new(HashMap::new()),
             projects: RwLock::new(HashMap::new()),
@@ -2034,21 +2044,29 @@ impl QuixiEngine {
             .filter(|s| !s.trim().is_empty())
             .map(|s| format!("\n\nProject instructions:\n{s}"))
             .unwrap_or_default();
+        let workspace_instructions = std::fs::read_to_string(Path::new(cwd).join("AGENTS.md")).ok()
+            .map(|s|format!("\n\nSelected workspace AGENTS.md instructions:\n{}",s.chars().take(32000).collect::<String>())).unwrap_or_default();
         let system_prompt = format!(
-            "You are QuixiDesk, a native Rust desktop agent running on macOS. Active workspace: {cwd}.\n\
+            "You are QuixiDesk, a native Rust desktop agent running on {platform}. Active workspace: {cwd}.\n\
              You can act, not just advise: call Bash to run shell commands (including `open -a`, `osascript`, git, builds), \
-             Read/Write/Edit to work with files, WebFetch for pages, and McpCall for the built-in Computer Use and \
+             ListDirectory to inspect the selected folder and Read/Write/Edit to work with files, WebFetch for pages, and McpCall for the built-in Computer Use and \
              Browser Use servers (screenshots, clicks, typing, tabs).\n\
              Read workspace files only when relevant to the user request; honor requests not to use tools or inspect files. Prefer doing the work over describing it, keep answers short, and \
              mention the real result (output, path, app state) instead of instructions the user could run themselves.\n\
              Rules: act once, do not repeat a tool call that already succeeded; verify at most once with a single command; \
              never close windows, discard drafts or quit applications unless the user asked for exactly that; \
              do not investigate further once the requested effect is confirmed - report and stop.\n\n\
-             Use Artifact to create private local HTML previews. Nothing is published or uploaded. If asked to publish, explain that publishing is unavailable and offer a local preview.{project_instructions}"
+             Use Artifact to create private local HTML previews. Nothing is published or uploaded. If asked to publish, explain that publishing is unavailable and offer a local preview.{project_instructions}{workspace_instructions}",
+            platform = std::env::consts::OS
         );
 
         let mut messages: Vec<Value> = vec![json!({ "role": "system", "content": system_prompt })];
-        for (role, text) in history {
+        let transcript = self.agent_sessions.read().get(session_id).map(|s|s.buffered_messages.clone())
+            .or_else(||self.code_transcripts.read().get(session_id).cloned()).unwrap_or_default();
+        let rich_history = turns::provider_history(&transcript);
+        if !rich_history.is_empty() {
+            messages.extend(rich_history);
+        } else { for (role, text) in history {
             if text.trim().is_empty() {
                 continue;
             }
@@ -2056,16 +2074,12 @@ impl QuixiEngine {
                 "role": if role == "assistant" { "assistant" } else { "user" },
                 "content": text
             }));
-        }
-        if history
-            .last()
-            .map(|(r, t)| r != "user" || t != prompt)
-            .unwrap_or(true)
+        } }
+        if !messages.last().is_some_and(|m|m["role"]=="user" && m["content"].as_str()==Some(prompt))
         {
             messages.push(json!({ "role": "user", "content": prompt }));
         }
 
-        let tools = agent_tools::tool_schemas();
         let mut final_text = String::new();
         let mut final_model = resolved_model.clone();
         let mut used_tools = false;
@@ -2075,12 +2089,15 @@ impl QuixiEngine {
 
         for round in 0..MAX_ROUNDS {
             if cancelled.load(Ordering::SeqCst) { return (String::new(), final_model); }
+            let mode = self.current_permission_mode(session_id, permission_mode);
+            let tools = agent_tools::available_tool_schemas(&mode);
+            messages[0]["content"] = json!(format!("{system_prompt}\n\n{}", agent_tools::permission_context(&mode)));
             let mut streamed_text = false;
             let turn = match self.provider_manager.complete_turn_with_tools(
                 &messages,
                 &tools,
                 Some(&resolved_model),
-                &mut |chunk| { if !cancelled.load(Ordering::SeqCst) { if matches!(&chunk, StreamChunk::Text(text) if !text.is_empty()) { streamed_text = true; } on_chunk(chunk); } },
+                &mut |chunk| { if !cancelled.load(Ordering::SeqCst) { if let StreamChunk::Text(text)=&chunk { if !text.is_empty() {streamed_text=true;self.record_partial_reply(session_id,cancelled,text);} } on_chunk(chunk); } },
             ) {
                 Some(turn) => turn,
                 None => {
@@ -2094,7 +2111,7 @@ impl QuixiEngine {
                         history,
                         model_override,
                         &project_instructions,
-                        &mut |chunk| { if !cancelled.load(Ordering::SeqCst) { on_chunk(chunk); } },
+                        &mut |chunk| { if !cancelled.load(Ordering::SeqCst) {if let StreamChunk::Text(text)=&chunk {self.record_partial_reply(session_id,cancelled,text);} on_chunk(chunk); } },
                     );
                     return (reply, model);
                 }
@@ -2113,7 +2130,7 @@ impl QuixiEngine {
             }
 
             if turn.tool_calls.is_empty() {
-                if !streamed_text && !turn.text.is_empty() { on_chunk(StreamChunk::Text(turn.text.clone())); }
+                if !streamed_text && !turn.text.is_empty() { self.record_partial_reply(session_id,cancelled,&turn.text);on_chunk(StreamChunk::Text(turn.text.clone())); }
                 break;
             }
             used_tools = true;
@@ -2123,7 +2140,7 @@ impl QuixiEngine {
             let repeated = turn
                 .tool_calls
                 .iter()
-                .filter(|c| !matches!(c.name.as_str(), "Read" | "WebFetch") && !seen_calls.insert(format!("{}|{}", c.name, c.arguments)))
+                .filter(|c| !matches!(c.name.as_str(), "Read" | "ListDirectory" | "WebFetch") && !seen_calls.insert(format!("{}|{}", c.name, c.arguments)))
                 .count();
             if repeated > 0 {
                 repeats += 1;
@@ -2140,7 +2157,7 @@ impl QuixiEngine {
             let mut displayed = std::collections::HashSet::new();
             let fresh_calls: Vec<bool> = turn.tool_calls.iter().map(|call| {
                 let input = serde_json::from_str::<Value>(&call.arguments).unwrap_or(Value::Null);
-                matches!(call.name.as_str(), "Read" | "WebFetch") ||
+                matches!(call.name.as_str(), "Read" | "ListDirectory" | "WebFetch") ||
                     (!tool_results.contains(&call.name, &input)
                     && displayed.insert(format!("{}|{}", call.name, input)))
             }).collect();
@@ -2174,7 +2191,7 @@ impl QuixiEngine {
                     "stop_reason": "tool_use"
                 }
             });
-            if fresh_calls.iter().any(|fresh| *fresh) { on_message(assistant_msg.clone()); }
+            if fresh_calls.iter().any(|fresh| *fresh) {self.clear_partial_reply(session_id,cancelled);on_message(assistant_msg.clone());}
             // The provider conversation needs the real OpenAI tool-call shape, not our
             // Provider transcript blocks: assistant.tool_calls + role=tool results.
             let mut provider_tool_calls: Vec<Value> = Vec::new();
@@ -2201,8 +2218,8 @@ impl QuixiEngine {
                         if call.name == "Artifact" {
                             self.create_local_artifact(session_id, &input)
                         } else {
-                            agent_tools::execute(&call.name, &input, cwd,
-                                &self.current_permission_mode(session_id, permission_mode), &self.mcp_host)
+                            self.execute_tool_with_approval(session_id, &call.id, &call.name, &input, cwd,
+                                permission_mode, cancelled)
                         }
                     }),
                     Err(error) => (format!("Invalid tool arguments: {error}"), true),
@@ -2744,7 +2761,7 @@ impl QuixiEngine {
                 sess.buffered_messages.push(result_msg.clone());
                 eng.persist_agent_session(sess);
             }
-
+            eng.clear_partial_reply(&sid,&cancelled);
 
             eng.emit_eipc(
                 "quixi.web",
@@ -3219,6 +3236,7 @@ impl QuixiEngine {
                 updated_sess = Some(sess.clone());
             }
 
+            eng.clear_partial_reply(&sid,&cancelled);
             eng.emit_eipc(
                 "quixi.web",
                 "LocalSessions",

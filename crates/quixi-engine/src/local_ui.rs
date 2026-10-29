@@ -177,10 +177,26 @@ impl QuixiEngine {
                 true,
             );
         }
-        let id = Uuid::new_v4().to_string();
+        let existing = {
+            let artifacts = self.artifacts.read();
+            if let Some(id) = input["id"].as_str() {
+                match artifacts.get(id) {
+                    Some(a) if a["createdBySessionId"] == session_id => Some(a.clone()),
+                    _ => return ("Artifact not found in this conversation. No preview was changed.".into(), true),
+                }
+            } else {
+                let matches: Vec<_> = artifacts.values().filter(|a|
+                    a["createdBySessionId"] == session_id && a["title"].as_str() == Some(title)
+                ).collect();
+                if matches.len() == 1 { Some(matches[0].clone()) } else { None }
+            }
+        };
+        let id = existing.as_ref().and_then(|a| a["id"].as_str())
+            .map(str::to_owned).unwrap_or_else(|| Uuid::new_v4().to_string());
         let now = Utc::now().timestamp_millis();
+        let created = existing.as_ref().and_then(|a| a["createdAt"].as_i64()).unwrap_or(now);
         let artifact = json!({"id":id,"name":title,"title":title,"description":"Private local HTML preview",
-            "html":html,"createdAt":now,"updatedAt":now,"createdBySessionType":"cowork",
+            "html":html,"createdAt":created,"updatedAt":now,"createdBySessionType":"cowork",
             "createdBySessionId":session_id,"isStarred":false});
         let path = self.data_dir.join("artifacts").join(format!("{id}.json"));
         if let Err(err) = fs::write(path, serde_json::to_vec(&artifact).unwrap()) {
@@ -194,7 +210,8 @@ impl QuixiEngine {
             json!({}),
         );
         self.emit("quixi:artifact-preview", json!({"id":id}));
-        (format!("Created private local preview: [{title}](app://localhost/cowork-artifact/{id}). Nothing was published or uploaded."), false)
+        let verb = if existing.is_some() { "Updated" } else { "Created" };
+        (format!("{verb} private local preview: [{title}](app://localhost/cowork-artifact/{id}). Artifact id: {id}. Nothing was published or uploaded."), false)
     }
 }
 
@@ -279,6 +296,29 @@ mod tests {
         drop(engine);
         let reopened = QuixiEngine::new_with_data_dir(PathBuf::new(), root.clone());
         assert_eq!(reopened.search_local_sessions("水", 1)[0]["sessionId"], sid);
+        drop(reopened);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn artifact_revisions_keep_links_and_are_scoped_to_the_conversation() {
+        let root = std::env::temp_dir().join(format!("quixi-artifact-revision-{}", Uuid::new_v4()));
+        let engine = QuixiEngine::new_with_data_dir(PathBuf::new(), root.clone());
+        assert!(!engine.create_local_artifact("club", &json!({"title":"Planner","html":"version 1"})).1);
+        let id = engine.artifacts.read().keys().next().unwrap().clone();
+        let created = engine.artifacts.read()[&id]["createdAt"].clone();
+        let (result, failed) = engine.create_local_artifact("club", &json!({"title":"Planner","html":"version 2"}));
+        assert!(!failed);
+        assert!(result.starts_with("Updated"));
+        assert!(result.contains(&id));
+        assert_eq!(engine.artifacts.read().len(), 1);
+        assert_eq!(engine.artifacts.read()[&id]["createdAt"], created);
+        assert!(engine.create_local_artifact("other", &json!({"id":id,"title":"Stolen","html":"bad"})).1);
+        assert!(!engine.create_local_artifact("club", &json!({"id":id,"title":"Meeting budget","html":"version 3"})).1);
+        drop(engine);
+        let reopened = QuixiEngine::new_with_data_dir(PathBuf::new(), root.clone());
+        assert_eq!(reopened.artifacts.read()[&id]["html"], "version 3");
+        assert_eq!(reopened.artifacts.read()[&id]["title"], "Meeting budget");
         drop(reopened);
         let _ = fs::remove_dir_all(root);
     }

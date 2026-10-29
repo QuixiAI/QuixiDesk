@@ -1972,3 +1972,129 @@ dialog:focus {
     font-size: 11px;
   }
 }
+
+/* Tool activity occupies one compact disclosure per conversation turn. */
+.activity-group {
+  margin: 10px 0 18px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.activity-group > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  list-style: none;
+  width: fit-content;
+  max-width: 100%;
+}
+.activity-group > summary::-webkit-details-marker,
+.tool-step > summary::-webkit-details-marker {
+  display: none;
+}
+.activity-label {
+  font-weight: 500;
+  color: var(--text);
+}
+.activity-count {
+  font-size: 11px;
+}
+.activity-failed {
+  color: var(--danger);
+  font-size: 11px;
+}
+.activity-chevron {
+  margin-left: 2px;
+  font-size: 18px;
+  line-height: 1;
+  transition: transform 0.15s;
+}
+.activity-group[open] > summary .activity-chevron {
+  transform: rotate(90deg);
+}
+.activity-running {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+.activity-steps {
+  border-left: 1px solid var(--line);
+  margin: 6px 0 0 6px;
+  padding-left: 14px;
+  max-height: 320px;
+  overflow: auto;
+}
+.activity-group .tool-step {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  font-size: 11px;
+}
+.activity-group .tool-step > summary {
+  padding: 8px 4px;
+  list-style: none;
+  gap: 8px;
+}
+.tool-step-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+.tool-step-status {
+  color: var(--muted);
+  font-size: 10px;
+  white-space: nowrap;
+}
+.tool-step.failed .tool-step-title,
+.tool-step.failed .tool-step-status {
+  color: var(--danger);
+}
+.tool-step-body {
+  padding: 4px 4px 8px 24px;
+}
+.tool-step-body > small {
+  color: var(--muted);
+}
+.tool-step-body pre {
+  margin: 5px 0;
+  max-height: 220px;
+  overflow: auto;
+  font-size: 11px;
+}
+
+.permission-card {
+  margin: 16px 0;
+  padding: 18px 20px;
+  border: 1px solid color-mix(in srgb, var(--accent), var(--line) 55%);
+  background: var(--panel);
+  border-radius: 12px;
+}
+.permission-card h3 {
+  margin: 0 0 8px;
+  font-size: 15px;
+}
+.permission-card p {
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.permission-card details {
+  font-size: 12px;
+}
+.permission-card pre {
+  max-height: 220px;
+  overflow: auto;
+  font-size: 11px;
+}
+.permission-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  margin-top: 14px;
+}

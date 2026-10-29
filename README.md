@@ -41,6 +41,10 @@ The native runtime development and analysis benefited from **[REA](https://githu
   - **Pre-Bundled Workspace & Productivity MCPs:** Includes `quixi-workspace` (file index, git pool, shell host), `applescript`, `pdf`, `memory`, `fetch`, `github`, `office365`, `Framebuffer`, `visualize`, and `scheduled-tasks` pre-configured with zero manual setup.
 - **Original Interface:** System typography, light and dark themes, keyboard navigation, and responsive layouts. The replacement interface currently uses English.
 
+Select a workspace folder before sending a file task. **Manual** allows directory listings and file reads, then pauses for approval before changes or commands. **Allow once** approves the displayed action; **Allow file edits** permits edits in that conversation while commands continue to ask. **Auto** permits tool actions without individual approval. Approving an action resumes the current request.
+
+Tool calls and their results appear together in a collapsible activity group. **Stop** cancels pending approvals and preserves any answer text already received. Follow-up requests retain earlier tool results, and artifact revisions can update the existing preview without changing its link.
+
 ---
 
 ## Supported LLM Providers

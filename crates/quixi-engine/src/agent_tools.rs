@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 /// (`Read` shows "Read <file>", `Bash` shows the command, `mcp__*` shows the server tool).
 pub const TOOL_BASH: &str = "Bash";
 pub const TOOL_READ: &str = "Read";
+pub const TOOL_LIST: &str = "ListDirectory";
 pub const TOOL_WRITE: &str = "Write";
 pub const TOOL_EDIT: &str = "Edit";
 pub const TOOL_WEB_FETCH: &str = "WebFetch";
@@ -25,7 +26,7 @@ pub fn tool_schemas() -> Value {
             "type": "function",
             "function": {
                 "name": TOOL_BASH,
-                "description": "Run a shell command (zsh) on this Mac in the workspace folder and return stdout, stderr and the exit code. Use it for git, builds, tests, `open -a App`, `osascript` and anything else a terminal can do.",
+                "description": "Run a shell command in the workspace folder and return stdout, stderr and the exit code. Requests user approval unless Auto mode is enabled. Use ListDirectory and Read for read-only workspace inspection.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -40,7 +41,7 @@ pub fn tool_schemas() -> Value {
             "type": "function",
             "function": {
                 "name": TOOL_READ,
-                "description": "Read a text file from disk. Relative paths resolve against the workspace folder.",
+                "description": "Read a text file or list a directory. Relative paths resolve against the selected workspace folder. Available in Manual mode without approval.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -49,6 +50,20 @@ pub fn tool_schemas() -> Value {
                         "limit": { "type": "integer", "description": "Maximum number of lines (default 400)." }
                     },
                     "required": ["file_path"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": TOOL_LIST,
+                "description": "List names and types of entries in a directory, without running a shell or changing files. Defaults to the selected workspace. Available in Manual mode without approval. Use Read on relevant files afterwards.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Directory path; relative paths resolve against the selected workspace. Defaults to '.' ."}
+                    },
+                    "required": []
                 }
             }
         },
@@ -115,13 +130,57 @@ pub fn tool_schemas() -> Value {
             "type":"function",
             "function":{
                 "name":"Artifact",
-                "description":"Create a private local HTML artifact and open its preview. Use self-contained HTML with inline CSS; no external resources. Does not publish, upload, or modify project files. Publishing is unavailable.",
+                "description":"Create or update a private local HTML artifact and open its preview. For revisions, pass the artifact id from the earlier result; the same title in this conversation also updates the existing preview. Use self-contained HTML with inline CSS; no external resources. Does not publish, upload, or modify project files. Publishing is unavailable.",
                 "parameters":{"type":"object","properties":{
-                    "title":{"type":"string"},"html":{"type":"string"}
+                    "title":{"type":"string"},"html":{"type":"string"},"id":{"type":"string","description":"Existing artifact id in this conversation to update; omit for a new artifact."}
                 },"required":["title","html"],"additionalProperties":false}
             }
         }
     ])
+}
+
+/// Keep advertised actions aligned with the same runtime permission gate.
+fn action_allowed(name: &str, mode: &str) -> bool {
+    matches!(mode, "auto" | "bypassPermissions")
+        || (mode == "acceptEdits" && matches!(name, TOOL_WRITE | TOOL_EDIT))
+        || !matches!(name, TOOL_BASH | TOOL_WRITE | TOOL_EDIT | TOOL_WEB_FETCH)
+}
+
+pub fn available_tool_schemas(_mode: &str) -> Value { tool_schemas() }
+
+pub fn requires_approval(name: &str, input: &Value, mode: &str) -> bool {
+    !action_allowed(name,mode) || (name==TOOL_MCP_CALL && !matches!(mode,"auto"|"bypassPermissions") &&
+        mcp_tool_needs_confirm(input["server"].as_str().unwrap_or(""), input["tool"].as_str().unwrap_or("")))
+}
+
+pub fn permission_context(mode: &str) -> String {
+    format!("Current permission mode: {mode}. ListDirectory and Read can inspect the selected workspace without approval in every mode. Use them to explore relevant project files. Write, Edit, Bash and other action tools are available: in Manual mode, requesting an action pauses the task and shows the user an approval card; continue when they approve. Do not claim editing tools are unavailable or ask the user to repeat their request or change settings. Allow file edits permits Write and Edit for this task; shell commands and other actions still ask. Auto permits actions without individual approval. If the user denies an action, do not retry or bypass it. A denied shell command does not mean workspace reads are blocked.")
+}
+
+fn list_directory(target: &Path) -> (String, bool) {
+    let entries = match std::fs::read_dir(target) {
+        Ok(entries) => entries,
+        Err(error) => return (format!("Cannot list {}: {error}", target.display()), true),
+    };
+    // Bound the listing and do not recurse or follow directory symlinks.
+    let mut rows = Vec::new();
+    for entry in entries.take(201) {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => return (format!("Cannot list {}: {error}", target.display()), true),
+        };
+        let kind = match entry.file_type() {
+            Ok(t) if t.is_symlink() => "symlink",
+            Ok(t) if t.is_dir() => "directory",
+            Ok(_) => "file",
+            Err(_) => "unknown",
+        };
+        rows.push(json!({"name": entry.file_name().to_string_lossy(), "type": kind}));
+    }
+    rows.sort_by(|a,b| a["name"].as_str().cmp(&b["name"].as_str()));
+    let truncated = rows.len() > 200;
+    rows.truncate(200);
+    (json!({"path":target.to_string_lossy(),"entries":rows,"truncated":truncated}).to_string(), false)
 }
 
 fn resolve_path(raw: &str, cwd: &str) -> PathBuf {
@@ -191,7 +250,7 @@ pub fn validate_input(name: &str, input: &Value) -> Result<(), String> {
 #[derive(Default)]
 pub struct ToolResults(std::collections::HashMap<String, (String, bool)>);
 impl ToolResults {
-    fn cacheable(name: &str) -> bool { !matches!(name, TOOL_READ | TOOL_WEB_FETCH) }
+    fn cacheable(name: &str) -> bool { !matches!(name, TOOL_READ | TOOL_LIST | TOOL_WEB_FETCH) }
     pub fn contains(&self, name: &str, input: &Value) -> bool { Self::cacheable(name) && self.0.contains_key(&format!("{name}|{input}")) }
     pub fn run(&mut self, name: &str, input: &Value, action: impl FnOnce() -> (String, bool)) -> (String, bool) {
         // Reads are observations, not effects: an intervening mutation may change them.
@@ -217,8 +276,8 @@ pub fn execute(
         "auto" | "bypassPermissions"
     );
 
-    if !auto_ok && !(permission_mode == "acceptEdits" && matches!(name, TOOL_WRITE | TOOL_EDIT)) && matches!(name, TOOL_BASH | TOOL_WRITE | TOOL_EDIT | TOOL_WEB_FETCH) {
-        return (format!("Approval required for {name}. Switch this session to Auto to allow actions."), true);
+    if !action_allowed(name, permission_mode) {
+        return (format!("Approval required for {name}. Use ListDirectory and Read to inspect the selected workspace without approval. Auto allows shell commands and browsing; Allow file edits also permits Write and Edit."), true);
     }
     match name {
         TOOL_BASH => {
@@ -254,12 +313,17 @@ pub fn execute(
                 Err(err) => (format!("Failed to run command: {err}"), true),
             }
         }
+        TOOL_LIST => {
+            let raw = input.get("path").and_then(Value::as_str).unwrap_or(".");
+            list_directory(&resolve_path(raw, cwd))
+        }
         TOOL_READ => {
             let raw = input
                 .get("file_path")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             let target = resolve_path(raw, cwd);
+            if target.is_dir() { return list_directory(&target); }
             let offset = input
                 .get("offset")
                 .and_then(|v| v.as_u64())
@@ -554,4 +618,58 @@ mod permission_regression_tests {
             assert!(error); assert!(message.contains("Approval required"));
         }
     }
+    #[test]
+    fn manual_inspects_selected_workspace_without_shell_or_file_changes() {
+        let root=std::env::temp_dir().join(format!("quixi-folder-read-{}",uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("README.md"),"# Selected project\nPROJECT-CONTENT-FROM-SELECTED-FOLDER").unwrap();
+        std::fs::write(root.join("résumé notes.txt"),"unicode filename").unwrap();
+        let cwd=root.to_str().unwrap(); let host=McpHost::new();
+        for name in [TOOL_LIST,TOOL_READ] {
+            let args=if name==TOOL_READ {json!({"file_path":"."})} else {json!({})};
+            let (output,error)=execute(name,&args,cwd,"default",&host); assert!(!error,"{output}");
+            let listing:Value=serde_json::from_str(&output).unwrap();
+            assert_eq!(std::fs::canonicalize(listing["path"].as_str().unwrap()).unwrap(),std::fs::canonicalize(&root).unwrap());
+            assert!(listing["entries"].as_array().unwrap().iter().any(|e|e["name"]=="README.md"));
+            assert!(listing["entries"].as_array().unwrap().iter().any(|e|e["name"]=="src" && e["type"]=="directory"));
+            assert!(listing["entries"].as_array().unwrap().iter().any(|e|e["name"]=="résumé notes.txt"));
+        }
+        let (text,error)=execute(TOOL_READ,&json!({"file_path":"README.md"}),cwd,"default",&host);
+        assert!(!error); assert!(text.contains("PROJECT-CONTENT-FROM-SELECTED-FOLDER"));
+        let (_,error)=execute(TOOL_WRITE,&json!({"file_path":"should-not-exist","content":"x"}),cwd,"default",&host);
+        assert!(error);assert!(!root.join("should-not-exist").exists());
+        let mut cache=ToolResults::default();let args=json!({});
+        cache.run(TOOL_LIST,&args,||execute(TOOL_LIST,&args,cwd,"default",&host));
+        std::fs::write(root.join("new.md"),"new").unwrap();
+        assert!(cache.run(TOOL_LIST,&args,||execute(TOOL_LIST,&args,cwd,"default",&host)).0.contains("new.md"));
+        let (message,error)=execute(TOOL_LIST,&json!({"path":"missing"}),cwd,"default",&host);
+        assert!(error);assert!(message.contains("Cannot list"));assert!(!message.contains("Approval"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn offered_tools_follow_current_permission_mode() {
+        let names=|mode| available_tool_schemas(mode).as_array().unwrap().iter().map(|s|s["function"]["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+        for mode in ["default","acceptEdits","auto"] {
+            let offered=names(mode);
+            assert!(offered.contains(&TOOL_LIST.to_string()));assert!(offered.contains(&TOOL_READ.to_string()));
+            assert!(offered.contains(&TOOL_BASH.to_string()));
+            assert_eq!(requires_approval(TOOL_BASH,&json!({}),mode),mode!="auto");
+            assert!(offered.contains(&TOOL_WRITE.to_string()));
+            assert_eq!(requires_approval(TOOL_WRITE,&json!({}),mode),mode=="default");
+        }
+        assert!(permission_context("default").contains("without approval"));
+    }
+
+    #[test]
+    fn directory_listing_is_bounded() {
+        let root=std::env::temp_dir().join(format!("quixi-folder-limit-{}",uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        for n in 0..205 {std::fs::write(root.join(format!("file-{n}.txt")),"").unwrap();}
+        let (out,error)=list_directory(&root);assert!(!error);
+        let listing:Value=serde_json::from_str(&out).unwrap();
+        assert_eq!(listing["entries"].as_array().unwrap().len(),200);assert_eq!(listing["truncated"],true);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
 }

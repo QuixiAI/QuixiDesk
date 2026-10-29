@@ -23,6 +23,7 @@
     drafts: new Map(),
     attachmentDrafts: new Map(),
     stopped: new Set(),
+    approvals: new Map(),
     collapsed: localStorage.getItem("quixi.sidebar") === "closed",
     settingsTab: "general",
   };
@@ -194,7 +195,7 @@
   }
   function currentFolder() {
     return (
-      state.folder || project()?.folders?.[0]?.path || session()?.cwd || ""
+      session()?.cwd || state.folder || project()?.folders?.[0]?.path || ""
     );
   }
   function dialog(title, body, { wide = false } = {}) {
@@ -352,6 +353,11 @@
     if (!pages.includes(page)) page = "new";
     state.page = page;
     state.id = id;
+    if (page === "chat") {
+      const opened = session();
+      state.project = opened?.spaceId || null;
+      state.folder = opened?.cwd || "";
+    }
     state.attachments = state.attachmentDrafts.get(draftKey())?.slice() || [];
     const path =
       page === "chat" ? "/chat/" + encodeURIComponent(id) : "/" + page;
@@ -802,7 +808,7 @@
       el(
         "p",
         {},
-        "Tasks can inspect this folder. Manual mode blocks shell commands and changes until you choose a broader permission mode.",
+        "Tasks can inspect this folder. In Manual mode, QuixiDesk asks before changing files or running commands.",
       ),
       field("Folder path", input),
       browse,
@@ -835,6 +841,7 @@
                     spaceId: state.project,
                   },
                 ]);
+                await loadSessions();
               }
               d.close();
               renderPage();
@@ -943,6 +950,10 @@
     const value = await rpc(service(old), "getSession", [id]);
     if (value) {
       Object.assign(old, value);
+      state.approvals.set(
+        id,
+        (await rpc(service(old), "getToolPermissions", [id])) || [],
+      );
       if (old._kind === "code")
         state.transcripts.set(
           id,
@@ -1119,6 +1130,209 @@
     }
     return box;
   }
+  function permissionCard(request, s) {
+    const edit = ["Write", "Edit"].includes(request.toolName);
+    const input = request.input || {};
+    const card = el(
+      "section",
+      { class: "permission-card", "aria-label": "Permission requested" },
+      el("h3", {}, edit ? "Allow file changes?" : "Allow this action?"),
+      el(
+        "p",
+        {},
+        edit
+          ? (request.toolName === "Write" ? "Create or update " : "Edit ") +
+              (input.file_path || "file")
+          : input.description ||
+              input.command ||
+              [request.toolName, input.server, input.tool]
+                .filter(Boolean)
+                .join(" · "),
+      ),
+      el(
+        "details",
+        {},
+        el("summary", {}, edit ? "Review change" : "Review action"),
+        el(
+          "pre",
+          {},
+          request.toolName === "Write"
+            ? input.content || "(empty file)"
+            : JSON.stringify(input, null, 2),
+        ),
+      ),
+      edit
+        ? el(
+            "p",
+            { class: "hint" },
+            "Allow file edits applies to this conversation. Shell commands will still ask.",
+          )
+        : null,
+    );
+    const decide = async (decision) => {
+      const buttons = [...card.querySelectorAll("button")];
+      buttons.forEach((b) => (b.disabled = true));
+      try {
+        const r = await rpc(service(s), "resolveToolPermission", [
+          s.sessionId,
+          request.requestId,
+          decision,
+        ]);
+        if (r?.error) throw new Error(r.error);
+        await refreshSession(s.sessionId);
+        renderTranscript();
+        updateSendButton();
+        const mode = document.querySelector(
+          'select[aria-label="Tool permission mode"]',
+        );
+        if (mode) mode.value = session()?.permissionMode || state.permission;
+      } finally {
+        buttons.forEach((b) => (b.disabled = false));
+      }
+    };
+    card.append(
+      el(
+        "div",
+        { class: "permission-actions" },
+        button(
+          "Allow once",
+          () => decide("allow_once"),
+          edit ? "quiet" : "primary",
+        ),
+        edit
+          ? button(
+              "Allow file edits",
+              () => decide("allow_file_edits"),
+              "primary",
+            )
+          : null,
+        button("Deny", () => decide("deny"), "quiet"),
+      ),
+    );
+    return card;
+  }
+  function toolActivity(group, active, opened) {
+    const failed = group.steps.filter((s) => s.result?.is_error).length;
+    const fileOnly = group.steps.every((s) =>
+      ["Read", "ListDirectory"].includes(s.call?.name),
+    );
+    const label = fileOnly
+      ? active
+        ? "Exploring files"
+        : "File activity"
+      : active
+        ? "Working with tools"
+        : "Tool activity";
+    const node = group.node;
+    node.className = "activity-group" + (failed ? " has-failures" : "");
+    node.dataset.disclosure = group.key;
+    node.open = opened.has(group.key);
+    node.append(
+      el(
+        "summary",
+        {},
+        icon(fileOnly ? "folder" : "tools", 14),
+        el("span", { class: "activity-label" }, label),
+        el(
+          "span",
+          { class: "activity-count" },
+          `${group.steps.length} action${group.steps.length === 1 ? "" : "s"}`,
+        ),
+        failed
+          ? el("span", { class: "activity-failed" }, `${failed} failed`)
+          : null,
+        active
+          ? el("span", {
+              class: "activity-running",
+              "aria-label": "In progress",
+            })
+          : null,
+        el("span", { class: "activity-chevron", "aria-hidden": "true" }, "›"),
+      ),
+    );
+    const rows = el("div", { class: "activity-steps" });
+    for (const step of group.steps) {
+      const call = step.call,
+        result = step.result;
+      const bad = !!result?.is_error;
+      const input = call?.input || {};
+      const path = input.file_path || input.path || sPath();
+      const basename = String(path).split(/[\\/]/).filter(Boolean).pop() || ".";
+      let title = call?.name || (bad ? "Tool action failed" : "Tool result");
+      if (call?.name === "Read") title = "Read " + basename;
+      else if (call?.name === "ListDirectory")
+        title =
+          "List " +
+          (path === "."
+            ? sPath().split(/[\\/]/).filter(Boolean).pop() || "folder"
+            : basename);
+      else if (call?.name === "Bash")
+        title = input.description || "Run command";
+      else if (["Write", "Edit"].includes(call?.name))
+        title = call.name + " " + basename;
+      else if (call?.name === "McpCall")
+        title =
+          [input.server, input.tool].filter(Boolean).join(" · ") ||
+          "Connected tool";
+      const awaiting = state.approvals
+        .get(session()?.sessionId)
+        ?.some((r) => r.toolCallId === step.id);
+      const status = result
+        ? bad
+          ? "Failed"
+          : "Completed"
+        : awaiting
+          ? "Awaiting approval"
+          : active
+            ? "Running…"
+            : "No result recorded";
+      const key = group.key + "/" + step.id;
+      const row = el(
+        "details",
+        {
+          class: "tool-card tool-step" + (bad ? " failed" : ""),
+          "data-disclosure": key,
+          open: opened.has(key),
+        },
+        el(
+          "summary",
+          {},
+          icon(bad ? "close" : result ? "check" : "tools", 12),
+          el("span", { class: "tool-step-title", title }, title),
+          el("small", { class: "tool-step-status" }, status),
+        ),
+      );
+      if (call)
+        row.append(
+          el(
+            "div",
+            { class: "tool-step-body" },
+            el("small", {}, "Input"),
+            el("pre", {}, JSON.stringify(input, null, 2)),
+          ),
+        );
+      if (result)
+        row.append(
+          el(
+            "div",
+            { class: "tool-step-body" },
+            el("small", {}, bad ? "Error" : "Result"),
+            el(
+              "pre",
+              {},
+              typeof result.content === "string"
+                ? result.content
+                : JSON.stringify(result.content, null, 2) || "(empty result)",
+            ),
+          ),
+        );
+      rows.append(row);
+    }
+    node.append(rows);
+    function sPath() {
+      return session()?.cwd || currentFolder() || ".";
+    }
+  }
   function renderTranscript() {
     const target = document.getElementById("conversation");
     const s = session();
@@ -1132,7 +1346,15 @@
         : s.bufferedMessages || [];
     const seen = new Set();
     const result = [];
-    for (const message of messages) {
+    const opened = new Set(
+      [...target.querySelectorAll("details[open][data-disclosure]")].map(
+        (n) => n.dataset.disclosure,
+      ),
+    );
+    const groups = [];
+    let group = null,
+      turnKey = "initial";
+    for (const [messageIndex, message] of messages.entries()) {
       if (message.type === "result" || message.type === "stream_event")
         continue;
       const id = message.uuid;
@@ -1147,11 +1369,23 @@
       const tools = blocks.filter(
         (b) => b.type === "tool_use" || b.type === "tool_result",
       );
+      if (texts && role === "user") {
+        group = null;
+        turnKey = id || "message-" + messageIndex;
+      }
       if (texts) {
         const article = el(
           "article",
           { class: "message " + role },
-          el("div", { class: "role" }, role === "user" ? "You" : "QuixiDesk"),
+          el(
+            "div",
+            { class: "role" },
+            role === "user"
+              ? "You"
+              : message.message?.stop_reason === "user_stop"
+                ? "QuixiDesk · Stopped"
+                : "QuixiDesk",
+          ),
           plainBody(texts),
           el(
             "div",
@@ -1168,29 +1402,33 @@
         );
         result.push(article);
       }
-      for (const tool of tools) {
-        const isResult = tool.type === "tool_result";
-        const failed = !!tool.is_error;
-        const content = isResult
-          ? typeof tool.content === "string"
-            ? tool.content
-            : JSON.stringify(tool.content, null, 2)
-          : JSON.stringify(tool.input || {}, null, 2);
-        const title = isResult
-          ? failed
-            ? "Tool action failed"
-            : "Tool result"
-          : tool.name || "Tool call";
-        result.push(
-          el(
-            "details",
-            { class: "tool-card" + (failed ? " failed" : "") },
-            el("summary", {}, icon(failed ? "close" : "tools", 14), title),
-            el("pre", {}, content || "(empty result)"),
-          ),
-        );
+      for (const [toolIndex, tool] of tools.entries()) {
+        if (!group) {
+          group = {
+            key: "activity-" + turnKey,
+            node: el("details"),
+            steps: [],
+            byId: new Map(),
+          };
+          groups.push(group);
+          result.push(group.node);
+        }
+        const key =
+          tool.id ||
+          tool.tool_use_id ||
+          `unlinked-${messageIndex}-${toolIndex}`;
+        let step = group.byId.get(key);
+        if (!step) {
+          step = { id: key };
+          group.byId.set(key, step);
+          group.steps.push(step);
+        }
+        if (tool.type === "tool_use") step.call = tool;
+        else step.result = tool;
       }
     }
+    for (const activity of groups)
+      toolActivity(activity, activity === group && running(s), opened);
     const stream = state.streams.get(s.sessionId);
     if (stream && running(s)) {
       if (stream.thinking)
@@ -1220,6 +1458,8 @@
         ),
       );
     }
+    for (const request of state.approvals.get(s.sessionId) || [])
+      result.push(permissionCard(request, s));
     if (state.stopped.has(s.sessionId) && !running(s))
       result.push(
         el(
@@ -1249,6 +1489,7 @@
     else target.scrollTop = oldScroll;
   }
   async function sessionMenu(s) {
+    s = state.sessions.find((current) => current.sessionId === s.sessionId) || s;
     const d = dialog("Task actions", [
       el("p", {}, s.title),
       el(
@@ -1759,6 +2000,7 @@
             el("small", {}, t.enabled ? "Enabled definition" : "Paused"),
           ),
           button("Run now", () => {
+            state.project = null;
             state.folder = t.cwd || "";
             state.permission = t.permissionMode || "default";
             navigate("new");
@@ -2100,7 +2342,7 @@
               localStorage.setItem("quixi.permission", v);
             },
           ),
-          "Manual blocks shell execution and file changes. Auto permits tool actions with the built-in destructive-command guard.",
+          "Manual asks before file changes and commands. Allow file edits permits changes for the task; commands still ask. Auto permits tool actions.",
         ),
         el(
           "div",

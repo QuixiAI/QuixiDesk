@@ -669,6 +669,13 @@ impl EipcRouter {
                 }
                 Value::Null
             }
+            ("LocalAgentModeSessions", "getToolPermissions") | ("LocalSessions", "getToolPermissions") => {
+                self.engine.pending_tool_approvals(args.first().and_then(Value::as_str).unwrap_or(""))
+            }
+            ("LocalAgentModeSessions", "resolveToolPermission") | ("LocalSessions", "resolveToolPermission") => {
+                self.engine.resolve_tool_approval(args.first().and_then(Value::as_str).unwrap_or(""),
+                    args.get(1).and_then(Value::as_str).unwrap_or(""),args.get(2).and_then(Value::as_str).unwrap_or(""))
+            }
             ("LocalAgentModeSessions", "setPermissionMode") => {
                 let sid = args.first().and_then(|v| v.as_str()).unwrap_or("");
                 let mode = args.get(1).and_then(|v| v.as_str()).unwrap_or("default");

@@ -1243,7 +1243,7 @@ impl ProviderManager {
             .unwrap_or("")
             .trim();
 
-        let (base_url, api_key, api_format, is_local) = {
+        let (base_url, api_key, api_format) = {
             let st = self.state.read();
             if let Some(entry) = st.providers.iter().find(|p| p.id == provider_id) {
                 let url = if !supplied_url.is_empty() {
@@ -1262,14 +1262,12 @@ impl ProviderManager {
                     url,
                     key,
                     entry.api_format.clone(),
-                    entry.category == "local",
                 )
             } else {
                 (
                     supplied_url.to_string(),
                     supplied_key.to_string(),
                     "openai".to_string(),
-                    false,
                 )
             }
         };
@@ -1297,8 +1295,7 @@ impl ProviderManager {
                         discovered_models.len()
                     );
                 } else {
-                    ok = true;
-                    message = "ChatGPT Codex OAuth token verified".to_string();
+                    message = "Could not verify the ChatGPT connection: no model catalog was returned. Try again or reconnect the account.".to_string();
                 }
             } else {
                 let models_url = format!("{}/models", base_url);
@@ -1334,23 +1331,12 @@ impl ProviderManager {
                                     discovered_models.len()
                                 )
                             };
-                        } else if !api_key.is_empty() && !is_local {
-                            ok = true;
-                            message = format!(
-                                "Endpoint reachable ({}) — key format verified",
-                                status.as_u16()
-                            );
                         } else {
                             message = format!("HTTP {} from {}", status.as_u16(), models_url);
                         }
                     }
                     Err(err) => {
-                        if !api_key.is_empty() && !is_local {
-                            ok = true;
-                            message = "Key format validated (offline/local check)".to_string();
-                        } else {
-                            message = format!("Connection failed: {}", err);
-                        }
+                        message = format!("Connection failed: {}", err);
                     }
                 }
             }
@@ -3491,6 +3477,32 @@ mod provider_validation_tests {
             assert!(p.models.iter().any(|m|m.id=="private/hidden:latest"));
         }
         drop(state); drop(restarted); std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn connection_checks_reject_http_errors_and_offline_endpoints_even_with_a_key() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut connection, _) = listener.accept().unwrap();
+            connection.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+            let mut request = [0; 4096];
+            connection.read(&mut request).unwrap();
+            write!(connection, "HTTP/1.1 401 Unauthorized\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}").unwrap();
+        });
+        let root = std::env::temp_dir().join(format!("quixi-connection-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let manager = ProviderManager::new(&root);
+        let result = manager.test_provider(&json!({"providerId":"custom","baseUrl":url,"apiKey":"synthetic-test-key"}));
+        assert_eq!(result["ok"], false);
+        assert!(result["message"].as_str().unwrap().contains("401"));
+        server.join().unwrap();
+        let result = manager.test_provider(&json!({"providerId":"custom","baseUrl":url,"apiKey":"synthetic-test-key"}));
+        assert_eq!(result["ok"], false);
+        assert!(result["message"].as_str().unwrap().contains("Connection failed"));
+        drop(manager);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
