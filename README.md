@@ -18,8 +18,19 @@
 
 ## Screenshots
 
-### Original Workspace
-![QuixiDesk Home Screen](docs/screenshots/quixidesk-home.png)
+Current macOS interface, shown with a sample club-planning workspace.
+
+### Start a task
+
+![QuixiDesk home in dark theme, with workspace selection, permission mode, and model picker](docs/screenshots/quixidesk-home.jpg)
+
+### Work through a conversation
+
+![QuixiDesk conversation showing compact tool activity and an updated interactive meeting planner](docs/screenshots/quixidesk-conversation.jpg)
+
+### Choose a model
+
+![QuixiDesk model picker in light theme, searching OpenRouter's advertised models](docs/screenshots/quixidesk-models.jpg)
 
 ---
 
@@ -50,6 +61,8 @@ Tool calls and their results appear together in a collapsible activity group. **
 ## Supported LLM Providers
 
 QuixiDesk includes a built-in **Provider Manager** (open **Settings → Providers**) supporting **cloud, OAuth, and local inference providers**:
+
+Configure the endpoint and credentials, then save. QuixiDesk loads all models advertised by the provider's `/models` endpoint; no model ID is required during setup. Use the chat model picker to search, select, or refresh the catalog. Custom Endpoint and OpenRouter also support adding exact IDs for unadvertised models without replacing the discovered list.
 
 ### Priority Providers
 | # | Provider | Auth Modes | Default / Example Models |

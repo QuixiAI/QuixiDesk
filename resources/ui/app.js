@@ -864,6 +864,11 @@
       toast("Connect a provider before sending a task.");
       return;
     }
+    if (!state.providers.activeModel) {
+      modelPicker();
+      toast("Choose a model before sending a task.");
+      return;
+    }
     if (running(session())) return;
     const b = document.getElementById("send-button");
     if (b) b.disabled = true;
@@ -2612,19 +2617,6 @@
       value: p.baseUrl || "",
       required: true,
     });
-    const models = [
-      ...(p.models || []).map((m) => [m.id, m.label || m.id]),
-      ...(p.customModels || [])
-        .filter((id) => !p.models?.some((m) => m.id === id))
-        .map((id) => [id, id]),
-    ];
-    const model = ["custom", "openrouter"].includes(p.id)
-      ? el("input", {
-          value: p.selectedModel || "",
-          required: true,
-          placeholder: "Model ID",
-        })
-      : select(models, p.selectedModel);
     const format = select(
       [
         ["openai", "Chat completions API"],
@@ -2652,21 +2644,15 @@
           : "Never paste a key into a conversation.",
       ),
       field("Endpoint", base),
-      field(
-        "Model",
-        model,
-        ["custom", "openrouter"].includes(p.id)
-          ? "Enter an exact model ID, including models not listed by the provider."
-          : "",
-      ),
+      el("p", { class: "hint" }, "Models are loaded from the provider when you save. Choose a model in the chat dropdown; unadvertised models can also be added there."),
     );
     if (p.id === "custom") content.append(field("API format", format));
     const payload = () => ({
       providerId: p.id,
       ...(key.value ? { apiKey: key.value } : {}),
       baseUrl: base.value.trim(),
-      selectedModel: model.value.trim(),
       apiFormat: format.value,
+      refreshModels: true,
       setAsActive: true,
     });
     let oauthTimer;
@@ -2681,7 +2667,7 @@
             error.textContent = "Testing…";
             const r = await api("/api/quixi/providers/test", payload());
             error.textContent = r.ok
-              ? "Connection succeeded."
+              ? r.message || "Connection succeeded."
               : r.error || r.message || "Connection failed.";
           } catch (e) {
             error.textContent = e.message;
@@ -2693,19 +2679,20 @@
         "Save & use provider",
         async () => {
           try {
-            if (p.id === "custom" && !model.value.trim())
-              throw new Error("Enter a model ID.");
+            error.textContent = "Saving provider and loading models…";
             const r = await api("/api/quixi/providers/save", payload());
             if (r.error) throw new Error(r.error);
             const r2 = await api("/api/quixi/providers/complete-onboarding", {
               activeProvider: p.id,
-              activeModel: model.value,
+              activeModel: r.activeModel || "",
             });
             if (r2.error) throw new Error(r2.error);
             await loadProviders();
             await changed?.();
             d.close();
-            toast("Provider saved.");
+            toast(r.modelDiscovery?.ok === false
+              ? "Provider saved. Could not load its models: " + r.modelDiscovery.message
+              : "Provider saved. Models are available in the chat dropdown.", r.modelDiscovery?.ok === false);
           } catch (e) {
             error.textContent = e.message;
           }
@@ -2806,21 +2793,46 @@
       selected,
       (v) => {
         selected = v;
+        query.value = "";
+        catalogStatus.textContent = "";
         draw();
       },
       { "aria-label": "Provider" },
     );
     const models = el("div", { class: "model-options" });
     const additions = el("div", { class: "manual-models" });
+    const query = el("input", {
+      type: "search",
+      placeholder: "Find a model…",
+      "aria-label": "Filter models",
+      onInput: () => draw(),
+    });
+    const catalogStatus = el("p", { class: "hint", role: "status" });
+    const refresh = button("Refresh models", async () => {
+      refresh.disabled = true;
+      catalogStatus.textContent = "Loading models…";
+      try {
+        const r = await api("/api/quixi/providers/test", { providerId: selected });
+        await loadProviders();
+        providers = state.providers.providers.filter((p) => p.configured);
+        catalogStatus.textContent = r.message || (r.ok ? "Models loaded." : "Could not load models.");
+        draw();
+      } catch (e) { catalogStatus.textContent = e.message; }
+      finally { refresh.disabled = false; }
+    }, "quiet");
     const d = dialog("Choose model", [
       field("Provider", ps),
+      query,
+      refresh,
+      catalogStatus,
       models,
       additions,
     ]);
     function draw() {
       const p = providers.find((x) => x.id === selected) || providers[0];
       models.replaceChildren(
-        ...[...p.models]
+        ...[...(p.models || [])]
+          .filter((m) => `${m.id} ${m.label || ""}`.toLowerCase().includes(query.value.trim().toLowerCase()))
           .sort(
             (a, b) =>
               Number(b.id === p.selectedModel) -
@@ -2863,6 +2875,10 @@
             ),
           ),
       );
+      if (!models.childElementCount)
+        models.append(el("p", { class: "hint" }, query.value.trim()
+          ? "No matching models. Try another search."
+          : "No models loaded yet. Refresh the catalog or add an unadvertised model below."));
       additions.replaceChildren();
       if (["custom", "openrouter"].includes(p.id)) {
         const input = el("input", {
@@ -2893,6 +2909,7 @@
               if (r.error) throw new Error(r.error);
               await loadProviders();
               providers = state.providers.providers.filter((p) => p.configured);
+              query.value = "";
               draw();
               toast("Model saved. Select it above when you’re ready.");
             } catch (e) {
@@ -2911,7 +2928,8 @@
         });
         additions.append(
           el("hr"),
-          el("h3", {}, "Add a model"),
+          el("details", {},
+          el("summary", {}, "Add an unadvertised model"),
           el(
             "p",
             { class: "hint" },
@@ -2920,6 +2938,7 @@
           field("Model ID", input),
           error,
           submit,
+          ),
         );
       }
     }

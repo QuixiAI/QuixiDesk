@@ -227,11 +227,9 @@ impl ProviderManager {
                 env_var: "CUSTOM_API_KEY".to_string(),
                 docs_url: String::new(),
                 configured: false,
-                selected_model: "custom-model".to_string(),
-                models: vec![
-                    Self::model("custom-model", "Custom Model ID", 128_000, true, true),
-                ],
-                custom_models: vec!["custom-model".to_string()],
+                selected_model: String::new(),
+                models: vec![],
+                custom_models: vec![],
                 context_window: 128_000,
                 last_tested_ok: None,
                 last_latency_ms: None,
@@ -1059,13 +1057,11 @@ impl ProviderManager {
                 matches!(u.scheme(), "http" | "https") && u.host_str().is_some()
                 && u.username().is_empty() && u.password().is_none());
             if !valid_url { return json!({"error":"Enter a valid HTTP or HTTPS endpoint URL."}); }
-            let model = body.get("selectedModel").and_then(Value::as_str).unwrap_or(&existing.selected_model);
-            if model.trim().is_empty() { return json!({"error":"Enter a model ID."}); }
             let format = body.get("apiFormat").and_then(Value::as_str).unwrap_or(&existing.api_format);
             if !matches!(format, "openai" | "anthropic") {
                 return json!({"error":"Select a supported API format."});
             }
-            if !existing.configured && ["baseUrl", "selectedModel", "apiFormat"].iter().any(|key| body.get(*key).is_none()) {
+            if !existing.configured && ["baseUrl", "apiFormat"].iter().any(|key| body.get(*key).is_none()) {
                 return json!({"error":"Configure the endpoint before adding models."});
             }
         }
@@ -1144,9 +1140,7 @@ impl ProviderManager {
                 .unwrap_or(true)
             {
                 st.active_provider = provider_id.to_string();
-                if !updated_model.is_empty() {
-                    st.active_model = updated_model;
-                }
+                st.active_model = updated_model;
             }
             if body
                 .get("completeOnboarding")
@@ -1158,7 +1152,11 @@ impl ProviderManager {
         }
         drop(st);
         self.persist();
-        self.get_public_state()
+        let discovery = body.get("refreshModels").and_then(Value::as_bool).unwrap_or(false)
+            .then(|| self.test_provider(&json!({"providerId":provider_id})));
+        let mut result = self.get_public_state();
+        if let Some(discovery) = discovery { result["modelDiscovery"] = discovery; }
+        result
     }
 
     pub fn remove_provider(&self, body: &Value) -> Value {
@@ -1261,7 +1259,7 @@ impl ProviderManager {
                 (
                     url,
                     key,
-                    entry.api_format.clone(),
+                    body.get("apiFormat").and_then(Value::as_str).unwrap_or(&entry.api_format).to_string(),
                 )
             } else {
                 (
@@ -1312,19 +1310,22 @@ impl ProviderManager {
                 match req.send() {
                     Ok(resp) => {
                         let status = resp.status();
-                        if let Ok(json_body) = resp.json::<Value>() {
-                            if let Some(arr) = json_body.get("data").and_then(|v| v.as_array()) {
-                                for item in arr.iter().take(25) {
-                                    if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
-                                        discovered_models.push(id.to_string());
+                        let catalog = resp.json::<Value>().ok();
+                        let advertised = catalog.as_ref().and_then(|j| j.get("data")).and_then(Value::as_array);
+                        if status.is_success() {
+                            if let Some(arr) = advertised {
+                                for item in arr {
+                                    if let Some(id) = item.get("id").and_then(Value::as_str).map(str::trim)
+                                        .filter(|id| !id.is_empty() && !id.chars().any(char::is_control)) {
+                                        if !discovered_models.iter().any(|known| known == id) { discovered_models.push(id.to_string()); }
                                     }
                                 }
                             }
-                        }
-                        if status.is_success() {
-                            ok = true;
-                            message = if discovered_models.is_empty() {
-                                format!("Connected to {} ({})", provider_id, status.as_u16())
+                            ok = advertised.is_some();
+                            message = if !ok {
+                                "The endpoint did not return a valid model catalog (expected a data array).".into()
+                            } else if discovered_models.is_empty() {
+                                "Connected, but the provider advertised no models. You can add an unadvertised model in Choose model.".into()
                             } else {
                                 format!(
                                     "Connected ({} models available)",
@@ -1345,6 +1346,7 @@ impl ProviderManager {
         let latency_ms = start.elapsed().as_millis() as u64;
         {
             let mut st = self.state.write();
+            let mut selected = None;
             if let Some(entry) = st.providers.iter_mut().find(|p| p.id == provider_id) {
                 entry.last_tested_ok = Some(ok);
                 entry.last_latency_ms = Some(latency_ms);
@@ -1359,7 +1361,14 @@ impl ProviderManager {
                         ));
                     }
                 }
+                if let Some(first) = discovered_models.first() {
+                    if !discovered_models.contains(&entry.selected_model) && !entry.custom_models.contains(&entry.selected_model) {
+                        entry.selected_model = first.clone();
+                    }
+                    selected = Some(entry.selected_model.clone());
+                }
             }
+            if st.active_provider == provider_id { if let Some(selected) = selected { st.active_model = selected; } }
         }
         self.persist();
 
@@ -3503,6 +3512,47 @@ mod provider_validation_tests {
         assert!(result["message"].as_str().unwrap().contains("Connection failed"));
         drop(manager);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn saving_provider_discovers_the_entire_catalog_without_a_model_id() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            for _ in 0..3 {
+                let (mut connection, _) = listener.accept().unwrap();
+                connection.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+                let mut request = [0;4096];
+                let count = connection.read(&mut request).unwrap();
+                assert!(String::from_utf8_lossy(&request[..count]).starts_with("GET /v1/models "));
+                let body = json!({"data":(0..80).map(|i|json!({"id":format!("catalog/model-{i:02}")})).collect::<Vec<_>>()}).to_string();
+                write!(connection,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body).unwrap();
+            }
+        });
+        let root = std::env::temp_dir().join(format!("quixi-full-catalog-{}",uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let manager = ProviderManager::new(&root);
+        let saved = manager.save_provider(&json!({"providerId":"custom","baseUrl":url,"apiFormat":"openai","refreshModels":true}));
+        assert_eq!(saved["modelDiscovery"]["ok"], true);
+        assert_eq!(saved["modelDiscovery"]["discoveredModels"].as_array().unwrap().len(), 80);
+        assert_eq!(saved["activeModel"], "catalog/model-00");
+        manager.save_provider(&json!({"providerId":"custom","customModel":"unadvertised/private"}));
+        assert_eq!(manager.test_provider(&json!({"providerId":"custom"}))["ok"],true);
+        assert_eq!(manager.get_public_state()["activeModel"],"unadvertised/private");
+        assert_eq!(manager.save_provider(&json!({"providerId":"openrouter","baseUrl":url,"refreshModels":true}))["modelDiscovery"]["ok"],true);
+        server.join().unwrap();
+        drop(manager);
+        let reopened = ProviderManager::new(&root);
+        let st = reopened.state.read();
+        for id in ["custom","openrouter"] {
+            let entry = st.providers.iter().find(|p|p.id==id).unwrap();
+            for i in 0..80 { assert!(entry.models.iter().any(|m|m.id==format!("catalog/model-{i:02}"))); }
+        }
+        let custom = st.providers.iter().find(|p|p.id=="custom").unwrap();
+        assert_eq!(custom.selected_model,"unadvertised/private");
+        assert!(!custom.models.iter().any(|m|m.id=="custom-model"));
+        drop(st);drop(reopened);std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

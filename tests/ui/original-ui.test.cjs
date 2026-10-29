@@ -15,6 +15,7 @@ async function fixture({
   providerId = "custom",
   permissions = [],
   schedules = [],
+  catalogModels = [],
 } = {}) {
   const dom = new JSDOM(
     '<!doctype html><div id="app"></div><div id="toasts"></div>',
@@ -137,6 +138,8 @@ async function fixture({
   const api = async (route, body) => {
     calls.push({ route, body });
     if (route === "/api/quixi/providers") return providers;
+    if (route === "/api/quixi/providers/complete-onboarding") return providers;
+    if (route === "/api/quixi/providers/test") return { ok: true, message: `Connected (${catalogModels.length} models available)`, discoveredModels: catalogModels };
     if (route === "/api/quixi/browser")
       return {
         selectedTabId: 1,
@@ -169,7 +172,12 @@ async function fixture({
         providers.activeProvider = p.id;
         providers.activeModel = p.selectedModel;
       }
-      return { ok: true };
+      if (body.refreshModels) {
+        p.models = catalogModels.map((id) => ({id, label:id}));
+        p.selectedModel = catalogModels[0] || "";
+        providers.activeModel = p.selectedModel;
+      }
+      return structuredClone(providers);
     }
     throw Error("Unexpected API: " + route);
   };
@@ -585,10 +593,39 @@ test("gallery thumbnails are offline and cannot run artifact scripts", async () 
 });
 
 for (const providerId of ["custom", "openrouter"])
+  test(`provider setup discovers all models without a Model ID: ${providerId}`, async () => {
+    const catalogModels = Array.from({length:80}, (_,i) => `catalog/model-${String(i).padStart(2,"0")}`);
+    const f = await fixture({providerId, catalogModels});
+    try {
+      await f.click("Settings");
+      await f.click("Providers");
+      await f.click("Manage providers");
+      await f.click("Configure");
+      assert.equal(f.w.document.querySelector('[placeholder="Model ID"]'), null);
+      assert.equal(f.w.document.querySelector('[aria-label="Model"]'), null);
+      await f.click("Save & use provider");
+      const save = f.calls.find((c) => c.body?.refreshModels);
+      assert.ok(save);
+      assert.equal(save.body.selectedModel, undefined);
+      assert.equal(save.body.refreshModels, true);
+      await f.click("Close dialog");
+      await f.click("New task");
+      await f.click("Choose model");
+      assert.equal(f.w.document.querySelectorAll('.model-options button').length, 80);
+      f.type('[aria-label="Filter models"]', "model-79");
+      assert.equal(f.w.document.querySelectorAll('.model-options button').length, 1);
+      await f.click("catalog/model-79");
+      const selected = f.calls.find((c) => c.body?.selectedModel === "catalog/model-79");
+      assert.equal(selected.body.setAsActive, true);
+    } finally { f.close(); }
+  });
+
+for (const providerId of ["custom", "openrouter"])
   test(`manual models can be saved without switching and then selected: ${providerId}`, async () => {
     const f = await fixture({ providerId });
     try {
       await f.click("Choose model");
+      f.w.document.querySelector(".manual-models summary").click();
       await f.click("Add model");
       assert.match(
         f.w.document.querySelector(".form-error").textContent,
