@@ -327,6 +327,7 @@
   }
   async function loadProviders() {
     state.providers = await api("/api/quixi/providers");
+    if (state.providers.credentialStorageError) toast("Credentials could not be saved or unlocked: " + state.providers.credentialStorageError, true);
   }
   function navigate(page, id = null, { replace = false } = {}) {
     saveDraft();
@@ -568,6 +569,64 @@
     handlers[state.page]?.(host);
     if (state.browser) renderBrowser(host);
   }
+  let conversationFind = null;
+  function closeConversationFind() {
+    document.getElementById("conversation-find")?.remove();
+    for (const mark of document.querySelectorAll("#conversation mark[data-find]")) mark.replaceWith(document.createTextNode(mark.textContent));
+    conversationFind = null;
+    document.getElementById("prompt")?.focus();
+  }
+  function refreshConversationFind(scroll = true) {
+    if (!conversationFind) return;
+    const target = document.getElementById("conversation");
+    if (!target || conversationFind.session !== state.id) { closeConversationFind(); return; }
+    for (const mark of target.querySelectorAll("mark[data-find]")) mark.replaceWith(document.createTextNode(mark.textContent));
+    target.normalize();
+    const query = conversationFind.input.value.toLocaleLowerCase();
+    const matches = [];
+    if (query) {
+      const walker = document.createTreeWalker(target, NodeFilter.SHOW_TEXT);
+      const nodes = []; while (walker.nextNode()) nodes.push(walker.currentNode);
+      for (const node of nodes) {
+        if (node.parentElement.closest("button,textarea,input,script,style")) continue;
+        const text = node.textContent; const lower = text.toLocaleLowerCase();
+        let at = 0, pos = lower.indexOf(query); if (pos < 0) continue;
+        const fragment = document.createDocumentFragment();
+        while (pos >= 0 && matches.length < 2000) {
+          fragment.append(document.createTextNode(text.slice(at, pos)));
+          const mark = el("mark", {"data-find":"true"}, text.slice(pos, pos + query.length));
+          fragment.append(mark); matches.push(mark); at = pos + query.length; pos = lower.indexOf(query, at);
+        }
+        fragment.append(document.createTextNode(text.slice(at))); node.replaceWith(fragment);
+      }
+    }
+    conversationFind.matches = matches;
+    conversationFind.index = matches.length ? ((conversationFind.index % matches.length) + matches.length) % matches.length : 0;
+    conversationFind.status.textContent = matches.length ? `${conversationFind.index + 1} of ${matches.length}${matches.length === 2000 ? "+" : ""}` : "No matches";
+    const current = matches[conversationFind.index];
+    if (current) { current.classList.add("find-current"); if (scroll) { for (let p=current.parentElement; p && p!==target; p=p.parentElement) if (p.tagName==="DETAILS") p.open=true; current.scrollIntoView?.({block:"center"}); } }
+  }
+  function stepConversationFind(delta) { if (conversationFind) { conversationFind.index += delta; refreshConversationFind(); } }
+  function openConversationFind() {
+    if (!session()) return;
+    if (conversationFind && document.getElementById("conversation-find")) { conversationFind.input.focus(); conversationFind.input.select(); return; }
+    const input = el("input", {type:"search",placeholder:"Find in this conversation", "aria-label":"Find in conversation"});
+    const status = el("span", {role:"status", "aria-live":"polite"}, "No matches");
+    const bar = el("div", {id:"conversation-find",class:"conversation-find",role:"search"},input,status,
+      button("Previous match",()=>stepConversationFind(-1),"quiet"),button("Next match",()=>stepConversationFind(1),"quiet"),button("Close find",closeConversationFind,"quiet","close"));
+    conversationFind={input,status,index:0,matches:[],session:state.id};
+    input.addEventListener("input",()=>{conversationFind.index=0;refreshConversationFind();});
+    input.addEventListener("keydown",e=>{if(e.key==="Enter"){e.preventDefault();stepConversationFind(e.shiftKey?-1:1);}else if(e.key==="Escape"){e.preventDefault();closeConversationFind();}});
+    document.getElementById("conversation").before(bar);input.focus();
+  }
+  function toolResultView(content) {
+    let media;try{media=JSON.parse(content);}catch{}
+    if(media?._quixi_tool_media) {
+      let label=media.text;try{label=JSON.parse(label).content?.map(p=>p.text||"").filter(Boolean).join("\n")||label;}catch{}
+      return el("div",{},el("p",{},label),...(media.images||[]).map(p=>el("img",{src:p.image_url.url,alt:"Screenshot returned by tool",class:"tool-screenshot",loading:"lazy"})));
+    }
+    return el("pre",{},typeof content === "string" ? content : JSON.stringify(content,null,2));
+  }
   function chatPage(host) {
     const s = session();
     const main = el("section", { class: "chat-main" + (s ? "" : " is-new") });
@@ -583,6 +642,7 @@
             icon("folder", 14),
             currentFolder().split(/[\\/]/).filter(Boolean).pop() || "Workspace",
           ),
+          button("Find in conversation", () => openConversationFind(), "quiet", "search"),
           button("Files & context", () => contextDrawer(), "quiet"),
           ib("Task actions", "more", () => sessionMenu(s)),
         ),
@@ -950,7 +1010,8 @@
         : "Write your prompt to QuixiDesk";
   }
   async function refreshSession(id) {
-    const old = state.sessions.find((s) => s.sessionId === id);
+    let old = state.sessions.find((s) => s.sessionId === id);
+    if (!old) { await loadSessions(); old = state.sessions.find((s) => s.sessionId === id); }
     if (!old) return;
     const value = await rpc(service(old), "getSession", [id]);
     if (value) {
@@ -1136,19 +1197,19 @@
     return box;
   }
   function permissionCard(request, s) {
-    const edit = ["Write", "Edit"].includes(request.toolName);
+    const edit = ["Write", "Edit"].includes(request.toolName) && !request.outsideWorkspace;
     const input = request.input || {};
     const card = el(
       "section",
       { class: "permission-card", "aria-label": "Permission requested" },
-      el("h3", {}, edit ? "Allow file changes?" : "Allow this action?"),
+      el("h3", {}, request.outsideWorkspace ? "Allow access outside this workspace?" : edit ? "Allow file changes?" : "Allow this action?"),
       el(
         "p",
         {},
         edit
           ? (request.toolName === "Write" ? "Create or update " : "Edit ") +
               (input.file_path || "file")
-          : input.description ||
+          : input.file_path || input.path || input.description ||
               input.command ||
               [request.toolName, input.server, input.tool]
                 .filter(Boolean)
@@ -1322,13 +1383,7 @@
             "div",
             { class: "tool-step-body" },
             el("small", {}, bad ? "Error" : "Result"),
-            el(
-              "pre",
-              {},
-              typeof result.content === "string"
-                ? result.content
-                : JSON.stringify(result.content, null, 2) || "(empty result)",
-            ),
+            toolResultView(result.content),
           ),
         );
       rows.append(row);
@@ -1490,6 +1545,7 @@
         ),
       );
     target.replaceChildren(...result);
+    refreshConversationFind(false);
     if (nearBottom) target.scrollTop = target.scrollHeight;
     else target.scrollTop = oldScroll;
   }
@@ -1998,13 +2054,13 @@
     host.replaceChildren(
       header(
         "Schedules",
-        "Save repeatable task definitions.",
+        "Run repeatable work on a schedule.",
         button("New schedule", () => scheduleEditor(), "primary", "plus"),
       ),
       el(
         "div",
         { class: "notice" },
-        "Automatic execution is not available in this build. Saved definitions can be started manually.",
+        "Schedules run while QuixiDesk is open, using this computer’s time zone. Missed times are skipped. Manual-mode tools still ask for approval. Edit and save older definitions to activate scheduling.",
       ),
     );
     const list = el("div", { class: "list" });
@@ -2019,25 +2075,29 @@
             { class: "grow" },
             el("h3", {}, t.displayName || t.name),
             el("p", {}, t.cronExpression || t.cron),
-            el("small", {}, t.enabled ? "Enabled definition" : "Paused"),
+            el("small", { class: "schedule-detail" }, t.enabled && t.dispatchVersion === 1 ? "Next: " + new Date(t.nextRunAt).toLocaleString([], {month:"short",day:"numeric",hour:"numeric",minute:"2-digit"}) : t.enabled ? "Save to activate" : "Paused"),
+            t.lastRunMessage ? el("small", { class: "schedule-detail" }, t.lastRunMessage) : null,
           ),
-          button("Run now", () => {
-            state.project = null;
-            state.folder = t.cwd || "";
-            state.permission = t.permissionMode || "default";
-            navigate("new");
-            document.getElementById("prompt").value = t.prompt || "";
-            saveDraft();
+          t.lastSessionId ? button("View last run", async()=>{await loadSessions();navigate("chat",t.lastSessionId);},"quiet") : null,
+          button("Run now", async () => {
+            try {
+              const r = await rpc("CoworkScheduledTasks", "runScheduledTask", [t.id]);
+              if (r.error) throw new Error(r.error);
+              await loadSessions(); navigate("chat", r.sessionId);
+            } catch (e) { toast(e.message, true); }
           }),
           button("Edit", () => scheduleEditor(t), "quiet"),
           button(
             t.enabled ? "Pause" : "Enable",
             async () => {
-              await rpc("CoworkScheduledTasks", "updateScheduledTaskStatus", [
-                t.id,
-                t.enabled ? "disabled" : "enabled",
-              ]);
-              await loadSchedules();
+              try {
+                const result = await rpc("CoworkScheduledTasks", "updateScheduledTaskStatus", [
+                  t.id,
+                  t.enabled ? "disabled" : "enabled",
+                ]);
+                if (result === false || result?.error) throw new Error(result?.error || "Schedule could not be updated. Check that its settings can be saved.");
+                await loadSchedules();
+              } catch (e) { toast(e.message, true); }
             },
             "quiet",
           ),
@@ -2083,22 +2143,24 @@
           name: "cronExpression",
           label: "Cron expression",
           value: t?.cronExpression || "0 9 * * *",
-          hint: "Five fields: minute, hour, day, month, weekday. Automatic dispatch is not implemented.",
+          hint: "Five cron fields: minute, hour, day, month, weekday (0–7 or SUN–SAT). Uses this computer’s local time.",
         },
         {
           name: "cwd",
           label: "Workspace folder",
           value: t?.cwd || currentFolder(),
+          hint: "Leave blank to use the default workspace. Home shortcuts such as ~/Projects are accepted.",
         },
       ],
       async (v) => {
         if (v.cronExpression.trim().split(/\s+/).length !== 5)
           throw new Error("Enter a five-field cron expression.");
-        await rpc(
+        const result = await rpc(
           "CoworkScheduledTasks",
           t ? "updateScheduledTask" : "createScheduledTask",
           [{ ...v, id: t?.id, enabled: t?.enabled ?? true }],
         );
+        if (result.error) throw new Error(result.error);
         await loadSchedules();
       },
     );
@@ -3157,6 +3219,10 @@
       if (state.browser) renderBrowser(document.getElementById("page-host"));
       return;
     }
+    if (channel.includes("ScheduledTasks")) {
+      Promise.all([loadSessions(), loadSchedules()]).catch(e=>toast(e.message,true));
+      return;
+    }
     if (channel === "quixi:artifact-preview") {
       loadArtifacts();
       return;
@@ -3245,7 +3311,11 @@
   }
   addEventListener("keydown", (e) => {
     const command = e.metaKey || e.ctrlKey;
-    if (command && e.key.toLowerCase() === "n") {
+    if (command && e.key.toLowerCase() === "f" && state.page === "chat") {
+      e.preventDefault(); openConversationFind();
+    } else if (command && e.key.toLowerCase() === "g" && conversationFind) {
+      e.preventDefault(); stepConversationFind(e.shiftKey ? -1 : 1);
+    } else if (command && e.key.toLowerCase() === "n") {
       e.preventDefault();
       navigate("new");
     } else if (command && e.key.toLowerCase() === "k") {

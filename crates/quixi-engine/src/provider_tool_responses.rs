@@ -29,6 +29,14 @@ fn responses_tool_payload(messages: &[Value], tools: &Value, model: &str) -> Val
             if let Some(text) = message["content"].as_str().filter(|text| !text.is_empty()) {
                 input.push(json!({"type":"message", "role":role, "content":[{"type":if role == "assistant" {"output_text"} else {"input_text"}, "text":text}]}));
             }
+            if let Some(parts) = message["content"].as_array() {
+                let content: Vec<Value> = parts.iter().filter_map(|p| match p["type"].as_str() {
+                    Some("text") => Some(json!({"type":"input_text","text":p["text"]})),
+                    Some("image_url") => Some(json!({"type":"input_image","image_url":p["image_url"]["url"]})),
+                    _ => None,
+                }).collect();
+                if !content.is_empty() { input.push(json!({"type":"message","role":"user","content":content})); }
+            }
             if let Some(calls) = message["tool_calls"].as_array() {
                 for call in calls {
                     input.push(json!({"type":"function_call", "call_id":call["id"], "name":call["function"]["name"], "arguments":call["function"]["arguments"]}));
@@ -221,6 +229,12 @@ mod responses_tool_tests {
         assert_eq!(payload["input"][2]["call_id"], "c1");
         assert_eq!(payload["input"][3]["type"], "function_call_output");
         assert_eq!(payload["tools"][0]["name"], "Bash");
+    }
+    #[test]
+    fn screenshot_observations_use_responses_image_blocks() {
+        let payload=responses_tool_payload(&[json!({"role":"user","content":[{"type":"text","text":"Screenshot"},{"type":"image_url","image_url":{"url":"data:image/png;base64,aGVsbG8="}}]})],&json!([]),"fixture");
+        assert_eq!(payload["input"][0]["content"][1]["type"],"input_image");
+        assert_eq!(payload["input"][0]["content"][1]["image_url"],"data:image/png;base64,aGVsbG8=");
     }
     #[test]
     fn only_completed_valid_responses_can_execute_tools() {

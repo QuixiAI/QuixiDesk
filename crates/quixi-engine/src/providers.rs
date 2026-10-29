@@ -112,6 +112,9 @@ pub struct PendingOAuthSession {
 
 pub struct ProviderManager {
     pub config_path: PathBuf,
+    credential_error: RwLock<Option<String>>,
+    credential_load_failed: bool,
+    persist_lock: parking_lot::Mutex<()>,
     pub state: RwLock<ProvidersStateFile>,
     pub pending_oauth: RwLock<HashMap<String, PendingOAuthSession>>,
 }
@@ -121,17 +124,24 @@ impl ProviderManager {
         let config_path = data_dir.join("providers.json");
         let default_catalog = Self::default_catalog();
 
+        let mut credential_error = None;
         let loaded = if config_path.exists() {
-            fs::read_to_string(&config_path)
-                .ok()
-                .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-                .and_then(|val| Self::merge_saved_state(default_catalog.clone(), &val))
+            fs::read_to_string(&config_path).map_err(|e|e.to_string())
+                .and_then(|s|serde_json::from_str::<Value>(&s).map_err(|e|e.to_string()))
+                .map_err(|e|{credential_error=Some(format!("Provider configuration could not be loaded; existing file preserved: {e}"));}).ok()
+                .and_then(|val| match crate::credentials::open(&config_path,val) {
+                    Ok(val)=>Self::merge_saved_state(default_catalog.clone(), &val),
+                    Err(error)=>{credential_error=Some(error);None}
+                })
         } else {
             None
         };
 
         let state = loaded.unwrap_or(default_catalog);
         let mgr = Self {
+            credential_load_failed: credential_error.is_some(),
+            credential_error: RwLock::new(credential_error),
+            persist_lock: parking_lot::Mutex::new(()),
             config_path,
             state: RwLock::new(state),
             pending_oauth: RwLock::new(HashMap::new()),
@@ -991,6 +1001,8 @@ impl ProviderManager {
     }
 
     pub fn persist(&self) {
+        let _writer=self.persist_lock.lock();
+        if self.credential_load_failed {return;}
         let st = self.state.read();
         let mut providers_disk = Vec::new();
         for p in &st.providers {
@@ -1013,15 +1025,18 @@ impl ProviderManager {
             "subagentModel": st.subagent_model,
             "providers": providers_disk,
         });
-        if let Ok(pretty) = serde_json::to_string_pretty(&disk_json) {
-            let _ = fs::write(&self.config_path, pretty);
-        }
+        let result=crate::credentials::seal(&self.config_path,disk_json).and_then(|document| {
+            let bytes=serde_json::to_vec_pretty(&document).map_err(|e|e.to_string())?;
+            crate::storage::atomic_write(&self.config_path,&bytes).map_err(|e|e.to_string())
+        });
+        *self.credential_error.write()=result.err();
     }
 
     pub fn get_public_state(&self) -> Value {
         let st = self.state.read();
         let configured_count = st.providers.iter().filter(|p| p.configured).count();
         json!({
+            "credentialStorageError": self.credential_error.read().clone(),
             "onboardingCompleted": st.onboarding_completed && configured_count > 0,
             "hasConfiguredProvider": configured_count > 0,
             "configuredCount": configured_count,
@@ -1034,6 +1049,7 @@ impl ProviderManager {
     }
 
     pub fn save_provider(&self, body: &Value) -> Value {
+        if self.credential_load_failed {return json!({"error":"Unlock the system credential store and restart QuixiDesk. Existing credentials were preserved."});}
         let provider_id = body
             .get("providerId")
             .or_else(|| body.get("id"))
@@ -1152,6 +1168,8 @@ impl ProviderManager {
         }
         drop(st);
         self.persist();
+        if let Some(error)=self.credential_error.read().clone(){return json!({"error":format!("Provider is available for this session, but credentials were not saved: {error}")});}
+
         let discovery = body.get("refreshModels").and_then(Value::as_bool).unwrap_or(false)
             .then(|| self.test_provider(&json!({"providerId":provider_id})));
         let mut result = self.get_public_state();
@@ -2962,6 +2980,8 @@ impl ProviderManager {
     {
         use std::io::BufReader;
 
+        let prepared = crate::tool_media::provider_messages(messages);
+        let messages = prepared.as_slice();
         let resolved_model = self.resolve_connected_model(model_override);
         let (provider_id, provider_name, model_id, base_url, api_format, auth_mode, credential) = {
             let st = self.state.read();
@@ -3584,4 +3604,20 @@ mod provider_validation_tests {
         server.join().unwrap(); drop(manager); std::fs::remove_dir_all(root).unwrap();
     }
 
+}
+
+#[cfg(test)] mod credential_persistence_tests {
+    use super::*;
+    #[test] fn legacy_credentials_migrate_and_restart_without_plaintext(){
+        let root=std::env::temp_dir().join(format!("quixi-provider-vault-{}",Uuid::new_v4()));fs::create_dir_all(&root).unwrap();let path=root.join("providers.json");fs::write(&path,json!({"providers":[{"id":"custom","configured":true,"apiKeyRaw":"test-secret-123"}]}).to_string()).unwrap();
+        let manager=ProviderManager::new(&root);assert!(manager.credential_error.read().is_none());drop(manager);
+        let stored=fs::read_to_string(&path).unwrap();assert!(!stored.contains("test-secret-123"));assert!(stored.contains("encryptedCredentials"));
+        let manager=ProviderManager::new(&root);assert_eq!(manager.state.read().providers.iter().find(|p|p.id=="custom").unwrap().api_key_raw,"test-secret-123");drop(manager);fs::remove_dir_all(root).unwrap();
+    }
+    #[test] fn unreadable_or_tampered_credentials_never_overwrite_existing_file(){
+        let root=std::env::temp_dir().join(format!("quixi-provider-bad-{}",Uuid::new_v4()));fs::create_dir_all(&root).unwrap();let path=root.join("providers.json");
+        for raw in ["{broken".to_string(),json!({"encryptedCredentials":{"version":1,"nonce":"invalid","ciphertext":"invalid"}}).to_string()]{
+            fs::write(&path,&raw).unwrap();let manager=ProviderManager::new(&root);assert!(manager.credential_error.read().is_some());assert!(manager.save_provider(&json!({"providerId":"custom","apiKey":"replacement"}))["error"].is_string());assert_eq!(fs::read_to_string(&path).unwrap(),raw);drop(manager);
+        }fs::remove_dir_all(root).unwrap();
+    }
 }

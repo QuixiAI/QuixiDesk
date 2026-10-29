@@ -31,7 +31,8 @@ pub fn tool_schemas() -> Value {
                     "type": "object",
                     "properties": {
                         "command": { "type": "string", "description": "The command to run." },
-                        "description": { "type": "string", "description": "Short description of what the command does." }
+                        "description": { "type": "string", "description": "Short description of what the command does." },
+                        "timeout_seconds": {"type":"integer","description":"Command timeout in seconds, default 120, maximum 3600."}
                     },
                     "required": ["command"]
                 }
@@ -246,15 +247,19 @@ pub fn validate_input(name: &str, input: &Value) -> Result<(), String> {
     Ok(())
 }
 
+pub fn repeatable_observation(name:&str,input:&Value)->bool {
+    matches!(name,TOOL_READ|TOOL_LIST|TOOL_WEB_FETCH) || (name==TOOL_MCP_CALL && !mcp_tool_needs_confirm(input["server"].as_str().unwrap_or_default(),input["tool"].as_str().unwrap_or_default()))
+}
+
 /// Cache results so repeated calls (including calls in the same batch) cannot act twice.
 #[derive(Default)]
 pub struct ToolResults(std::collections::HashMap<String, (String, bool)>);
 impl ToolResults {
-    fn cacheable(name: &str) -> bool { !matches!(name, TOOL_READ | TOOL_LIST | TOOL_WEB_FETCH) }
-    pub fn contains(&self, name: &str, input: &Value) -> bool { Self::cacheable(name) && self.0.contains_key(&format!("{name}|{input}")) }
+    fn cacheable(name: &str, input: &Value) -> bool { !repeatable_observation(name,input) }
+    pub fn contains(&self, name: &str, input: &Value) -> bool { Self::cacheable(name,input) && self.0.contains_key(&format!("{name}|{input}")) }
     pub fn run(&mut self, name: &str, input: &Value, action: impl FnOnce() -> (String, bool)) -> (String, bool) {
         // Reads are observations, not effects: an intervening mutation may change them.
-        if !Self::cacheable(name) { return action(); }
+        if !Self::cacheable(name,input) { return action(); }
         let key = format!("{name}|{input}");
         self.0.entry(key).or_insert_with(action).clone()
     }
@@ -268,6 +273,10 @@ pub fn execute(
     permission_mode: &str,
     mcp_host: &McpHost,
 ) -> (String, bool) {
+    execute_cancellable(name,input,cwd,permission_mode,mcp_host,&std::sync::atomic::AtomicBool::new(false))
+}
+
+pub fn execute_cancellable(name: &str,input: &Value,cwd: &str,permission_mode: &str,mcp_host: &McpHost,cancelled: &std::sync::atomic::AtomicBool) -> (String,bool) {
     if let Err(error) = validate_input(name, input) {
         return (error, true);
     }
@@ -294,7 +303,7 @@ pub fn execute(
                     true,
                 );
             }
-            match quixi_workspace::ShellHostEngine::run_bash_command(Path::new(cwd), command) {
+            match quixi_workspace::ShellHostEngine::run_bash_command_cancellable(Path::new(cwd), command, cancelled, std::time::Duration::from_secs(input["timeout_seconds"].as_u64().unwrap_or(120).clamp(1,3600))) {
                 Ok(val) => {
                     let stdout = val.get("stdout").and_then(|v| v.as_str()).unwrap_or("");
                     let stderr = val.get("stderr").and_then(|v| v.as_str()).unwrap_or("");
@@ -443,8 +452,8 @@ pub fn execute(
             }
             match mcp_host.call_tool(server, tool, &args, Path::new(cwd)) {
                 Ok(res) => (
-                    summarize_mcp_result(&res).chars().take(12_000).collect(),
-                    false,
+                    crate::tool_media::encode_result(&res),
+                    res["isError"].as_bool().unwrap_or(false),
                 ),
                 Err(err) => (format!("MCP call {server}/{tool} failed: {err}"), true),
             }
@@ -474,36 +483,6 @@ fn mcp_tool_needs_confirm(server: &str, tool: &str) -> bool {
         "screenshot" | "zoom" | "get_window_layout" | "get_page_text"
         | "read_page" | "list_connected_browsers" | "keywords")
 
-}
-
-/// Screenshots come back as base64 PNGs. They are useless to the model and would blow up
-/// the context (and cost), so they are replaced by a short marker.
-fn summarize_mcp_result(value: &Value) -> String {
-    fn strip(v: &Value) -> Value {
-        match v {
-            Value::Object(map) => {
-                let mut out = serde_json::Map::new();
-                for (k, val) in map {
-                    if matches!(k.as_str(), "data" | "base64" | "image" | "image_data") {
-                        if let Some(s) = val.as_str() {
-                            if s.len() > 512 {
-                                out.insert(
-                                    k.clone(),
-                                    json!(format!("[image omitted: {} base64 chars]", s.len())),
-                                );
-                                continue;
-                            }
-                        }
-                    }
-                    out.insert(k.clone(), strip(val));
-                }
-                Value::Object(out)
-            }
-            Value::Array(items) => Value::Array(items.iter().map(strip).collect()),
-            other => other.clone(),
-        }
-    }
-    strip(value).to_string()
 }
 
 /// Re-exported so tests can exercise the guard without duplicating patterns.
@@ -672,4 +651,8 @@ mod permission_regression_tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+}
+
+#[cfg(test)] mod observation_tests {use super::*;
+ #[test] fn screenshots_are_fresh_after_actions(){let mut cache=ToolResults::default();let args=json!({"server":"computer-use","tool":"screenshot"});assert_eq!(cache.run("McpCall",&args,||("before".into(),false)).0,"before");assert_eq!(cache.run("McpCall",&args,||("after".into(),false)).0,"after");assert!(!cache.contains("McpCall",&args));}
 }

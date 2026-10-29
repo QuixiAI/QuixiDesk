@@ -9,6 +9,18 @@ pub(crate) struct PendingToolApproval {
     decision: Arc<AtomicU8>,
 }
 
+// Resolve existing symlinks and normalize missing descendants before checking scope.
+fn file_access_outside_workspace(name:&str,input:&Value,cwd:&str)->bool {
+    if !matches!(name,"Read"|"ListDirectory"|"Write"|"Edit") {return false;}
+    let raw=input[if name=="ListDirectory" {"path"}else{"file_path"}].as_str().unwrap_or(".");
+    let path=Path::new(raw);let path=if path.is_absolute(){path.to_path_buf()}else{Path::new(cwd).join(path)};
+    fn resolved(path:&Path)->Option<PathBuf>{
+        if let Ok(p)=path.canonicalize(){return Some(p);}
+        let name=path.file_name()?;let parent=resolved(path.parent()?)?;Some(parent.join(name))
+    }
+    match (Path::new(cwd).canonicalize(),resolved(&path)) {(Ok(root),Some(path))=>!path.starts_with(root),_=>true}
+}
+
 impl QuixiEngine {
     fn permission_event(&self, session_id: &str, kind: &str) {
         let service = if self.agent_sessions.read().contains_key(session_id) {
@@ -28,7 +40,7 @@ impl QuixiEngine {
             let Some(p)=pending.get(request_id).filter(|p|p.session_id==session_id) else {
                 return json!({"error":"This approval is no longer pending."});
             };
-            (p.decision.clone(), matches!(p.request["toolName"].as_str(),Some("Write"|"Edit")))
+            (p.decision.clone(), matches!(p.request["toolName"].as_str(),Some("Write"|"Edit")) && p.request["outsideWorkspace"]!=true)
         };
         let answer=match decision {
             "allow_once" => 1,
@@ -61,16 +73,19 @@ impl QuixiEngine {
     pub(crate) fn execute_tool_with_approval(&self, session_id: &str, call_id: &str, name: &str,
         input: &Value, cwd: &str, fallback_mode: &str, cancelled: &AtomicBool) -> (String,bool) {
         if let Err(error)=agent_tools::validate_input(name,input) {return (error,true);}
+        if cancelled.load(Ordering::SeqCst) {return ("Task stopped. No action performed.".into(),true);}
+        let outside=file_access_outside_workspace(name,input,cwd);
+        let needs=|mode:&str| agent_tools::requires_approval(name,input,mode) || (outside&&!matches!(mode,"auto"|"bypassPermissions"));
         let mode=self.current_permission_mode(session_id,fallback_mode);
-        if !agent_tools::requires_approval(name,input,&mode) {
-            return agent_tools::execute(name,input,cwd,&mode,&self.mcp_host);
+        if !needs(&mode) {
+            return agent_tools::execute_cancellable(name,input,cwd,&mode,&self.mcp_host,cancelled);
         }
         if cancelled.load(Ordering::SeqCst) {return ("Task stopped. No action performed.".into(),true);}
         let request_id=Uuid::new_v4().to_string();
         let signal=Arc::new(AtomicU8::new(0));
         self.pending_approvals.write().insert(request_id.clone(),PendingToolApproval {
             session_id:session_id.into(), decision:signal.clone(),
-            request:json!({"requestId":request_id,"sessionId":session_id,"toolCallId":call_id,"toolName":name,"input":input,"cwd":cwd}),
+            request:json!({"requestId":request_id,"sessionId":session_id,"toolCallId":call_id,"toolName":name,"input":input,"cwd":cwd,"outsideWorkspace":outside}),
         });
         self.permission_event(session_id,"tool_permission_requested");
         let start=Instant::now();
@@ -78,7 +93,7 @@ impl QuixiEngine {
             if cancelled.load(Ordering::SeqCst) {break 2;}
             let decision=signal.load(Ordering::SeqCst);
             if decision==1 || decision==2 {break decision;}
-            if decision==0 && !agent_tools::requires_approval(name,input,&self.current_permission_mode(session_id,fallback_mode)) {break 1;}
+            if decision==0 && !needs(&self.current_permission_mode(session_id,fallback_mode)) {break 1;}
             if start.elapsed()>Duration::from_secs(30*60) {break 2;}
             std::thread::sleep(Duration::from_millis(50));
         };
@@ -87,7 +102,7 @@ impl QuixiEngine {
         if outcome!=1 || cancelled.load(Ordering::SeqCst) {
             return ("The action was not approved or the task was stopped. No action was performed. Do not retry it without a new user request.".into(),true);
         }
-        agent_tools::execute(name,input,cwd,"auto",&self.mcp_host)
+        agent_tools::execute_cancellable(name,input,cwd,"auto",&self.mcp_host,cancelled)
     }
 }
 
@@ -139,4 +154,12 @@ mod tests {
         }
         drop(engine);fs::remove_dir_all(root).unwrap();
     }
+}
+
+#[cfg(test)] mod scope_tests {use super::*;
+ #[test] fn parent_paths_and_symlinks_require_approval(){
+ let root=std::env::temp_dir().join(format!("quixi-scope-{}",Uuid::new_v4()));fs::create_dir_all(root.join("work")).unwrap();fs::write(root.join("outside"),"private").unwrap();let cwd=root.join("work");let cwd=cwd.to_str().unwrap();
+ assert!(file_access_outside_workspace("Read",&json!({"file_path":"../outside"}),cwd));assert!(!file_access_outside_workspace("Write",&json!({"file_path":"new/nested.txt"}),cwd));
+ #[cfg(unix)]{std::os::unix::fs::symlink(root.join("outside"),root.join("work/link")).unwrap();assert!(file_access_outside_workspace("Read",&json!({"file_path":"link"}),cwd));}
+ fs::remove_dir_all(root).unwrap();}
 }

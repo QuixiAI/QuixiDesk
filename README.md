@@ -58,6 +58,16 @@ In a project, **Add folder** opens the native folder chooser. **Enter path** als
 
 Tool calls and their results appear together in a collapsible activity group. **Stop** cancels pending approvals and preserves any answer text already received. Follow-up requests retain earlier tool results, and artifact revisions can update the existing preview without changing its link.
 
+Use **Find in conversation** (Cmd/Ctrl+F) to highlight matches and move through them with Enter/Shift+Enter or Cmd/Ctrl+G. Screenshot tool results appear as images and are forwarded to vision-capable models through the OpenAI-compatible and OpenAI OAuth tool paths. Fresh screenshot requests capture fresh observations.
+
+**Stop** terminates running Bash command trees. Commands have a 120-second default timeout; a task can request up to one hour. Manual and Allow file edits modes ask before file access outside the selected workspace, including symlink targets. Auto mode grants broader access; these approvals are not an operating-system sandbox.
+
+Long conversations automatically summarize older provider context near the model’s context budget while keeping the original transcript. Tasks can run up to 100 tool rounds, with an explicit wrap-up at the limit. The summary is model-generated and may be imperfect; if compaction fails, the app preserves the conversation and reports the problem.
+
+**Schedules** execute while QuixiDesk is open, in the computer’s local time zone. Five-field cron accepts numeric or named weekdays. The app reports missed times and skips catch-up runs; it also skips overlapping runs of the same schedule. **Run now** starts a conversation immediately, and **View last run** opens it. Existing definitions from older builds need to be enabled or saved once to activate automatic dispatch. Manual-mode runs still wait for tool approvals.
+
+Provider credentials are encrypted with AES-256-GCM; the encryption key is held in macOS Keychain, Windows Credential Manager, or the Linux Secret Service. Linux needs an unlocked desktop secret service (such as GNOME Keyring or KWallet with Secret Service support). Existing plaintext provider settings migrate on successful unlock/save. If unlocking or saving fails, the existing file is preserved and the app reports the error. Disposable test profiles use a separate local test key and must not contain production credentials.
+
 ---
 
 ## Supported LLM Providers

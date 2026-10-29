@@ -1,3 +1,7 @@
+mod scheduling;
+mod context;
+mod credentials;
+mod tool_media;
 pub mod agent_tools;
 pub mod providers;
 mod local_ui;
@@ -40,6 +44,7 @@ pub struct QuixiEngine {
     pub chat_conversations: RwLock<HashMap<String, Value>>,
     pub projects: RwLock<HashMap<String, Value>>,
     pub artifacts: RwLock<HashMap<String, Value>>,
+    schedule_dispatch: parking_lot::Mutex<()>,
     pub scheduled_tasks: RwLock<HashMap<String, Value>>,
     pub plugins: RwLock<Vec<Value>>,
     pub marketplaces: RwLock<Vec<Value>>,
@@ -162,7 +167,7 @@ impl QuixiEngine {
             "scope": "user",
             "enabled": true,
             "description": "Built-in QuixiDesk workspace, git, and document skills plugin",
-            "version": "3.6556.6",
+            "version": "3.6556.7",
             "skills": [],
             "commands": [],
             "mcpServers": [],
@@ -225,6 +230,7 @@ impl QuixiEngine {
             chat_conversations: RwLock::new(HashMap::new()),
             projects: RwLock::new(HashMap::new()),
             artifacts: RwLock::new(HashMap::new()),
+            schedule_dispatch: parking_lot::Mutex::new(()),
             scheduled_tasks: RwLock::new(HashMap::new()),
             plugins: RwLock::new(default_plugins),
             marketplaces: RwLock::new(default_marketplaces),
@@ -245,6 +251,7 @@ impl QuixiEngine {
         engine.load_persisted_sessions();
         engine.load_session_recovery();
         engine.load_local_artifacts();
+        engine.start_scheduler();
         engine
     }
 
@@ -666,6 +673,8 @@ impl QuixiEngine {
             .map(|s| s.trim().to_string())
             .unwrap_or(slug_default);
 
+        if id.is_empty() || !id.chars().all(|c|c.is_ascii_alphanumeric()||c=='-'||c=='_'){return json!({"error":"Invalid schedule identifier."});}
+        let _guard=self.schedule_dispatch.lock();
         let existing = self.scheduled_tasks.read().get(&id).cloned();
         let is_update = existing.is_some();
 
@@ -690,6 +699,7 @@ impl QuixiEngine {
             .or_else(|| existing.as_ref().and_then(|e| e.get("cronExpression")).and_then(|v| v.as_str()))
             .unwrap_or("0 9 * * *")
             .to_string();
+        let next_run=match scheduling::next_run(&cron,Utc::now().timestamp_millis()){Ok(t)=>t,Err(e)=>return json!({"error":e})};
         let enabled = opts
             .get("enabled")
             .and_then(|v| v.as_bool())
@@ -702,6 +712,8 @@ impl QuixiEngine {
             .or_else(|| existing.as_ref().and_then(|e| e.get("cwd")).and_then(|v| v.as_str()))
             .unwrap_or(quixi_proto::paths::default_workspace_str())
             .to_string();
+        let cwd=if cwd.trim().is_empty(){quixi_proto::paths::default_workspace_str().to_string()}else{cwd};
+        let cwd=match local_ui::resolve_folder_path(&cwd,&quixi_proto::paths::home_dir()){Ok(p)=>p.to_string_lossy().to_string(),Err(e)=>return json!({"error":e})};
         let model = opts
             .get("model")
             .and_then(|v| v.as_str())
@@ -736,7 +748,7 @@ impl QuixiEngine {
         );
         let _ = fs::write(&file_path, &md_body);
 
-        let task = json!({
+        let mut task = json!({
             "id": id,
             "name": display_name,
             "displayName": display_name,
@@ -747,6 +759,8 @@ impl QuixiEngine {
             "enabled": enabled,
             "status": if enabled { "enabled" } else { "disabled" },
             "source": "local",
+            "dispatchVersion": 1,
+            "nextRunAt": next_run,
             "cwd": cwd,
             "userSelectedFolders": [cwd],
             "model": model,
@@ -755,9 +769,8 @@ impl QuixiEngine {
             "createdAt": created_at,
             "updatedAt": now_ms,
         });
-        if let Ok(raw_json) = serde_json::to_string_pretty(&task) {
-            let _ = fs::write(&json_path, raw_json);
-        }
+        if let Some(old)=existing {for key in ["lastSessionId","lastRunStatus","lastRunMessage","lastAttemptAt"] {if let Some(v)=old.get(key){task[key]=v.clone();}}}
+        if let Err(e)=storage::atomic_write(&json_path,&serde_json::to_vec_pretty(&task).unwrap()){return json!({"error":format!("Schedule could not be saved: {e}")});}
         self.scheduled_tasks.write().insert(id, task.clone());
 
         let ev_type = if is_update {
@@ -785,45 +798,23 @@ impl QuixiEngine {
     }
 
     pub fn update_scheduled_task_status(&self, id: &str, status: &str) -> bool {
+        if !id.chars().all(|c|c.is_ascii_alphanumeric()||c=='-'||c=='_'){return false;}
+        let _guard=self.schedule_dispatch.lock();
         let tasks_dir = self.data_dir.join("scheduled_tasks");
-        if status == "deleted" {
-            self.scheduled_tasks.write().remove(id);
-            let _ = fs::remove_file(tasks_dir.join(format!("{}.md", id)));
-            let _ = fs::remove_file(tasks_dir.join(format!("{}.json", id)));
-            let ev_payload = json!({
-                "type": "scheduled_task_deleted",
-                "scheduledTask": { "id": id }
-            });
-            self.emit_eipc(
-                "quixi.web",
-                "CoworkScheduledTasks",
-                "onScheduledTaskEvent",
-                ev_payload.clone(),
-            );
-            self.emit_eipc(
-                "quixi.web",
-                "CCDScheduledTasks",
-                "onScheduledTaskEvent",
-                ev_payload,
-            );
-            return true;
-        }
-        let enabled = status == "enabled";
         let updated = {
-            let mut map = self.scheduled_tasks.write();
-            if let Some(task) = map.get_mut(id) {
-                if let Some(obj) = task.as_object_mut() {
-                    obj.insert("enabled".to_string(), json!(enabled));
-                    obj.insert("status".to_string(), json!(if enabled { "enabled" } else { "disabled" }));
-                    obj.insert("updatedAt".to_string(), json!(Utc::now().timestamp_millis() as u64));
-                }
-                if let Ok(raw_json) = serde_json::to_string_pretty(task) {
-                    let _ = fs::write(tasks_dir.join(format!("{}.json", id)), raw_json);
-                }
-                Some(task.clone())
-            } else {
-                None
+            let mut map=self.scheduled_tasks.write();
+            let Some(mut task)=map.get(id).cloned()else{return false;};
+            let enabled=status=="enabled";
+            if enabled {
+                let Ok(next)=scheduling::next_run(task["cronExpression"].as_str().unwrap_or_default(),Utc::now().timestamp_millis())else{return false;};
+                task["dispatchVersion"]=json!(1);task["nextRunAt"]=json!(next);
             }
+            task["enabled"]=json!(enabled);task["status"]=json!(if status=="deleted"{"deleted"}else if enabled{"enabled"}else{"disabled"});
+            task["updatedAt"]=json!(Utc::now().timestamp_millis());
+            // Persist disabled tombstones before removing an entry, preventing resurrection after restart.
+            if storage::atomic_write(&tasks_dir.join(format!("{id}.json")),&serde_json::to_vec_pretty(&task).unwrap()).is_err(){return false;}
+            if status=="deleted"{map.remove(id);let _=fs::remove_file(tasks_dir.join(format!("{id}.md")));}else{map.insert(id.into(),task.clone());}
+            Some(task)
         };
         if let Some(task) = updated {
             let ev_payload = json!({
@@ -1346,7 +1337,7 @@ impl QuixiEngine {
                                         "available": true,
                                         "enabled": true,
                                         "description": "Built-in QuixiDesk workspace, git, and document skills plugin",
-                                        "version": "3.6556.6"
+                                        "version": "3.6556.7"
                                     }
                                 ]
                             }
@@ -2032,7 +2023,7 @@ impl QuixiEngine {
         F: FnMut(StreamChunk),
         G: FnMut(Value),
     {
-        const MAX_ROUNDS: usize = 20;
+        const MAX_ROUNDS: usize = 100;
 
         let resolved_model = self.provider_manager.resolve_connected_model(model_override);
 
@@ -2051,7 +2042,7 @@ impl QuixiEngine {
              Browser Use servers (screenshots, clicks, typing, tabs).\n\
              Read workspace files only when relevant to the user request; honor requests not to use tools or inspect files. Prefer doing the work over describing it, keep answers short, and \
              mention the real result (output, path, app state) instead of instructions the user could run themselves.\n\
-             Rules: act once, do not repeat a tool call that already succeeded; verify at most once with a single command; \
+             Rules: do not repeat a successful side effect unnecessarily; use fresh observations to verify results; \
              never close windows, discard drafts or quit applications unless the user asked for exactly that; \
              do not investigate further once the requested effect is confirmed - report and stop.\n\n\
              Use Artifact to create private local HTML previews. Nothing is published or uploaded. If asked to publish, explain that publishing is unavailable and offer a local preview.{project_instructions}{workspace_instructions}",
@@ -2090,6 +2081,10 @@ impl QuixiEngine {
             let mode = self.current_permission_mode(session_id, permission_mode);
             let tools = agent_tools::available_tool_schemas(&mode);
             messages[0]["content"] = json!(format!("{system_prompt}\n\n{}", agent_tools::permission_context(&mode)));
+            if let Err(error)=self.compact_context(&mut messages,&resolved_model,prompt,cancelled) {
+                if !cancelled.load(Ordering::SeqCst) {on_chunk(StreamChunk::Text(error.clone()));}
+                return (error,final_model);
+            }
             let mut streamed_text = false;
             let turn = match self.provider_manager.complete_turn_with_tools(
                 &messages,
@@ -2138,7 +2133,7 @@ impl QuixiEngine {
             let repeated = turn
                 .tool_calls
                 .iter()
-                .filter(|c| !matches!(c.name.as_str(), "Read" | "ListDirectory" | "WebFetch") && !seen_calls.insert(format!("{}|{}", c.name, c.arguments)))
+                .filter(|c| !agent_tools::repeatable_observation(&c.name,&serde_json::from_str::<Value>(&c.arguments).unwrap_or(Value::Null)) && !seen_calls.insert(format!("{}|{}", c.name, c.arguments)))
                 .count();
             if repeated > 0 {
                 repeats += 1;
@@ -2155,7 +2150,7 @@ impl QuixiEngine {
             let mut displayed = std::collections::HashSet::new();
             let fresh_calls: Vec<bool> = turn.tool_calls.iter().map(|call| {
                 let input = serde_json::from_str::<Value>(&call.arguments).unwrap_or(Value::Null);
-                matches!(call.name.as_str(), "Read" | "ListDirectory" | "WebFetch") ||
+                agent_tools::repeatable_observation(&call.name,&input) ||
                     (!tool_results.contains(&call.name, &input)
                     && displayed.insert(format!("{}|{}", call.name, input)))
             }).collect();

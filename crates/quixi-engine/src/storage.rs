@@ -11,7 +11,7 @@ pub(crate) struct SessionStorage {
 }
 
 // Never truncate the previous valid record. A failed write/rename leaves it intact.
-fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let parent = path.parent().unwrap();
     fs::create_dir_all(parent)?;
     let temporary = parent.join(format!(".{}.tmp", Uuid::new_v4()));

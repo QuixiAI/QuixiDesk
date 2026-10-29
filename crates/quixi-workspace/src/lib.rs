@@ -519,28 +519,45 @@ impl ShellHostEngine {
     }
 
     pub fn run_bash_command(cwd: &Path, command: &str) -> Result<Value> {
-        let env_map = Self::resolve_user_shell_env();
-        let shell = Self::default_shell();
-        let mut cmd = Command::new(shell);
+        Self::run_bash_command_cancellable(cwd, command, &std::sync::atomic::AtomicBool::new(false), std::time::Duration::from_secs(120))
+    }
+
+    pub fn run_bash_command_cancellable(cwd: &Path, command: &str, cancelled: &std::sync::atomic::AtomicBool, timeout: std::time::Duration) -> Result<Value> {
+        use std::{io::Read, process::Stdio, sync::{atomic::Ordering, mpsc}, time::{Duration, Instant}};
+        if cancelled.load(Ordering::SeqCst) { anyhow::bail!("Command cancelled before starting"); }
+        let mut cmd = Command::new(Self::default_shell());
         if quixi_proto::paths::test_profile().is_some() { cmd.env_clear(); }
         #[cfg(target_os = "windows")]
         cmd.args(["/D", "/S", "/C"]);
-        #[cfg(not(target_os = "windows"))]
-        cmd.arg("-c");
-        let output = cmd
-            .arg(command)
-            .current_dir(cwd)
-            .envs(&env_map)
-            .output()?;
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        let exit_code = output.status.code().unwrap_or(-1);
-        Ok(json!({
-            "stdout": stdout,
-            "stderr": stderr,
-            "exitCode": exit_code,
-            "ok": output.status.success(),
-        }))
+        #[cfg(unix)]
+        { use std::os::unix::process::CommandExt; cmd.arg("-c").process_group(0); }
+        let mut child = cmd.arg(command).current_dir(cwd).envs(Self::resolve_user_shell_env())
+            .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+        let pid = child.id();
+        let (tx, rx) = mpsc::channel();
+        fn drain(mut stream: impl Read + Send + 'static, tx: mpsc::Sender<(bool, Vec<u8>)>, stderr: bool) {
+            std::thread::spawn(move || { let mut retained=Vec::new(); let mut buf=[0;8192];
+                while let Ok(n)=stream.read(&mut buf) { if n==0 {break;} let keep=n.min(1_048_576usize.saturating_sub(retained.len())); retained.extend_from_slice(&buf[..keep]); }
+                let _=tx.send((stderr,retained)); });
+        }
+        drain(child.stdout.take().unwrap(),tx.clone(),false); drain(child.stderr.take().unwrap(),tx,true);
+        let started=Instant::now(); let mut output=[None,None]; let mut status=None;
+        loop {
+            while let Ok((err,bytes))=rx.try_recv() { output[usize::from(err)]=Some(bytes); }
+            if status.is_none() { status=child.try_wait()?; }
+            if status.is_some() && output.iter().all(Option::is_some) { break; }
+            if cancelled.load(Ordering::SeqCst) || started.elapsed()>=timeout {
+                #[cfg(unix)]
+                unsafe { libc::kill(-(pid as i32),libc::SIGKILL); }
+                #[cfg(target_os="windows")]
+                { let _=Command::new("taskkill").args(["/PID",&pid.to_string(),"/T","/F"]).stdout(Stdio::null()).stderr(Stdio::null()).status(); }
+                let _=child.kill(); let _=child.wait();
+                anyhow::bail!(if cancelled.load(Ordering::SeqCst) {"Command stopped; its process tree was terminated."} else {"Command timed out; its process tree was terminated."});
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let status=status.unwrap();
+        Ok(json!({"stdout":String::from_utf8_lossy(output[0].as_ref().unwrap()),"stderr":String::from_utf8_lossy(output[1].as_ref().unwrap()),"exitCode":status.code().unwrap_or(-1),"ok":status.success()}))
     }
 }
 
@@ -785,5 +802,24 @@ mod tests {
             .as_str()
             .unwrap_or("")
             .contains("quixi-shell-test"));
+    }
+}
+
+#[cfg(test)] mod cancellation_tests {
+    use super::*;
+    use std::{sync::atomic::{AtomicBool,Ordering},time::{Duration,Instant}};
+    #[test] fn cancellation_terminates_delayed_descendants() {
+        let root=std::env::temp_dir().join(format!("quixi-cancel-{}",std::process::id()));fs::create_dir_all(&root).unwrap();let marker=root.join("should-not-exist");let _=fs::remove_file(&marker);
+        let signal=Arc::new(AtomicBool::new(false));let worker_signal=signal.clone();let cwd=root.clone();
+        #[cfg(unix)] let command="sleep 2; echo BAD > should-not-exist";
+        #[cfg(windows)] let command="ping -n 4 127.0.0.1 > nul & echo BAD > should-not-exist";
+        let start=Instant::now();let worker=std::thread::spawn(move||ShellHostEngine::run_bash_command_cancellable(&cwd,command,&worker_signal,Duration::from_secs(10)));
+        std::thread::sleep(Duration::from_millis(150));signal.store(true,Ordering::SeqCst);assert!(worker.join().unwrap().unwrap_err().to_string().contains("stopped"));assert!(start.elapsed()<Duration::from_secs(2));
+        std::thread::sleep(Duration::from_secs(3));assert!(!marker.exists());fs::remove_dir_all(root).unwrap();
+    }
+    #[test] fn timeout_and_large_output_are_bounded() {
+        #[cfg(unix)] let command="sleep 10";
+        #[cfg(windows)] let command="ping -n 12 127.0.0.1 > nul";
+        let started=Instant::now();let result=ShellHostEngine::run_bash_command_cancellable(&std::env::temp_dir(),command,&AtomicBool::new(false),Duration::from_millis(100));assert!(result.unwrap_err().to_string().contains("timed out"));assert!(started.elapsed()<Duration::from_secs(3));
     }
 }

@@ -225,7 +225,7 @@ impl EipcRouter {
             }),
             ("DesktopInfo", "getDefaultBrowserName") => json!("Safari"),
             ("DesktopInfo", "getSystemInfo") => json!({
-                "app_version": "3.6556.6",
+                "app_version": "3.6556.7",
                 "os_version": "15.0",
                 "os_pretty_name": "macOS Sequoia",
                 "cpu_model": "Apple Silicon",
@@ -437,7 +437,7 @@ impl EipcRouter {
                 "isNestBuild": false,
                 "commitTimestamp": "2026-10-26T00:00:00.000Z",
                 "buildType": "prod",
-                "appVersion": "3.6556.6"
+                "appVersion": "3.6556.7"
             }),
             ("AboutWindow", "ancientJournal") => Value::Null,
 
@@ -2148,6 +2148,9 @@ impl EipcRouter {
                 let id = args.first().and_then(Value::as_str).unwrap_or("");
                 let starred = args.get(1).and_then(Value::as_bool).unwrap_or(false);
                 json!(self.engine.update_local_artifact(id, "isStarred", json!(starred)))
+            }
+            ("CoworkScheduledTasks", "runScheduledTask") => {
+                self.engine.run_scheduled_task(args.first().and_then(Value::as_str).unwrap_or_default())
             }
             ("CoworkScheduledTasks", "getAllScheduledTasks")
             | ("CCDScheduledTasks", "getAllScheduledTasks") => {

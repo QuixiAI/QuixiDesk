@@ -14,3 +14,6 @@ parking_lot.workspace = true
 dirs.workspace = true
 tracing.workspace = true
 quixi-proto.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true

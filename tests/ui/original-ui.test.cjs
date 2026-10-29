@@ -127,6 +127,11 @@ async function fixture({
         .map((s) => ({ sessionId: s.sessionId, snippet: "Matched message" }));
     if (member === "getAllArtifacts") return structuredClone(artifacts);
     if (member === "getAllScheduledTasks") return structuredClone(schedules);
+    if (member === "runScheduledTask") {
+      const task=schedules.find(t=>t.id===args[0]);const id="scheduled-conversation";
+      sessions.push({sessionId:id,title:task.displayName,cwd:task.cwd,spaceId:null,permissionMode:"default",isRunning:true,bufferedMessages:[]});
+      return {sessionId:id};
+    }
     if (
       member === "listLocalSkills" ||
       member === "getLocalMcpServers" ||
@@ -424,11 +429,10 @@ test("running a schedule clears the previously selected project", async () => {
     await f.click("Start task");
     await f.click("Schedules");
     await f.click("Run now");
-    assert.equal(f.w.document.querySelector("#prompt").value, "Independent task");
-    await f.click("Send");
-    const start = f.calls.find((c) => c.member === "start");
-    assert.equal(start.args[0].spaceId, null);
-    assert.equal(start.args[0].cwd, "/scheduled-work");
+    assert.ok(f.calls.some(c=>c.member === "runScheduledTask" && c.args[0] === "schedule-one"));
+    assert.ok(!f.calls.some(c=>c.member === "sendMessage"));
+    assert.equal(f.sessions.find(s=>s.sessionId==="scheduled-conversation").spaceId,null);
+    assert.match(f.w.document.body.textContent,/scheduled-work/);
   } finally { f.close(); }
 });
 
@@ -862,4 +866,17 @@ test("stopped response text stays readable after reopening a conversation", asyn
   } finally {
     f.close();
   }
+});
+
+
+test("conversation find highlights, navigates, closes and preserves text", async()=>{
+  const f=await fixture();try{
+    f.sessions[0].bufferedMessages=[{type:"assistant",message:{content:[{type:"text",text:"Alpha needle beta needle gamma."}]}}];
+    await f.click("Existing conversation");await f.click("Find in conversation");
+    f.type('#conversation-find input','needle');
+    assert.equal(f.w.document.querySelectorAll('mark[data-find]').length,2);
+    assert.match(f.w.document.querySelector('#conversation-find [role=status]').textContent,/1 of 2/);
+    await f.click("Next match");assert.match(f.w.document.querySelector('#conversation-find [role=status]').textContent,/2 of 2/);
+    await f.click("Close find");assert.equal(f.w.document.querySelectorAll('mark[data-find]').length,0);assert.match(f.w.document.querySelector('#conversation').textContent,/Alpha needle beta needle gamma/);
+  }finally{f.close();}
 });

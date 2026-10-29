@@ -22,3 +22,6 @@ quixi-platform.workspace = true
 quixi-workspace.workspace = true
 quixi-mcp.workspace = true
 quixi-netstack.workspace = true
+aes-gcm = "0.10"
+keyring = { version = "3.6.3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust", "vendored"] }
+cron = "0.15"
