@@ -2209,7 +2209,7 @@ dependencies = [
 
 [[package]]
 name = "quixi-app"
-version = "3.6556.5"
+version = "3.6556.6"
 dependencies = [
  "anyhow",
  "block",
@@ -2239,7 +2239,7 @@ dependencies = [
 
 [[package]]
 name = "quixi-chrome-native-host"
-version = "3.6556.5"
+version = "3.6556.6"
 dependencies = [
  "anyhow",
  "quixi-mcp",
@@ -2251,7 +2251,7 @@ dependencies = [
 
 [[package]]
 name = "quixi-disclaimer"
-version = "3.6556.5"
+version = "3.6556.6"
 dependencies = [
  "anyhow",
  "quixi-platform",
@@ -2259,7 +2259,7 @@ dependencies = [
 
 [[package]]
 name = "quixi-engine"
-version = "3.6556.5"
+version = "3.6556.6"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2283,7 +2283,7 @@ dependencies = [
 
 [[package]]
 name = "quixi-guest-daemon"
-version = "3.6556.5"
+version = "3.6556.6"
 dependencies = [
  "anyhow",
  "libc",
@@ -2294,7 +2294,7 @@ dependencies = [
 
 [[package]]
 name = "quixi-ipc"
-version = "3.6556.5"
+version = "3.6556.6"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2313,7 +2313,7 @@ dependencies = [
 
 [[package]]
 name = "quixi-mcp"
-version = "3.6556.5"
+version = "3.6556.6"
 dependencies = [
  "anyhow",
  "dirs",
@@ -2328,7 +2328,7 @@ dependencies = [
 
 [[package]]
 name = "quixi-mcp-builtin"
-version = "3.6556.5"
+version = "3.6556.6"
 dependencies = [
  "anyhow",
  "quixi-mcp",
@@ -2340,7 +2340,7 @@ dependencies = [
 
 [[package]]
 name = "quixi-netstack"
-version = "3.6556.5"
+version = "3.6556.6"
 dependencies = [
  "anyhow",
  "dirs",
@@ -2353,7 +2353,7 @@ dependencies = [
 
 [[package]]
 name = "quixi-platform"
-version = "3.6556.5"
+version = "3.6556.6"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2368,7 +2368,7 @@ dependencies = [
 
 [[package]]
 name = "quixi-proto"
-version = "3.6556.5"
+version = "3.6556.6"
 dependencies = [
  "chrono",
  "serde",
@@ -2378,14 +2378,14 @@ dependencies = [
 
 [[package]]
 name = "quixi-ssh-askpass"
-version = "3.6556.5"
+version = "3.6556.6"
 dependencies = [
  "anyhow",
 ]
 
 [[package]]
 name = "quixi-workspace"
-version = "3.6556.5"
+version = "3.6556.6"
 dependencies = [
  "anyhow",
  "dashmap",

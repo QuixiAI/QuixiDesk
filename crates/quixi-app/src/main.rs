@@ -722,7 +722,7 @@ fn main() -> anyhow::Result<()> {
     // Support multi-call invocation when QuixiDesk binary is invoked as a helper
     if let Some(arg1) = std::env::args().nth(1) {
         if arg1 == "--version" || arg1 == "-v" {
-            println!("QuixiDesk 3.6556.5");
+            println!("QuixiDesk 3.6556.6");
             return Ok(());
         }
     }
@@ -842,7 +842,7 @@ fn main() -> anyhow::Result<()> {
     let protocol_router = router.clone();
     let protocol_proxy = proxy.clone();
 
-    let user_agent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) QuixiDesk/3.6556.5 Safari/605.1.15";
+    let user_agent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) QuixiDesk/3.6556.6 Safari/605.1.15";
 
     let mut web_context = wry::WebContext::new(quixi_proto::paths::test_profile().map(|p| p.join("website-data")));
     let mut webview_builder = if test_profile.is_some() { WebViewBuilder::with_web_context(&mut web_context) } else { WebViewBuilder::new() };
