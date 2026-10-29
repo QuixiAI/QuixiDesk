@@ -1,1 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="280" height="64" viewBox="0 0 280 64"><rect width="64" height="64" rx="17" fill="#80e0c2"/><circle cx="29" cy="29" r="16" fill="none" stroke="#10262b" stroke-width="7"/><path d="m38 38 12 12" fill="none" stroke="#10262b" stroke-width="7" stroke-linecap="round"/><text x="80" y="43" font-family="system-ui,sans-serif" font-weight="650" font-size="34" letter-spacing="-1" fill="#80e0c2">QuixiDesk</text></svg>
+<svg xmlns="http://www.w3.org/2000/svg" width="350" height="100" viewBox="0 0 350 100">
+  <rect width="100" height="100" rx="22" fill="#0B0D13"/>
+  <rect x="1.5" y="1.5" width="97" height="97" rx="20.5" stroke="#262B38" stroke-width="2" fill="none"/>
+  <path fill="#18C9B0" fill-rule="evenodd" clip-rule="evenodd" d="M 48.5 25 C 48.5 21.96 50.96 19.5 54 19.5 C 57.04 19.5 59.5 21.96 59.5 25 L 59.5 79.5 C 59.5 82.54 57.04 85 54 85 C 50.96 85 48.5 82.54 48.5 79.5 L 48.5 60.55 A 22.5 22.5 0 1 1 48.5 23.45 Z M 37.5 31 A 11 11 0 1 0 37.5 53 A 11 11 0 1 0 37.5 31 Z"/>
+  <circle cx="76.5" cy="74" r="9.5" fill="#818CF8"/>
+<text x="120" y="66" font-family="system-ui,sans-serif" font-weight="650" font-size="46" letter-spacing="-1" fill="#18C9B0">QuixiDesk</text></svg>

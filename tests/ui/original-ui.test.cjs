@@ -10,7 +10,7 @@ const source = fs.readFileSync(
 );
 const wait = () => new Promise((resolve) => setTimeout(resolve, 40));
 
-async function fixture() {
+async function fixture({ artifacts = [], providerId = "custom" } = {}) {
   const dom = new JSDOM(
     '<!doctype html><div id="app"></div><div id="toasts"></div>',
     {
@@ -48,11 +48,11 @@ async function fixture() {
   const providers = {
     configuredCount: 1,
     hasConfiguredProvider: true,
-    activeProvider: "custom",
+    activeProvider: providerId,
     activeModel: "fixture-model",
     providers: [
       {
-        id: "custom",
+        id: providerId,
         name: "Custom endpoint",
         configured: true,
         selectedModel: "fixture-model",
@@ -108,6 +108,7 @@ async function fixture() {
       return sessions
         .filter((s) => s.title.toLowerCase().includes(args[0].toLowerCase()))
         .map((s) => ({ sessionId: s.sessionId, snippet: "Matched message" }));
+    if (member === "getAllArtifacts") return structuredClone(artifacts);
     if (
       member === "listLocalSkills" ||
       member === "getLocalMcpServers" ||
@@ -138,10 +139,30 @@ async function fixture() {
       };
     if (route === "/api/quixi/workspace/inspect")
       return { exists: true, path: body.path };
-    if (route === "/api/quixi/providers/save") return { ok: true };
+    if (route === "/api/quixi/providers/save") {
+      const p = providers.providers.find((p) => p.id === body.providerId);
+      if (body.customModel) {
+        const id = body.customModel.trim();
+        p.customModels ||= [];
+        if (!p.customModels.includes(id)) p.customModels.push(id);
+        if (!p.models.some((m) => m.id === id))
+          p.models.push({ id, label: id });
+      }
+      if (body.selectedModel) p.selectedModel = body.selectedModel;
+      if (body.setAsActive) {
+        providers.activeProvider = p.id;
+        providers.activeModel = p.selectedModel;
+      }
+      return { ok: true };
+    }
     throw Error("Unexpected API: " + route);
   };
-  w.quixi = { rpc, api, copy: async () => {}, origin: "https://app.localhost" };
+  w.quixi = {
+    rpc,
+    api,
+    copy: async (text) => calls.push({ clipboard: text }),
+    origin: "https://app.localhost",
+  };
   w.eval(source);
   await wait();
   const click = async (text) => {
@@ -173,7 +194,7 @@ test("unsent drafts survive navigation and provider names are not application br
     assert.equal(f.w.document.querySelector("#prompt").value, "Draft café 🌲");
     assert.equal(
       f.w.document.querySelector(".brand").textContent,
-      "QuixiDeskWORKSPACE",
+      "QuixiDeskPersonal workspace",
     );
     assert.equal(
       f.w.document.querySelector("#send-button").textContent,
@@ -411,3 +432,150 @@ test("completion events for concurrent tasks refresh both running indicators", a
     f.close();
   }
 });
+
+test("formatted responses remain inert and code copy preserves the source", async () => {
+  const f = await fixture();
+  try {
+    const source = 'const sample = "<script>";';
+    const text =
+      "# Summary\n\n**Useful** and `readable`\n\n- One\n- Two\n\n| Task | State |\n| --- | --- |\n| Review | Ready |\n\n> Keep it small.\n\n```js\n" +
+      source +
+      '\n```\n\n<img src=x onerror="window.injected=true">\n<script>window.injected=true</script>\n[unsafe](javascript:alert(1))\n\n# ';
+    f.sessions[0].bufferedMessages = [
+      { type: "assistant", message: { content: [{ type: "text", text }] } },
+    ];
+    f.w.quixiNavigate("chat/fixture-one");
+    await wait();
+    const body = f.w.document.querySelector(".message .body");
+    assert.equal(body.querySelector("h2").textContent, "Summary");
+    assert.equal(body.querySelectorAll("li").length, 2);
+    assert.equal(body.querySelectorAll("td").length, 2);
+    assert.equal(body.querySelector("strong").textContent, "Useful");
+    assert.equal(
+      body.querySelectorAll('script,img,a[href^="javascript:"]').length,
+      0,
+    );
+    assert.equal(f.w.injected, undefined);
+    await f.click("Copy code");
+    assert.equal(f.calls.find((c) => c.clipboard).clipboard, source);
+  } finally {
+    f.close();
+  }
+});
+
+test("separated numbered paragraphs retain their original numbering", async () => {
+  const f = await fixture();
+  try {
+    f.sessions[0].bufferedMessages = [
+      {
+        type: "assistant",
+        message: {
+          content: [
+            {
+              type: "text",
+              text: "1. First step\n\n2. Second step\n\n5. A later step",
+            },
+          ],
+        },
+      },
+    ];
+    await f.click("Existing conversation");
+    assert.deepEqual(
+      Array.from(f.w.document.querySelectorAll("ol"), (n) => n.start),
+      [1, 2, 5],
+    );
+  } finally {
+    f.close();
+  }
+});
+
+test("theme choices update the workspace and survive page navigation", async () => {
+  const f = await fixture();
+  try {
+    await f.click("Settings");
+    await f.click("Use light theme");
+    assert.equal(f.w.document.documentElement.dataset.theme, "light");
+    await f.click("New task");
+    await f.click("Settings");
+    assert.equal(
+      f.w.document
+        .querySelector('[aria-label="Use light theme"]')
+        .getAttribute("aria-pressed"),
+      "true",
+    );
+    await f.click("Use system theme");
+    assert.equal(f.w.document.documentElement.dataset.theme, "dark");
+  } finally {
+    f.close();
+  }
+});
+
+test("gallery thumbnails are offline and cannot run artifact scripts", async () => {
+  const f = await fixture({
+    artifacts: [
+      {
+        id: "fixture-artifact",
+        name: "A preview",
+        html: '<script>parent.document.body.textContent="OWNED"</script><h1>Preview</h1>',
+      },
+    ],
+  });
+  try {
+    await f.click("Artifacts");
+    const frame = f.w.document.querySelector(".artifact-thumbnail iframe");
+    assert.ok(frame);
+    assert.equal(frame.getAttribute("sandbox"), "");
+    assert.equal(frame.getAttribute("referrerpolicy"), "no-referrer");
+    assert.match(frame.srcdoc, /default-src 'none'/);
+    assert.match(frame.srcdoc, /form-action 'none'/);
+    assert.notEqual(f.w.document.body.textContent, "OWNED");
+    await f.click("Preview A preview");
+    assert.ok(f.w.document.querySelector("dialog .preview-frame"));
+  } finally {
+    f.close();
+  }
+});
+
+for (const providerId of ["custom", "openrouter"])
+  test(`manual models can be saved without switching and then selected: ${providerId}`, async () => {
+    const f = await fixture({ providerId });
+    try {
+      await f.click("Choose model");
+      await f.click("Add model");
+      assert.match(
+        f.w.document.querySelector(".form-error").textContent,
+        /Enter a model ID/,
+      );
+      f.type('input[aria-label="Model ID"]', "  private/hidden:latest  ");
+      await f.click("Add model");
+      const save = f.calls.find((c) => c.body?.customModel);
+      assert.deepEqual(JSON.parse(JSON.stringify(save.body)), {
+        providerId,
+        customModel: "private/hidden:latest",
+        selectCustomModel: false,
+        setAsActive: false,
+      });
+      assert.equal(
+        f.w.document
+          .querySelector(".model-control button")
+          .textContent.replace("⌄", "")
+          .trim(),
+        "fixture-model",
+      );
+      const row = Array.from(
+        f.w.document.querySelectorAll(".model-options button"),
+      ).find((b) => b.textContent.includes("private/hidden:latest"));
+      assert.match(row.textContent, /Added manually/);
+      row.click();
+      await wait();
+      assert.ok(
+        f.calls.some(
+          (c) =>
+            c.body?.selectedModel === "private/hidden:latest" &&
+            c.body.setAsActive,
+        ),
+      );
+    } finally {
+      f.close();
+    }
+  });

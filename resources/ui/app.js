@@ -22,6 +22,7 @@
     transcripts: new Map(),
     drafts: new Map(),
     attachmentDrafts: new Map(),
+    stopped: new Set(),
     collapsed: localStorage.getItem("quixi.sidebar") === "closed",
     settingsTab: "general",
   };
@@ -222,6 +223,15 @@
     });
     document.body.append(d);
     d.showModal();
+    d.setAttribute("aria-label", title);
+    d.tabIndex = -1;
+    const initialFocus =
+      d.querySelector("input:not([type=hidden]), textarea, select") || d;
+    initialFocus.focus();
+    if (initialFocus instanceof HTMLTextAreaElement) {
+      initialFocus.setSelectionRange(0, 0);
+      initialFocus.scrollTop = 0;
+    }
     return d;
   }
   function confirmDialog(title, text, action, label = "Delete") {
@@ -365,6 +375,16 @@
     navigate(path, null, { replace: true });
   });
   function render() {
+    const navigationButton = (label, name, action, cls = "") => {
+      const control = button(
+        [icon(name), el("span", { class: "nav-label" }, label)],
+        action,
+        cls,
+      );
+      control.setAttribute("aria-label", label);
+      control.title = label;
+      return control;
+    };
     document.title =
       state.page === "chat"
         ? (session()?.title || "Task") + " · QuixiDesk"
@@ -387,14 +407,15 @@
           "span",
           {},
           "QuixiDesk",
-          el("span", { class: "brand-caption" }, "WORKSPACE"),
+          el("span", { class: "brand-caption" }, "Personal workspace"),
         ),
       ),
       el(
         "nav",
         { "aria-label": "Main navigation" },
-        button(
-          [icon("plus"), el("span", { class: "nav-label" }, "New task")],
+        navigationButton(
+          "New task",
+          "plus",
           () => {
             state.project = null;
             state.folder = "";
@@ -403,8 +424,9 @@
           "new-task",
         ),
         ...nav.map(([page, label, ic]) =>
-          button(
-            [icon(ic), el("span", { class: "nav-label" }, label)],
+          navigationButton(
+            label,
+            ic,
             () => navigate(page),
             state.page === page ? "active" : "",
           ),
@@ -414,8 +436,9 @@
       el(
         "footer",
         {},
-        button(
-          [icon("settings"), el("span", { class: "nav-label" }, "Settings")],
+        navigationButton(
+          "Settings",
+          "settings",
           () => navigate("settings"),
           "quiet",
         ),
@@ -445,7 +468,7 @@
       "header",
       { class: "topbar" },
       ib("Back", "back", () => history.back()),
-      el("div", { class: "crumb" }, "Workspace / ", el("strong", {}, crumb)),
+      el("div", { class: "crumb" }, el("strong", {}, crumb)),
       button(
         `Providers${state.providers?.configuredCount ? " · " + state.providers.configuredCount : ""}`,
         () => providerDirectory(),
@@ -473,6 +496,7 @@
       ),
     );
     root.removeAttribute("aria-busy");
+    document.body.dataset.page = state.page;
     renderRecents();
     renderPage();
   }
@@ -540,14 +564,20 @@
   }
   function chatPage(host) {
     const s = session();
-    const main = el("section", { class: "chat-main" });
+    const main = el("section", { class: "chat-main" + (s ? "" : " is-new") });
     if (s)
       main.append(
         el(
           "div",
           { class: "session-heading" },
-          el("h2", {}, s.title || "Untitled task"),
-          button("Files & context", () => contextDrawer()),
+          el("h2", { class: "visually-hidden" }, s.title || "Untitled task"),
+          el(
+            "span",
+            { class: "context-label" },
+            icon("folder", 14),
+            currentFolder().split(/[\\/]/).filter(Boolean).pop() || "Workspace",
+          ),
+          button("Files & context", () => contextDrawer(), "quiet"),
           ib("Task actions", "more", () => sessionMenu(s)),
         ),
       );
@@ -565,13 +595,13 @@
           el(
             "div",
             { class: "eyebrow" },
-            project() ? project().name : "A LITTLE SPACE TO THINK BIG",
+            project() ? project().name : "YOUR WORKSPACE",
           ),
-          el("h1", {}, "Bring your next idea to life."),
+          el("h1", {}, "Where should we start?"),
           el(
             "p",
             {},
-            "Think through a question, build something useful, or work with the files in your workspace.",
+            "Explore a question, work with your files, or make something useful.",
           ),
           el(
             "div",
@@ -581,28 +611,43 @@
                 "Plan my next project",
                 "Help me make a practical plan for my next project. Start by asking about the outcome and constraints.",
                 "projects",
+                "Turn an idea into next steps",
               ],
               [
                 "Understand a codebase",
                 "Help me understand this workspace. Start with a read-only overview of the project structure.",
                 "code",
+                "Get oriented in your workspace",
               ],
               [
                 "Make a useful artifact",
                 "Help me create a private local HTML artifact. Ask what it should do before building it.",
                 "artifacts",
+                "Build something you can use",
               ],
-            ].map(([label, prompt, ic]) =>
-              button([icon(ic), label], () => {
-                document.getElementById("prompt").value = prompt;
-                saveDraft();
-                document.getElementById("prompt").focus();
-              }),
+            ].map(([label, prompt, ic, description]) =>
+              button(
+                [
+                  icon(ic, 17),
+                  el(
+                    "span",
+                    {},
+                    el("strong", {}, label),
+                    el("small", {}, description),
+                  ),
+                ],
+                () => {
+                  document.getElementById("prompt").value = prompt;
+                  saveDraft();
+                  document.getElementById("prompt").focus();
+                },
+              ),
             ),
           ),
         ),
       );
     main.append(conversation, composer());
+    if (!s) main.append(conversation.querySelector(".suggestions"));
     host.replaceChildren(main);
     renderChips();
     if (s) renderTranscript();
@@ -669,6 +714,16 @@
       running(s) ? "stop" : "arrow",
     );
     send.id = "send-button";
+    const chooseModel = button(
+      [
+        el("span", {}, state.providers?.activeModel || "Choose model"),
+        el("span", { class: "chevron", "aria-hidden": "true" }, "⌄"),
+      ],
+      () => modelPicker(),
+      "quiet model-picker-trigger",
+    );
+    chooseModel.setAttribute("aria-label", "Choose model");
+    chooseModel.title = state.providers?.activeModel || "Choose model";
     return el(
       "div",
       { class: "composer-wrap" },
@@ -694,14 +749,14 @@
           ),
           mode,
           el("span", { class: "spacer" }),
-          button("Model", () => modelPicker(), "quiet"),
+          el("span", { class: "model-control" }, chooseModel),
           send,
         ),
       ),
       el(
         "p",
         { class: "composer-note" },
-        "Enter to send · Shift+Enter for a new line · Review important results",
+        "Enter to send · Shift+Enter for a new line",
       ),
     );
   }
@@ -829,6 +884,7 @@
         state.page = "chat";
         history.pushState({}, "", "/chat/" + encodeURIComponent(state.id));
       }
+      state.stopped.delete(s.sessionId);
       const uuid = crypto.randomUUID();
       await rpc(service(s), "sendMessage", [
         s.sessionId,
@@ -859,6 +915,7 @@
     const s = session();
     if (!s) return;
     await rpc(service(s), "stop", [s.sessionId]);
+    state.stopped.add(s.sessionId);
     state.streams.delete(s.sessionId);
     await refreshSession(s.sessionId);
     renderTranscript();
@@ -907,37 +964,157 @@
         ? content
         : [];
   }
-  function plainBody(text) {
-    const box = el("div", { class: "body" });
-    const pieces = String(text || "").split(/(```[\s\S]*?```)/g);
-    for (const piece of pieces) {
-      if (piece.startsWith("```")) {
-        const code = piece.replace(/^```[^\n]*\n?/, "").replace(/```$/, "");
-        box.append(el("pre", {}, el("code", {}, code)));
-      } else {
-        const re =
-          /\[([^\]]+)\]\((app:\/\/localhost\/cowork-artifact\/([a-zA-Z0-9-]+))\)/g;
-        let last = 0,
-          m;
-        while ((m = re.exec(piece))) {
-          const artifactId = m[3];
-          box.append(
-            document.createTextNode(piece.slice(last, m.index)),
+  // Render a small, safe Markdown subset as DOM nodes. Model text is never HTML.
+  function inlineText(text) {
+    const out = document.createDocumentFragment();
+    const pattern =
+      /(`[^`\n]+`|\*\*[^*\n]+\*\*|\*[^*\n]+\*|\[[^\]\n]+\]\([^\s)]+\))/g;
+    let last = 0;
+    for (const match of text.matchAll(pattern)) {
+      out.append(document.createTextNode(text.slice(last, match.index)));
+      const token = match[0];
+      if (token.startsWith("`")) out.append(el("code", {}, token.slice(1, -1)));
+      else if (token.startsWith("**"))
+        out.append(el("strong", {}, token.slice(2, -2)));
+      else if (token.startsWith("*"))
+        out.append(el("em", {}, token.slice(1, -1)));
+      else {
+        const [, label, url] = token.match(/^\[([^\]]+)\]\((.+)\)$/);
+        const artifact = url.match(
+          /^app:\/\/localhost\/cowork-artifact\/([a-zA-Z0-9-]+)$/,
+        );
+        if (artifact || /^https?:\/\//i.test(url)) {
+          out.append(
             el(
               "a",
               {
-                href: "#",
-                onClick: (e) => {
-                  e.preventDefault();
-                  openArtifact(artifactId);
+                href: artifact ? "#" : url,
+                onClick: (event) => {
+                  event.preventDefault();
+                  (artifact
+                    ? openArtifact(artifact[1])
+                    : openExternal(url)
+                  ).catch((error) => toast(error.message, true));
                 },
               },
-              m[1],
+              label,
             ),
           );
-          last = re.lastIndex;
-        }
-        box.append(document.createTextNode(piece.slice(last)));
+        } else out.append(document.createTextNode(token));
+      }
+      last = match.index + token.length;
+    }
+    out.append(document.createTextNode(text.slice(last)));
+    return out;
+  }
+  function plainBody(text) {
+    const box = el("div", { class: "body" });
+    const lines = String(text || "")
+      .replace(/\r\n/g, "\n")
+      .split("\n");
+    const cells = (line) =>
+      line
+        .trim()
+        .replace(/^\||\|$/g, "")
+        .split("|")
+        .map((cell) => cell.trim());
+    for (let i = 0; i < lines.length;) {
+      const line = lines[i];
+      if (!line.trim()) {
+        i++;
+        continue;
+      }
+      if (/^\s*```/.test(line)) {
+        const language = line.trim().slice(3).trim() || "Code";
+        const code = [];
+        i++;
+        while (i < lines.length && !/^\s*```/.test(lines[i]))
+          code.push(lines[i++]);
+        if (i < lines.length) i++;
+        const value = code.join("\n");
+        box.append(
+          el(
+            "div",
+            { class: "code-block" },
+            el(
+              "div",
+              { class: "code-head" },
+              el("span", {}, language),
+              button("Copy code", () => copy(value), "quiet"),
+            ),
+            el("pre", {}, el("code", {}, value)),
+          ),
+        );
+      } else if (/^#{1,6}\s/.test(line)) {
+        const [, hashes, title] = line.match(/^(#{1,6})\s+(.*)$/);
+        box.append(
+          el("h" + Math.min(hashes.length + 1, 6), {}, inlineText(title)),
+        );
+        i++;
+      } else if (
+        i + 1 < lines.length &&
+        line.includes("|") &&
+        /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(lines[i + 1])
+      ) {
+        const table = el(
+          "table",
+          {},
+          el(
+            "thead",
+            {},
+            el(
+              "tr",
+              {},
+              ...cells(line).map((c) => el("th", {}, inlineText(c))),
+            ),
+          ),
+        );
+        const body = el("tbody", {});
+        i += 2;
+        while (i < lines.length && lines[i].trim() && lines[i].includes("|"))
+          body.append(
+            el(
+              "tr",
+              {},
+              ...cells(lines[i++]).map((c) => el("td", {}, inlineText(c))),
+            ),
+          );
+        table.append(body);
+        box.append(el("div", { class: "table-wrap" }, table));
+      } else if (/^\s*([-*+] |\d+\. )/.test(line)) {
+        const ordered = /^\s*\d+\. /.test(line);
+        const list = el(
+          ordered ? "ol" : "ul",
+          ordered ? { start: line.match(/\d+/)[0] } : {},
+        );
+        const pattern = ordered ? /^\s*\d+\. (.*)$/ : /^\s*[-*+] (.*)$/;
+        while (i < lines.length && pattern.test(lines[i]))
+          list.append(
+            el("li", {}, inlineText(lines[i++].replace(pattern, "$1"))),
+          );
+        box.append(list);
+      } else if (/^>\s?/.test(line)) {
+        const quote = [];
+        while (i < lines.length && /^>\s?/.test(lines[i]))
+          quote.push(lines[i++].replace(/^>\s?/, ""));
+        box.append(el("blockquote", {}, inlineText(quote.join("\n"))));
+      } else if (/^\s*([-*_])(?:\s*\1){2,}\s*$/.test(line)) {
+        box.append(el("hr"));
+        i++;
+      } else {
+        const paragraph = [lines[i++]];
+        while (
+          i < lines.length &&
+          lines[i].trim() &&
+          !/^\s*(#{1,6}\s|```|[-*+] |\d+\. |>)/.test(lines[i]) &&
+          !(
+            i + 1 < lines.length &&
+            lines[i].includes("|") &&
+            /^\s*\|?\s*:?-{3,}/.test(lines[i + 1])
+          )
+        )
+          paragraph.push(lines[i++]);
+        box.append(el("p", {}, inlineText(paragraph.join("\n"))));
       }
     }
     return box;
@@ -1043,6 +1220,15 @@
         ),
       );
     }
+    if (state.stopped.has(s.sessionId) && !running(s))
+      result.push(
+        el(
+          "div",
+          { class: "live-status", role: "status" },
+          icon("stop", 14),
+          "Response stopped.",
+        ),
+      );
     if (s.error)
       result.push(
         el(
@@ -1247,8 +1433,8 @@
       cards.append(
         el(
           "article",
-          { class: "card" },
-          icon("projects", 22),
+          { class: "card project-card" },
+          el("div", { class: "card-symbol" }, icon("projects", 21)),
           el("h3", { style: "margin-top:16px" }, p.name),
           el(
             "p",
@@ -1258,7 +1444,7 @@
           el(
             "small",
             {},
-            `${p.folders?.length || 0} folders · ${state.sessions.filter((s) => s.spaceId === p.id).length} conversations`,
+            `${p.folders?.length || 0} ${p.folders?.length === 1 ? "folder" : "folders"} · ${state.sessions.filter((s) => s.spaceId === p.id).length} ${state.sessions.filter((s) => s.spaceId === p.id).length === 1 ? "conversation" : "conversations"}`,
           ),
           el(
             "div",
@@ -1400,6 +1586,33 @@
       toast(e.message, true);
     }
   }
+  function artifactThumbnail(artifact) {
+    const preview = button(
+      "",
+      () => openArtifact(artifact.id),
+      "artifact-thumbnail",
+    );
+    preview.setAttribute(
+      "aria-label",
+      "Preview " + (artifact.name || artifact.title || "artifact"),
+    );
+    if (artifact.html) {
+      // Gallery tiles are inert and offline. Only the explicit preview runs scripts.
+      const frame = el("iframe", {
+        sandbox: "",
+        referrerpolicy: "no-referrer",
+        loading: "lazy",
+        tabindex: -1,
+        "aria-hidden": "true",
+        title: "Artifact thumbnail",
+      });
+      frame.srcdoc =
+        `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; form-action 'none'; base-uri 'none'">` +
+        artifact.html;
+      preview.append(frame);
+    } else preview.append(icon("artifacts", 36));
+    return preview;
+  }
   function artifactsPage(host) {
     host.replaceChildren(
       header(
@@ -1412,15 +1625,15 @@
       cards.append(
         el(
           "article",
-          { class: "card" },
-          icon("artifacts", 22),
+          { class: "card artifact-card" },
+          artifactThumbnail(a),
           el("h3", { style: "margin-top:16px" }, a.name || a.title),
           el("p", {}, a.description || "Private local artifact"),
           el("small", {}, date(a.updatedAt)),
           el(
             "div",
             { class: "card-actions" },
-            button("Open preview", () => openArtifact(a.id), "primary"),
+            button("Open preview", () => openArtifact(a.id)),
             button(
               "Rename",
               () =>
@@ -1461,7 +1674,7 @@
                     await loadArtifacts();
                   },
                 ),
-              "danger",
+              "quiet danger",
             ),
           ),
         ),
@@ -1470,8 +1683,20 @@
       state.artifacts.length
         ? cards
         : empty(
-            "Nothing here yet",
-            "Ask a task to create a private local HTML artifact.",
+            "Your ideas, made tangible",
+            "Interactive pages and tools you create in a conversation will appear here.",
+            button(
+              "Create your first artifact",
+              () => {
+                navigate("new");
+                document.getElementById("prompt").value =
+                  "Help me create an interactive HTML artifact. Ask me what I would like to build.";
+                saveDraft();
+                document.getElementById("prompt").focus();
+              },
+              "primary",
+              "plus",
+            ),
           ),
     );
   }
@@ -1636,12 +1861,33 @@
     );
     host.append(el("h2", {}, "Skills"));
     const skills = el("div", { class: "cards" });
+    const skillNames = {
+      docx: "Word documents",
+      pdf: "PDF editing",
+      "pdf-reading": "Read PDFs",
+      pptx: "Presentations",
+      xlsx: "Spreadsheets",
+      "frontend-design": "Interface design",
+    };
     for (const skill of toolsData.skills)
       skills.append(
         el(
           "article",
-          { class: "card" },
-          el("h3", {}, skill.displayName || skill.name),
+          { class: "card skill-card" },
+          el(
+            "div",
+            { class: "skill-heading" },
+            el(
+              "span",
+              { class: "skill-symbol" },
+              icon(skill.name === "frontend-design" ? "code" : "file", 18),
+            ),
+            el(
+              "h3",
+              {},
+              skillNames[skill.name] || skill.displayName || skill.name,
+            ),
+          ),
           el("p", {}, skill.description),
           button(
             "Read instructions",
@@ -1652,13 +1898,20 @@
                 [skill.skillId],
               );
               dialog(
-                skill.name,
+                skillNames[skill.skillId] || skill.name,
                 (files || []).map((f) =>
                   el(
                     "details",
                     { open: f.path === "SKILL.md" },
                     el("summary", {}, f.path),
-                    el("pre", {}, f.content || ""),
+                    f.path === "SKILL.md"
+                      ? plainBody(
+                          (f.content || "").replace(
+                            /^---\r?\n[\s\S]*?\r?\n---\r?\n/,
+                            "",
+                          ),
+                        )
+                      : el("pre", {}, f.content || ""),
                   ),
                 ),
                 { wide: true },
@@ -1758,7 +2011,7 @@
       ["privacy", "Privacy & data"],
       ["about", "About"],
     ];
-    const content = el("section", {});
+    const content = el("section", { class: "settings-content" });
     host.replaceChildren(
       header("Settings", "Make the workspace yours."),
       el(
@@ -1784,20 +2037,53 @@
     if (state.settingsTab === "general") {
       content.append(
         el("h2", {}, "Appearance"),
-        field(
-          "Theme",
-          select(
-            [
-              ["dark", "Dark"],
-              ["light", "Light"],
-              ["system", "System"],
-            ],
-            localStorage.getItem("quixi.theme") || "dark",
-            (v) => {
-              localStorage.setItem("quixi.theme", v);
-              applyTheme();
-            },
-          ),
+        el(
+          "p",
+          { class: "muted" },
+          "Choose a look that feels right for your workspace.",
+        ),
+        el(
+          "div",
+          { class: "theme-options", role: "group", "aria-label": "Theme" },
+          ...[
+            ["light", "Light"],
+            ["dark", "Dark"],
+            ["system", "System"],
+          ].map(([value, label]) => {
+            const choice = button(
+              [
+                el(
+                  "span",
+                  { class: "theme-swatch " + value, "aria-hidden": "true" },
+                  el("span"),
+                  el("span"),
+                ),
+                el(
+                  "span",
+                  { class: "theme-label" },
+                  label,
+                  (localStorage.getItem("quixi.theme") || "dark") === value
+                    ? icon("check", 14)
+                    : null,
+                ),
+              ],
+              () => {
+                localStorage.setItem("quixi.theme", value);
+                applyTheme();
+                renderPage();
+              },
+              "theme-option" +
+                ((localStorage.getItem("quixi.theme") || "dark") === value
+                  ? " selected"
+                  : ""),
+            );
+            choice.setAttribute("aria-label", "Use " + value + " theme");
+            choice.setAttribute(
+              "aria-pressed",
+              String((localStorage.getItem("quixi.theme") || "dark") === value),
+            );
+            return choice;
+          }),
         ),
         el("h2", { style: "margin-top:30px" }, "New tasks"),
         field(
@@ -1819,7 +2105,7 @@
         el(
           "div",
           { class: "notice" },
-          "The original interface currently uses English. System fonts and native keyboard shortcuts are supported.",
+          "Language: English. Use ⌘/Ctrl+N for a new task, ⌘/Ctrl+K to search, and ⌘/Ctrl+, for settings.",
         ),
       );
     } else if (state.settingsTab === "providers") {
@@ -1844,10 +2130,31 @@
         ),
         button("Inspect storage status", async () => {
           const status = await api("/api/quixi/storage/status");
-          dialog(
-            "Conversation storage",
-            el("pre", {}, JSON.stringify(status, null, 2)),
-          );
+          const issues = status.issues || [];
+          dialog("Conversation storage", [
+            el(
+              "div",
+              { class: "notice" },
+              issues.length
+                ? `${issues.length} conversation${issues.length === 1 ? " needs" : "s need"} attention. Use the storage notice to retry saving or export a recovery copy.`
+                : "No storage problems reported.",
+            ),
+            ...issues.map((issue) =>
+              el(
+                "p",
+                {},
+                issue.recoverySaved
+                  ? "A recovery copy is saved for an affected conversation."
+                  : "An affected conversation is currently held in memory. Keep the app open until it is saved.",
+              ),
+            ),
+            el(
+              "details",
+              {},
+              el("summary", {}, "Technical details"),
+              el("pre", {}, JSON.stringify(status, null, 2)),
+            ),
+          ]);
         }),
         el("hr"),
         button("View archived conversations", () => {
@@ -1897,7 +2204,8 @@
   }
   async function providerDirectory() {
     await loadProviders();
-    const body = el("div", {});
+    const body = el("div", { class: "provider-directory" });
+    let query = "";
     const draw = () => {
       body.replaceChildren(
         el(
@@ -1907,7 +2215,7 @@
         ),
         el(
           "div",
-          { class: "row" },
+          { class: "toolbar" },
           el(
             "span",
             { class: "tag" },
@@ -1924,83 +2232,123 @@
             "quiet",
           ),
         ),
+        el("input", {
+          type: "search",
+          spellcheck: false,
+          autocapitalize: "off",
+          autocorrect: "off",
+          value: query,
+          class: "provider-filter",
+          placeholder: "Find a provider…",
+          "aria-label": "Filter providers",
+          onInput: (e) => {
+            query = e.target.value;
+            for (const card of body.querySelectorAll(".provider-card"))
+              card.classList.toggle(
+                "hidden",
+                !card.dataset.name.includes(query.toLowerCase()),
+              );
+            body
+              .querySelector(".provider-empty")
+              ?.classList.toggle(
+                "hidden",
+                !!body.querySelector(".provider-card:not(.hidden)"),
+              );
+          },
+        }),
         el(
           "div",
-          { class: "cards", style: "margin-top:20px" },
-          ...state.providers.providers.map((p) =>
-            el(
-              "article",
-              {
-                class:
-                  "card provider-card" +
-                  (p.id === state.providers.activeProvider ? " selected" : ""),
-              },
+          { class: "cards" },
+          ...state.providers.providers
+            .slice()
+            .sort((a, b) => Number(b.configured) - Number(a.configured))
+            .map((p) =>
               el(
-                "div",
-                { class: "provider-header" },
+                "article",
+                {
+                  class:
+                    "card provider-card" +
+                    (!p.name.toLowerCase().includes(query.toLowerCase())
+                      ? " hidden"
+                      : "") +
+                    (p.id === state.providers.activeProvider
+                      ? " selected"
+                      : ""),
+                  "data-name": p.name.toLowerCase(),
+                },
                 el(
-                  "span",
-                  { class: "provider-badge", "aria-hidden": "true" },
-                  p.name.slice(0, 1),
+                  "div",
+                  { class: "provider-header" },
+                  el(
+                    "span",
+                    { class: "provider-badge", "aria-hidden": "true" },
+                    p.name.slice(0, 1),
+                  ),
+                  el(
+                    "div",
+                    {},
+                    el("h3", {}, p.name),
+                    el(
+                      "small",
+                      {},
+                      p.id === state.providers.activeProvider && p.configured
+                        ? "Active provider"
+                        : p.configured
+                          ? "Connected"
+                          : p.category === "local"
+                            ? "Local service"
+                            : "Not connected",
+                    ),
+                  ),
+                ),
+                el(
+                  "p",
+                  {},
+                  p.category === "local"
+                    ? "Connect to a model service on your computer."
+                    : p.id === "custom"
+                      ? "Use your own compatible model endpoint."
+                      : "Connect directly to this provider.",
                 ),
                 el(
                   "div",
-                  {},
-                  el("h3", {}, p.name),
-                  el(
-                    "small",
-                    {},
-                    p.configured
-                      ? "Configured"
-                      : p.category === "local"
-                        ? "Local service"
-                        : "Not connected",
-                  ),
-                ),
-              ),
-              el(
-                "p",
-                {},
-                p.category === "local"
-                  ? "Connect to a model service on your computer."
-                  : p.id === "custom"
-                    ? "Use your own compatible model endpoint."
-                    : "Connect directly to this provider.",
-              ),
-              el(
-                "div",
-                { class: "card-actions" },
-                button(
-                  "Configure",
-                  () =>
-                    providerEditor(p, async () => {
-                      await loadProviders();
-                      draw();
-                    }),
-                  "primary",
-                ),
-                p.configured
-                  ? button(
-                      "Use provider",
-                      async () => {
-                        const r = await api(
-                          "/api/quixi/providers/complete-onboarding",
-                          {
-                            activeProvider: p.id,
-                            activeModel: p.selectedModel,
-                          },
-                        );
-                        if (r.error) throw new Error(r.error);
+                  { class: "card-actions" },
+                  button(
+                    "Configure",
+                    () =>
+                      providerEditor(p, async () => {
                         await loadProviders();
-                        toast("Active provider updated.");
                         draw();
-                      },
-                      "quiet",
-                    )
-                  : null,
+                      }),
+                    "",
+                  ),
+                  p.configured
+                    ? button(
+                        "Use provider",
+                        async () => {
+                          const r = await api(
+                            "/api/quixi/providers/complete-onboarding",
+                            {
+                              activeProvider: p.id,
+                              activeModel: p.selectedModel,
+                            },
+                          );
+                          if (r.error) throw new Error(r.error);
+                          await loadProviders();
+                          toast("Active provider updated.");
+                          draw();
+                        },
+                        "quiet",
+                      )
+                    : null,
+                ),
               ),
             ),
-          ),
+        ),
+        el(
+          "p",
+          { class: "provider-empty hidden hint", role: "status" },
+          "No providers match. Try another name.",
         ),
       );
     };
@@ -2028,14 +2376,13 @@
         .filter((id) => !p.models?.some((m) => m.id === id))
         .map((id) => [id, id]),
     ];
-    const model =
-      p.id === "custom"
-        ? el("input", {
-            value: p.selectedModel || "",
-            required: true,
-            placeholder: "Model ID",
-          })
-        : select(models, p.selectedModel);
+    const model = ["custom", "openrouter"].includes(p.id)
+      ? el("input", {
+          value: p.selectedModel || "",
+          required: true,
+          placeholder: "Model ID",
+        })
+      : select(models, p.selectedModel);
     const format = select(
       [
         ["openai", "Chat completions API"],
@@ -2063,7 +2410,13 @@
           : "Never paste a key into a conversation.",
       ),
       field("Endpoint", base),
-      field("Model", model),
+      field(
+        "Model",
+        model,
+        ["custom", "openrouter"].includes(p.id)
+          ? "Enter an exact model ID, including models not listed by the provider."
+          : "",
+      ),
     );
     if (p.id === "custom") content.append(field("API format", format));
     const payload = () => ({
@@ -2180,6 +2533,17 @@
         oauth,
       );
     }
+    if (p.configured && ["custom", "openrouter"].includes(p.id))
+      content.append(
+        button(
+          "Manage models",
+          () => {
+            d.close();
+            modelPicker(p.id);
+          },
+          "quiet",
+        ),
+      );
     content.append(error, actions);
     const d = dialog(p.name, content);
     d.addEventListener("close", () => {
@@ -2187,14 +2551,14 @@
       key.value = "";
     });
   }
-  async function modelPicker() {
+  async function modelPicker(providerId) {
     await loadProviders();
-    const providers = state.providers.providers.filter((p) => p.configured);
+    let providers = state.providers.providers.filter((p) => p.configured);
     if (!providers.length) {
       providerDirectory();
       return;
     }
-    let selected = state.providers.activeProvider;
+    let selected = providerId || state.providers.activeProvider;
     const ps = select(
       providers.map((p) => [p.id, p.name]),
       selected,
@@ -2204,34 +2568,118 @@
       },
       { "aria-label": "Provider" },
     );
-    const models = el("div", {});
-    const d = dialog("Choose model", [field("Provider", ps), models]);
+    const models = el("div", { class: "model-options" });
+    const additions = el("div", { class: "manual-models" });
+    const d = dialog("Choose model", [
+      field("Provider", ps),
+      models,
+      additions,
+    ]);
     function draw() {
       const p = providers.find((x) => x.id === selected) || providers[0];
       models.replaceChildren(
-        ...p.models.map((m) =>
-          button(
-            [
-              el("span", { class: "grow" }, m.label || m.id),
-              m.id === p.selectedModel ? icon("check", 14) : null,
-            ],
-            async () => {
+        ...[...p.models]
+          .sort(
+            (a, b) =>
+              Number(b.id === p.selectedModel) -
+                Number(a.id === p.selectedModel) ||
+              Number(p.customModels?.includes(b.id)) -
+                Number(p.customModels?.includes(a.id)),
+          )
+          .map((m) =>
+            button(
+              [
+                el(
+                  "span",
+                  { class: "grow" },
+                  m.label || m.id,
+                  p.customModels?.includes(m.id)
+                    ? el(
+                        "small",
+                        { class: "hint model-origin" },
+                        "Added manually",
+                      )
+                    : null,
+                ),
+                m.id === p.selectedModel ? icon("check", 14) : null,
+              ],
+              async () => {
+                const r = await api("/api/quixi/providers/save", {
+                  providerId: p.id,
+                  selectedModel: m.id,
+                  setAsActive: true,
+                });
+                if (r.error) throw new Error(r.error);
+                if (session())
+                  await rpc(service(session()), "setModel", [state.id, m.id]);
+                await loadProviders();
+                d.close();
+                renderPage();
+                toast("Model updated.");
+              },
+              "list-row",
+            ),
+          ),
+      );
+      additions.replaceChildren();
+      if (["custom", "openrouter"].includes(p.id)) {
+        const input = el("input", {
+          placeholder: "e.g. organization/model-name",
+          "aria-label": "Model ID",
+          autocomplete: "off",
+          autocapitalize: "off",
+          spellcheck: "false",
+        });
+        const error = el("div", { class: "form-error", role: "alert" });
+        const submit = button(
+          "Add model",
+          async () => {
+            const id = input.value.trim();
+            if (!id) {
+              error.textContent = "Enter a model ID.";
+              input.focus();
+              return;
+            }
+            submit.disabled = true;
+            try {
               const r = await api("/api/quixi/providers/save", {
                 providerId: p.id,
-                selectedModel: m.id,
-                setAsActive: true,
+                customModel: id,
+                selectCustomModel: false,
+                setAsActive: false,
               });
               if (r.error) throw new Error(r.error);
-              if (session())
-                await rpc(service(session()), "setModel", [state.id, m.id]);
               await loadProviders();
-              d.close();
-              toast("Model updated.");
-            },
-            "list-row",
+              providers = state.providers.providers.filter((p) => p.configured);
+              draw();
+              toast("Model saved. Select it above when you’re ready.");
+            } catch (e) {
+              error.textContent = e.message;
+            } finally {
+              submit.disabled = false;
+            }
+          },
+          "quiet",
+        );
+        input.addEventListener("keydown", (e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            submit.click();
+          }
+        });
+        additions.append(
+          el("hr"),
+          el("h3", {}, "Add a model"),
+          el(
+            "p",
+            { class: "hint" },
+            "Use an exact model ID even if this provider doesn’t advertise it. Adding a model keeps your current selection.",
           ),
-        ),
-      );
+          field("Model ID", input),
+          error,
+          submit,
+        );
+      }
     }
     draw();
   }

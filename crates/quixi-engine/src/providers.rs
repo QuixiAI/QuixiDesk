@@ -1036,19 +1036,6 @@ impl ProviderManager {
     }
 
     pub fn save_provider(&self, body: &Value) -> Value {
-        if body.get("providerId").or_else(|| body.get("id")).and_then(Value::as_str) == Some("custom") {
-            let url = body.get("baseUrl").and_then(Value::as_str).unwrap_or("").trim();
-            let valid_url = reqwest::Url::parse(url).ok().is_some_and(|u|
-                matches!(u.scheme(), "http" | "https") && u.host_str().is_some()
-                && u.username().is_empty() && u.password().is_none());
-            if !valid_url { return json!({"error":"Enter a valid HTTP or HTTPS endpoint URL."}); }
-            if body.get("selectedModel").and_then(Value::as_str).unwrap_or("").trim().is_empty() {
-                return json!({"error":"Enter a model ID."});
-            }
-            if !matches!(body.get("apiFormat").and_then(Value::as_str), Some("openai" | "anthropic")) {
-                return json!({"error":"Select a supported API format."});
-            }
-        }
         let provider_id = body
             .get("providerId")
             .or_else(|| body.get("id"))
@@ -1056,6 +1043,32 @@ impl ProviderManager {
             .unwrap_or("openrouter");
 
         let mut st = self.state.write();
+        let Some(existing) = st.providers.iter().find(|p| p.id == provider_id) else {
+            return json!({"error":"Unknown provider."});
+        };
+        for key in ["selectedModel", "customModel"] {
+            if let Some(value) = body.get(key) {
+                if !value.as_str().is_some_and(|s| !s.trim().is_empty() && !s.chars().any(char::is_control)) {
+                    return json!({"error":"Enter a nonempty model ID without control characters."});
+                }
+            }
+        }
+        if provider_id == "custom" {
+            let url = body.get("baseUrl").and_then(Value::as_str).unwrap_or(&existing.base_url).trim();
+            let valid_url = reqwest::Url::parse(url).ok().is_some_and(|u|
+                matches!(u.scheme(), "http" | "https") && u.host_str().is_some()
+                && u.username().is_empty() && u.password().is_none());
+            if !valid_url { return json!({"error":"Enter a valid HTTP or HTTPS endpoint URL."}); }
+            let model = body.get("selectedModel").and_then(Value::as_str).unwrap_or(&existing.selected_model);
+            if model.trim().is_empty() { return json!({"error":"Enter a model ID."}); }
+            let format = body.get("apiFormat").and_then(Value::as_str).unwrap_or(&existing.api_format);
+            if !matches!(format, "openai" | "anthropic") {
+                return json!({"error":"Select a supported API format."});
+            }
+            if !existing.configured && ["baseUrl", "selectedModel", "apiFormat"].iter().any(|key| body.get(*key).is_none()) {
+                return json!({"error":"Configure the endpoint before adding models."});
+            }
+        }
         let mut updated_model = String::new();
         let mut found = false;
 
@@ -1100,13 +1113,18 @@ impl ProviderManager {
                             Self::model(cm, cm, entry.context_window, true, true),
                         );
                     }
-                    entry.selected_model = cm.to_string();
+                    if body.get("selectCustomModel").and_then(Value::as_bool).unwrap_or(true) {
+                        entry.selected_model = cm.to_string();
+                    }
                 }
             }
             if let Some(sel_model) = body.get("selectedModel").and_then(|v| v.as_str()) {
                 let sm = sel_model.trim();
                 if !sm.is_empty() {
                     if !entry.models.iter().any(|m| m.id == sm) {
+                        if matches!(provider_id, "custom" | "openrouter") && !entry.custom_models.iter().any(|id| id == sm) {
+                            entry.custom_models.push(sm.to_string());
+                        }
                         entry.models.insert(
                             0,
                             Self::model(sm, sm, entry.context_window, true, true),
@@ -3440,4 +3458,68 @@ mod provider_validation_tests {
         }
         drop(manager); std::fs::remove_dir_all(root).unwrap();
     }
+    #[test]
+    fn manually_added_models_survive_restart_without_switching_selection() {
+        let root=std::env::temp_dir().join(format!("quixi-manual-models-{}",uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let manager=ProviderManager::new(&root);
+        for provider in ["custom", "openrouter"] {
+            assert!(manager.save_provider(&json!({"providerId":provider,"baseUrl":"http://127.0.0.1:12345/v1","apiFormat":"openai","selectedModel":"advertised"})).get("error").is_none());
+            for id in ["  private/hidden:latest  ", "private/hidden:latest", "org/second@beta"] {
+                assert!(manager.save_provider(&json!({"providerId":provider,"customModel":id,"selectCustomModel":false,"setAsActive":false})).get("error").is_none());
+            }
+            let state=manager.state.read();
+            let p=state.providers.iter().find(|p|p.id==provider).unwrap();
+            assert_eq!(p.selected_model,"advertised");
+            assert_eq!(state.active_model,"advertised");
+            assert_eq!(p.custom_models.iter().filter(|m|m.as_str()=="private/hidden:latest").count(),1);
+            drop(state);
+            let before=std::fs::read(root.join("providers.json")).unwrap();
+            for id in ["  ", "bad\nmodel"] {
+                assert!(manager.save_provider(&json!({"providerId":provider,"customModel":id}))["error"].is_string());
+                assert_eq!(std::fs::read(root.join("providers.json")).unwrap(),before);
+            }
+            assert!(manager.save_provider(&json!({"providerId":provider,"selectedModel":"private/hidden:latest"})).get("error").is_none());
+        }
+        drop(manager);
+        let restarted=ProviderManager::new(&root);
+        let state=restarted.state.read();
+        for id in ["custom","openrouter"] {
+            let p=state.providers.iter().find(|p|p.id==id).unwrap();
+            assert_eq!(p.selected_model,"private/hidden:latest");
+            assert!(p.custom_models.iter().any(|id|id=="org/second@beta"));
+            assert!(p.models.iter().any(|m|m.id=="private/hidden:latest"));
+        }
+        drop(state); drop(restarted); std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn discovery_keeps_unadvertised_models() {
+        use std::io::{Read, Write};
+        let listener=std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url=format!("http://{}/v1",listener.local_addr().unwrap());
+        let server=std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut connection, _)=listener.accept().unwrap();
+                connection.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+                let mut request=[0;4096]; let count=connection.read(&mut request).unwrap();
+                assert!(String::from_utf8_lossy(&request[..count]).starts_with("GET /v1/models "));
+                let body=r#"{"data":[{"id":"discovered-model"}]}"#;
+                write!(connection,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body).unwrap();
+            }
+        });
+        let root=std::env::temp_dir().join(format!("quixi-discovery-{}",uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let manager=ProviderManager::new(&root);
+        for provider in ["custom","openrouter"] {
+            manager.save_provider(&json!({"providerId":provider,"baseUrl":url,"apiFormat":"openai","selectedModel":"hidden-only"}));
+            assert_eq!(manager.test_provider(&json!({"providerId":provider}))["ok"],true);
+            let st=manager.state.read(); let entry=st.providers.iter().find(|p|p.id==provider).unwrap();
+            assert!(entry.models.iter().any(|m|m.id=="hidden-only"));
+            assert!(entry.models.iter().any(|m|m.id=="discovered-model"));
+            assert_eq!(entry.selected_model,"hidden-only");
+        }
+        server.join().unwrap(); drop(manager); std::fs::remove_dir_all(root).unwrap();
+    }
+
 }
