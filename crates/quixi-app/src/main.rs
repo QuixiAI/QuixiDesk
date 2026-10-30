@@ -1060,6 +1060,7 @@ fn main() -> anyhow::Result<()> {
                 tracing::info!("QuixiDesk native window initialized (app://localhost/)");
             }
             Event::LoopDestroyed => {
+                engine.mcp_host.shutdown();
                 tracing::info!("QuixiDesk native event loop stopped");
             }
             Event::WindowEvent {

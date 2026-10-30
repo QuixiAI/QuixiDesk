@@ -353,6 +353,7 @@
       "settings",
     ];
     if (!pages.includes(page)) page = "new";
+    if (page !== "tools") clearTimeout(toolsPollTimer);
     state.page = page;
     state.id = id;
     if (page === "chat") {
@@ -2191,18 +2192,201 @@
       },
     );
   }
-  let toolsData = { skills: [], servers: [] };
-  async function loadTools() {
+  let toolsData = { skills: [], servers: [], error: "" };
+  let toolsPollTimer = null;
+  let toolsLoadInFlight = null;
+  let mcpCatalogDialog = null;
+  const mcpBusy = new Set();
+  const mcpAuthUrls = new Map();
+  const mcpAuthRequested = new Set();
+  const mcpAuthOpened = new Set();
+  const mcpStatusLabels = {
+    configured: "Not connected", starting: "Starting", initializing: "Initializing",
+    discovering: "Discovering tools", ready: "Ready", refreshing: "Refreshing tools",
+    failed: "Failed", disconnected: "Disconnected", disabled: "Disabled", needs_auth: "Sign-in required", authenticating: "Waiting for sign-in",
+  };
+  const mcpPending = (status) => ["starting", "initializing", "discovering", "refreshing"].includes(status);
+  const mcpError = (server) => typeof server.error === "string" ? server.error : server.error?.message || "";
+  async function loadTools({ poll = false } = {}) {
+    if (toolsLoadInFlight) return toolsLoadInFlight;
+    clearTimeout(toolsPollTimer);
+    toolsLoadInFlight = (async () => {
+      try {
+        const [skills, servers] = await Promise.all([
+          poll ? Promise.resolve(toolsData.skills) : rpc("LocalAgentModeSessions", "listLocalSkills"),
+          rpc("LocalAgentModeSessions", "getLocalMcpServers"),
+        ]);
+        if (!Array.isArray(servers)) throw new Error("MCP connection status is unavailable. Retry or check your configuration.");
+        toolsData = { skills: Array.isArray(skills) ? skills : [], servers, error: "" };
+        if (state.page === "tools") {
+          if (poll) updateMcpConnections();
+          else renderPage();
+        }
+        mcpCatalogDialog?.update();
+      } catch (e) {
+        toolsData.error = e.message;
+        if (state.page === "tools") updateMcpConnections();
+        if (!poll) toast(e.message, true);
+      } finally {
+        toolsLoadInFlight = null;
+        if (state.page === "tools") toolsPollTimer = setTimeout(() => loadTools({ poll: true }), 2000);
+      }
+    })();
+    return toolsLoadInFlight;
+  }
+  async function mcpAction(name, action) {
+    if (mcpBusy.has(name)) return;
+    mcpBusy.add(name);
+    updateMcpConnections();
     try {
-      const [skills, servers] = await Promise.all([
-        rpc("LocalAgentModeSessions", "listLocalSkills"),
-        rpc("LocalAgentModeSessions", "getLocalMcpServers"),
-      ]);
-      toolsData = { skills: skills || [], servers: servers || [] };
-      if (state.page === "tools") renderPage();
-    } catch (e) {
-      toast(e.message, true);
+      const result = await rpc("MCP", action, [name, currentFolder()], "quixi.settings");
+      if (result?.error) throw new Error(typeof result.error === "string" ? result.error : result.error.message);
+      if (action === "authenticate") {
+        if (result?.status !== "authenticating" && typeof result?.url !== "string") throw new Error("The server did not start sign-in.");
+        mcpAuthRequested.add(name);
+        if (typeof result?.url === "string") mcpAuthUrls.set(name, result.url);
+        await loadTools({ poll: true });
+      } else {
+        if (result?.ok !== true) throw new Error("The connection action was not accepted.");
+        if (["cancelAuthentication", "forgetAuthentication"].includes(action)) { mcpAuthUrls.delete(name); mcpAuthRequested.delete(name); }
+        await loadTools({ poll: true });
+      }
+    } finally {
+      mcpBusy.delete(name);
+      updateMcpConnections();
     }
+  }
+  function mcpConnectionRow(server) {
+    const row = el("article", { class: "mcp-connection", "data-server": server.name });
+    const controls = el("div", { class: "mcp-controls" });
+    for (const [action, label] of [["connect", "Connect"], ["reconnect", "Retry"], ["refresh", "Refresh tools"], ["disconnect", "Disconnect"], ["authenticate", "Sign in"], ["cancelAuthentication", "Cancel sign-in"]]) {
+      const control = button(label, () => mcpAction(server.name, action), "quiet");
+      control.dataset.mcpAction = action;
+      control.setAttribute("aria-label", `${label} ${server.name}`);
+      controls.append(control);
+    }
+    const forget = button("Forget sign-in", () => confirmDialog("Forget sign-in?", `Disconnect “${server.name}” and remove its saved sign-in credentials? You can sign in again later.`, () => mcpAction(server.name, "forgetAuthentication"), "Forget sign-in"), "quiet");
+    forget.dataset.mcpAction = "forgetAuthentication";
+    forget.setAttribute("aria-label", `Forget sign-in for ${server.name}`);
+    controls.append(forget);
+    const browser = button("Open sign-in page", () => openExternal(mcpAuthUrls.get(server.name)), "quiet");
+    browser.dataset.mcpAction = "openAuth";
+    browser.setAttribute("aria-label", `Open sign-in page for ${server.name}`);
+    controls.append(browser);
+    const catalog = button("View tools", () => showMcpCatalog(server.name), "quiet");
+    catalog.dataset.mcpAction = "catalog";
+    catalog.setAttribute("aria-label", `View tools for ${server.name}`);
+    controls.append(catalog);
+    row.append(
+      el("div", { class: "mcp-heading" }, icon("tools"), el("h3", { class: "grow" }, server.name), el("span", { class: "tag mcp-state", role: "status" })),
+      el("p", { class: "muted mcp-catalog-count" }),
+      el("p", { class: "hint mcp-last-success" }),
+      el("p", { class: "hint mcp-auth-hint", role: "status" }),
+      el("p", { class: "error-text mcp-error", role: "alert" }), controls,
+      el("details", { class: "mcp-diagnostics" }, el("summary", {}, "Connection details"), el("pre", { class: "mcp-diagnostics-content" })),
+    );
+    return row;
+  }
+  function updateMcpConnections() {
+    const list = document.getElementById("mcp-connections");
+    if (!list) return;
+    const error = document.getElementById("mcp-load-error");
+    if (error) { error.textContent = toolsData.error; error.hidden = !toolsData.error; }
+    const current = new Map(Array.from(list.children).map((row) => [row.dataset.server, row]));
+    for (const server of toolsData.servers) {
+      let row = current.get(server.name);
+      if (!row) { row = mcpConnectionRow(server); list.append(row); }
+      current.delete(server.name);
+      const status = server.status || "configured";
+      if (["ready", "failed", "disabled", "disconnected", "needs_auth"].includes(status)) {
+        mcpAuthUrls.delete(server.name); mcpAuthRequested.delete(server.name);
+      }
+      if (status === "authenticating" && typeof server.authorizationUrl === "string" && server.authorizationUrl) mcpAuthUrls.set(server.name, server.authorizationUrl);
+      const authUrl = mcpAuthUrls.get(server.name);
+      if (status === "authenticating" && authUrl && mcpAuthRequested.has(server.name)) {
+        const attempt = `${server.name}:${server.authAttempt || authUrl}`;
+        if (!mcpAuthOpened.has(attempt)) {
+          mcpAuthOpened.add(attempt);
+          openExternal(authUrl).catch(error => toast(error.message, true));
+        }
+      }
+      row.dataset.status = status;
+      row.querySelector(".mcp-state").textContent = mcpStatusLabels[status] || "Unavailable";
+      const count = Array.isArray(server.tools) ? server.tools.length : 0;
+      const stale = server.catalogStale || (server.toolsEnumerated && !server.isConnected);
+      row.querySelector(".mcp-catalog-count").textContent = server.toolsEnumerated
+        ? `${count} ${count === 1 ? "tool" : "tools"}${stale ? " in last-known catalog · connection not verified" : " discovered"}`
+        : (mcpPending(status) ? "Waiting for server initialization and tool discovery." : "Tool discovery has not completed.");
+      const authHint = row.querySelector(".mcp-auth-hint");
+      authHint.textContent = status === "authenticating" ? (authUrl ? "Complete sign-in in your browser. This connection will update automatically." : "Preparing secure sign-in… Your browser will open when the server is ready.") : "";
+      authHint.hidden = !authHint.textContent;
+      const last = row.querySelector(".mcp-last-success");
+      const timestamp = server.lastSuccessAt;
+      const date = timestamp ? new Date(timestamp) : null;
+      last.textContent = date && !Number.isNaN(date.getTime()) ? "Last discovery: " + date.toLocaleString() : "";
+      last.hidden = !last.textContent;
+      const problem = row.querySelector(".mcp-error");
+      problem.textContent = mcpError(server);
+      problem.hidden = !problem.textContent;
+      const diagnostics = row.querySelector(".mcp-diagnostics-content");
+      diagnostics.textContent = [
+        server.builtin ? "Built into QuixiDesk" : (server.transport ? `Transport: ${server.transport}` : ""),
+        server.cwd ? `Workspace: ${server.cwd}` : "",
+        server.serverInfo?.name ? `Server: ${server.serverInfo.name}${server.serverInfo.version ? " " + server.serverInfo.version : ""}` : "",
+        server.error?.kind ? `Failure: ${server.error.kind}` : "",
+        server.generation != null ? `Catalog generation: ${server.generation}` : "",
+        server.stderr ? `Recent server output:\n${server.stderr}` : "",
+      ].filter(Boolean).join("\n");
+      row.querySelector(".mcp-diagnostics").hidden = !diagnostics.textContent;
+      for (const control of row.querySelectorAll("[data-mcp-action]")) {
+        const action = control.dataset.mcpAction;
+        control.hidden = server.builtin && action !== "catalog" ? true
+          : action === "connect" ? !["configured", "disconnected"].includes(status)
+          : action === "reconnect" ? status !== "failed"
+          : action === "authenticate" ? status !== "needs_auth"
+          : action === "cancelAuthentication" ? status !== "authenticating"
+          : action === "openAuth" ? status !== "authenticating" || !mcpAuthUrls.has(server.name)
+          : action === "forgetAuthentication" ? !server.hasAuth
+          : action === "refresh" ? status !== "ready"
+          : action === "disconnect" ? !(server.isConnected || mcpPending(status))
+          : false;
+        control.disabled = mcpBusy.has(server.name) || (action === "catalog" && count === 0);
+      }
+    }
+    for (const row of current.values()) row.remove();
+    if (!toolsData.servers.length) list.append(el("p", { class: "muted", "data-server": "" }, "No MCP servers are configured."));
+  }
+  function showMcpCatalog(name) {
+    const search = el("input", { type: "search", placeholder: "Search tool names and descriptions", "aria-label": `Search tools for ${name}` });
+    const status = el("p", { class: "hint", role: "status" });
+    const results = el("div", { class: "mcp-tool-results" });
+    let limit = 50, signature = "";
+    const render = () => {
+      const server = toolsData.servers.find((server) => server.name === name);
+      if (!server) { status.textContent = "This connection was removed."; results.replaceChildren(); return; }
+      const open = new Set(Array.from(results.querySelectorAll("details[open]")).map((d) => d.dataset.tool));
+      const query = search.value.trim().toLowerCase();
+      const tools = (server.tools || []).filter((tool) => `${tool.name} ${tool.description || ""}`.toLowerCase().includes(query));
+      status.textContent = `${mcpStatusLabels[server.status] || "Not connected"} · ${tools.length} matching ${tools.length === 1 ? "tool" : "tools"}${server.catalogStale || !server.isConnected ? " · Last-known catalog; execution may be unavailable" : ""}`;
+      results.replaceChildren();
+      for (const tool of tools.slice(0, limit)) {
+        results.append(el("details", { class: "mcp-tool", "data-tool": tool.name, open: open.has(tool.name) },
+          el("summary", {}, tool.name), tool.description ? el("p", {}, tool.description) : null,
+          el("pre", { class: "mcp-schema" }, JSON.stringify(tool, null, 2))));
+      }
+      if (!tools.length) results.append(el("p", { class: "muted" }, "No tools match this search."));
+      if (tools.length > limit) results.append(button(`Show more (${tools.length - limit} remaining)`, () => { limit += 50; render(); }, "quiet"));
+    };
+    search.addEventListener("input", () => { limit = 50; render(); });
+    const modal = dialog(`${name} tools`, [search, status, results], { wide: true });
+    const view = { update: () => {
+      const server = toolsData.servers.find((s) => s.name === name);
+      const next = JSON.stringify(server);
+      if (next !== signature) { signature = next; render(); }
+    } };
+    mcpCatalogDialog = view;
+    modal.addEventListener("close", () => { if (mcpCatalogDialog === view) mcpCatalogDialog = null; });
+    view.update();
   }
   function toolsPage(host) {
     host.replaceChildren(
@@ -2285,30 +2469,14 @@
       el(
         "p",
         { class: "muted" },
-        "Configured tool definitions are listed below. A connection is verified when a tool call succeeds.",
+        "Ready means the server initialized successfully and its tool catalog was discovered. Connection failures and stale catalogs remain visible.",
       ),
     );
-    const list = el("div", { class: "list" });
-    for (const s of toolsData.servers)
-      list.append(
-        el(
-          "div",
-          { class: "list-row" },
-          icon("tools"),
-          el(
-            "div",
-            { class: "grow" },
-            el("h3", {}, s.name),
-            el(
-              "p",
-              {},
-              s.description || `${s.tools?.length || 0} tool definitions`,
-            ),
-          ),
-          el("span", { class: "tag" }, "Configured"),
-        ),
-      );
-    host.append(list);
+    host.append(
+      el("p", { id: "mcp-load-error", class: "error-text", role: "alert", hidden: !toolsData.error }, toolsData.error),
+      el("div", { id: "mcp-connections", class: "mcp-connections" }),
+    );
+    updateMcpConnections();
   }
   async function mcpEditor() {
     const config = await rpc(
@@ -2317,6 +2485,7 @@
       [],
       "quixi.settings",
     );
+    if (config?.error) throw new Error(typeof config.error === "string" ? config.error : config.error.message);
     formDialog(
       "MCP configuration",
       [
@@ -2326,7 +2495,7 @@
           value: JSON.stringify({ mcpServers: config }, null, 2),
           multiline: true,
           attrs: { rows: 15 },
-          hint: "External MCP commands run with your account permissions. Add only trusted commands.",
+          hint: "Use command/args/env for local servers, or transport: http (or sse), url and optional headers for remote servers. External commands run with your account permissions.",
         },
       ],
       async (values) => {
@@ -2338,19 +2507,21 @@
         )
           throw new Error("Provide a mcpServers object.");
         for (const [name, entry] of Object.entries(parsed.mcpServers)) {
-          if (
-            !entry ||
-            typeof entry.command !== "string" ||
-            !entry.command.trim()
-          )
+          if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw new Error(`Invalid configuration for ${name}.`);
+          if (entry.transport === "http" || entry.transport === "sse" || entry.url) {
+            let url;
+            try { url = new URL(entry.url); } catch { throw new Error(`A valid server URL is required for ${name}.`); }
+            if (!["http:", "https:"].includes(url.protocol)) throw new Error(`Use an HTTP or HTTPS URL for ${name}.`);
+          } else if (typeof entry.command !== "string" || !entry.command.trim()) {
             throw new Error(`A command is required for ${name}.`);
+          }
+          if (entry.args !== undefined && (!Array.isArray(entry.args) || entry.args.some(arg => typeof arg !== "string"))) throw new Error(`Arguments must be a list of strings for ${name}.`);
+          for (const key of ["env", "headers"]) if (entry[key] !== undefined && (!entry[key] || typeof entry[key] !== "object" || Array.isArray(entry[key]) || Object.values(entry[key]).some(value => typeof value !== "string"))) throw new Error(`${key} must contain string values for ${name}.`);
+          if (entry.enabled !== undefined && typeof entry.enabled !== "boolean") throw new Error(`enabled must be true or false for ${name}.`);
         }
-        await rpc(
-          "MCP",
-          "setMcpServerConfigs",
-          [parsed.mcpServers],
-          "quixi.settings",
-        );
+        const result = await rpc("MCP", "setMcpServerConfigs", [parsed.mcpServers], "quixi.settings");
+        if (result?.error) throw new Error(typeof result.error === "string" ? result.error : result.error.message);
+        if (result?.ok !== true) throw new Error("MCP configuration could not be saved.");
         await loadTools();
       },
       { wide: true },
@@ -3240,6 +3411,11 @@
   }
   const refreshTimers = new Map();
   addEventListener("quixi:event", ({ detail: { channel, payload } }) => {
+    if (channel === "quixi:open-tools") { navigate("tools"); return; }
+    if (channel === "quixi:mcp-updated") {
+      if (state.page === "tools") loadTools({ poll: true });
+      return;
+    }
     if (channel === "quixi:browser-updated") {
       state.browserState = payload;
       if (state.browser) renderBrowser(document.getElementById("page-host"));

@@ -442,6 +442,13 @@ mod tests {
         })
     }
     #[test]
+    fn mcp_discovery_does_not_expand_child_capabilities() {
+        for edits in [false, true] {
+            assert!(!permits(agent_tools::TOOL_MCP_DISCOVER, edits));
+            assert!(!permits(agent_tools::TOOL_MCP_CALL, edits));
+        }
+    }
+    #[test]
     fn delegation_roundtrip_keeps_history_separate_and_survives_restart() {
         let (e, sid, dir) = fixture();
         fs::write(dir.join("work/README.md"), "PROJECT TOKEN 42").unwrap();

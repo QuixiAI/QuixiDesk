@@ -58,7 +58,14 @@ impl EipcRouter {
                 .collect();
             return EipcReplyPayload::ok(json!(names));
         }
-        if ch == "connect-to-mcp-server" || ch == "request-open-mcp-settings" {
+        if ch == "connect-to-mcp-server" {
+            let result = self.mcp_control("MCP", "connect", &req.args);
+            return if let Some(error) = result["error"].as_str() {
+                EipcReplyPayload::err(error.to_owned())
+            } else { EipcReplyPayload::ok(result) };
+        }
+        if ch == "request-open-mcp-settings" {
+            self.engine.emit("quixi:open-tools", json!({}));
             return EipcReplyPayload::ok(json!({ "ok": true }));
         }
 
@@ -108,6 +115,9 @@ impl EipcRouter {
             &parsed.member,
             &req.args,
         );
+        if (parsed.service == "MCP" || parsed.member.contains("Mcp")) && raw_res["error"].is_string() {
+            return EipcReplyPayload::err(raw_res["error"].as_str().unwrap().to_owned());
+        }
         let dot_key = format!("{}.{}", parsed.service, parsed.member);
         let preserve_null = raw_res.is_null()
             && (!req.args.is_empty()
@@ -128,6 +138,39 @@ impl EipcRouter {
         };
 
         EipcReplyPayload::ok(res)
+    }
+
+    fn mcp_control(&self, service: &str, action: &str, args: &[Value]) -> Value {
+        let first = args.first().and_then(Value::as_str).unwrap_or_default();
+        let session_cwd = if service != "MCP" {
+            self.engine.agent_sessions.read().get(first).map(|session| session.cwd.clone())
+                .or_else(|| self.engine.code_sessions.read().get(first).map(|session| session.cwd.clone()))
+        } else { None };
+        let name = if session_cwd.is_some() { args.get(1).and_then(Value::as_str) } else { args.first().and_then(Value::as_str) }
+            .or_else(|| args.first().and_then(|value| value.get("serverName").or_else(|| value.get("name"))).and_then(Value::as_str))
+            .unwrap_or_default();
+        if name.trim().is_empty() { return json!({"error":"An MCP server name is required."}); }
+        let cwd = session_cwd.as_deref().or_else(|| if service == "MCP" { args.get(1).and_then(Value::as_str).filter(|s| !s.is_empty()) } else { None })
+            .unwrap_or(quixi_proto::paths::default_workspace_str());
+        if action == "authenticate" {
+            return match self.engine.mcp_host.authenticate_server(name, Path::new(cwd)) {
+                Ok(result) => result,
+                Err(error) => json!({"error":format!("{error:#}")}),
+            };
+        }
+        let result = match action {
+            "cancelAuthentication" => self.engine.mcp_host.cancel_authentication_server(name),
+            "forgetAuthentication" => self.engine.mcp_host.clear_server_auth(name),
+            "connect" => self.engine.mcp_host.start_connection(name, Path::new(cwd)),
+            "reconnect" => self.engine.mcp_host.reconnect_server(name, Path::new(cwd)),
+            "refresh" => self.engine.mcp_host.refresh_server(name, Path::new(cwd)),
+            "disconnect" => self.engine.mcp_host.disconnect_server(name),
+            _ => return json!({"error":"Unknown MCP connection action."}),
+        };
+        match result {
+            Ok(()) => json!({"ok":true}),
+            Err(error) => json!({"error":format!("{error:#}")}),
+        }
     }
 
     fn percent_decode(s: &str) -> String {
@@ -239,32 +282,42 @@ impl EipcRouter {
             ("Startup", "isMenuBarEnabled") | ("Startup", "isStartupOnLoginEnabled") => json!(true),
             ("GlobalShortcut", "getGlobalShortcut") => json!("Alt+Space"),
             ("WakeScheduler", "getStatus") => json!({ "enabled": false, "nextWakeAt": null }),
-            ("MCP", "getMcpServersConfig") => {
-                let cfg = self.engine.mcp_host.read_config();
-                json!(cfg.mcp_servers)
-            }
+            ("MCP", "getMcpServersConfig") => match self.engine.mcp_host.read_config_checked() {
+                Ok(cfg) => json!(cfg.mcp_servers),
+                Err(error) => json!({"error":format!("{error:#}")}),
+            },
             ("MCP", "setMcpServerConfigs") => {
-                if let Some(val) = args.first() {
-                    let _ = self.engine.mcp_host.write_config(val);
+                match args.first() {
+                    Some(value) => match self.engine.mcp_host.write_config(value) {
+                        Ok(()) => json!({"ok":true}),
+                        Err(error) => json!({"error":format!("{error:#}")}),
+                    },
+                    None => json!({"error":"Server configuration is required."}),
                 }
-                Value::Null
             }
             ("MCP", "getMcpServersConfigWithStatus") => {
-                let cfg = self.engine.mcp_host.read_config();
+                let cfg = match self.engine.mcp_host.read_config_checked() {
+                    Ok(cfg) => cfg,
+                    Err(error) => return json!({"error":format!("{error:#}")}),
+                };
+                let statuses = self.engine.mcp_host.list_local_mcp_servers();
                 let mut map = serde_json::Map::new();
                 for (name, entry) in cfg.mcp_servers {
-                    map.insert(
-                        name,
-                        json!({
-                            "command": entry.command,
-                            "args": entry.args,
-                            "env": entry.env,
-                            "status": "running"
-                        }),
-                    );
+                    let mut value = serde_json::to_value(entry).unwrap_or_else(|_| json!({}));
+                    if let Some(status) = statuses.iter().find(|status| status["name"] == name) {
+                        for key in ["status", "isConnected", "toolsEnumerated", "catalogStale", "error", "generation"] {
+                            value[key] = status[key].clone();
+                        }
+                    } else {
+                        value["status"] = json!("configured");
+                        value["isConnected"] = json!(false);
+                        value["toolsEnumerated"] = json!(false);
+                    }
+                    map.insert(name, value);
                 }
                 Value::Object(map)
             }
+            ("MCP", "connect" | "reconnect" | "refresh" | "disconnect" | "authenticate" | "cancelAuthentication" | "forgetAuthentication") => self.mcp_control(service, member, args),
             ("MCP", "isLocalDevMcpEnabled") => json!(true),
             ("Extensions", "getInstalledExtensionsWithState") => {
                 json!(self.engine.mcp_host.list_installed_extensions_with_state())
@@ -804,12 +857,12 @@ impl EipcRouter {
             | ("LocalSessions", "getLocalMcpServers") => {
                 json!(self.engine.mcp_host.list_local_mcp_servers())
             }
-            ("LocalAgentModeSessions", "getDirectMcpServerStatuses") => json!([]),
+            ("LocalAgentModeSessions", "getDirectMcpServerStatuses") => json!(self.engine.mcp_host.list_server_statuses()),
             ("LocalSessions", "getSessionCliMcpServers") => json!([]),
             ("LocalAgentModeSessions", "mcpCallTool")
             | ("LocalSessions", "mcpCallTool") => {
                 if args.is_empty() {
-                    json!({ "content": [], "isError": false })
+                    json!({ "content": [{"type":"text","text":"An MCP server and tool name are required."}], "isError": true })
                 } else {
                     let (server, tool, tool_args) = if args.len() >= 3 {
                         if args.len() >= 4 {
@@ -849,7 +902,7 @@ impl EipcRouter {
                         ("quixi-workspace", "", json!({}))
                     };
                     if tool.is_empty() {
-                        json!({ "content": [], "isError": false })
+                        json!({ "content": [{"type":"text","text":"An MCP server and tool name are required."}], "isError": true })
                     } else {
                         let out = self
                             .engine
@@ -875,7 +928,7 @@ impl EipcRouter {
             ("LocalAgentModeSessions", "directMcpCallTool")
             | ("CoworkArtifactBridge", "callMcpTool") => {
                 if args.is_empty() {
-                    json!({ "content": [], "isError": false })
+                    json!({ "content": [{"type":"text","text":"An MCP server and tool name are required."}], "isError": true })
                 } else {
                     let (server, tool, tool_args) =
                         if let Some(obj) = args.first().and_then(|v| v.as_object()) {
@@ -904,7 +957,7 @@ impl EipcRouter {
                             )
                         };
                     if tool.is_empty() {
-                        json!({ "content": [], "isError": false })
+                        json!({ "content": [{"type":"text","text":"An MCP server and tool name are required."}], "isError": true })
                     } else {
                         let out = self
                             .engine
@@ -999,27 +1052,25 @@ impl EipcRouter {
                     .unwrap_or("quixi://workspace/readme");
                 self.engine.mcp_host.read_resource(server, uri)
             }
-            ("LocalAgentModeSessions", "reconnectMcpServer")
-            | ("LocalSessions", "reconnectMcpServer")
-            | ("LocalAgentModeSessions", "toggleMcpServer")
-            | ("LocalSessions", "toggleMcpServer")
-            | ("LocalAgentModeSessions", "authenticateMcpServer")
-            | ("LocalSessions", "authenticateMcpServer")
-            | ("LocalAgentModeSessions", "clearMcpServerAuth")
-            | ("LocalSessions", "clearMcpServerAuth")
-            | ("LocalAgentModeSessions", "authorizeDirectMcpServer")
-            | ("LocalAgentModeSessions", "authorizeDirectMcpServerWithAccountPicker")
-            | ("LocalAgentModeSessions", "disconnectDirectMcpServerV2") => {
-                json!({ "ok": true })
+            ("LocalAgentModeSessions" | "LocalSessions", "reconnectMcpServer") => self.mcp_control(service, "reconnect", args),
+            ("LocalAgentModeSessions" | "LocalSessions", "refreshMcpServer") => self.mcp_control(service, "refresh", args),
+            ("LocalAgentModeSessions" | "LocalSessions", "connectMcpServer") => self.mcp_control(service, "connect", args),
+            ("LocalAgentModeSessions", "disconnectDirectMcpServer" | "disconnectDirectMcpServerV2")
+            | ("LocalSessions", "disconnectMcpServer") => self.mcp_control(service, "disconnect", args),
+            ("LocalAgentModeSessions" | "LocalSessions", "toggleMcpServer") => {
+                let enabled = args.last().and_then(Value::as_bool);
+                match enabled {
+                    Some(true) => self.mcp_control(service, "connect", args),
+                    Some(false) => self.mcp_control(service, "disconnect", args),
+                    None => json!({"error":"Specify whether to connect or disconnect this server."}),
+                }
             }
-            ("LocalAgentModeSessions", "disconnectDirectMcpServer") => json!(true),
-            ("LocalAgentModeSessions", "setMcpServers")
-            | ("LocalSessions", "setMcpServers")
-            | ("LocalAgentModeSessions", "replaceEnabledMcpTools")
-            | ("LocalSessions", "replaceEnabledMcpTools")
-            | ("LocalAgentModeSessions", "replaceRemoteMcpServers")
-            | ("LocalSessions", "replaceRemoteMcpServers") => {
-                json!({ "enabledMcpTools": {} })
+            ("LocalAgentModeSessions" | "LocalSessions", "authenticateMcpServer")
+            | ("LocalAgentModeSessions", "authorizeDirectMcpServer" | "authorizeDirectMcpServerWithAccountPicker") => self.mcp_control(service, "authenticate", args),
+            ("LocalAgentModeSessions" | "LocalSessions", "cancelMcpServerAuthentication") => self.mcp_control(service, "cancelAuthentication", args),
+            ("LocalAgentModeSessions" | "LocalSessions", "clearMcpServerAuth") => self.mcp_control(service, "forgetAuthentication", args),
+            ("LocalAgentModeSessions" | "LocalSessions", "setMcpServers" | "replaceEnabledMcpTools" | "replaceRemoteMcpServers") => {
+                json!({"error":"Use MCP connection configuration to change servers. Session-specific server overrides are unavailable."})
             }
             ("LocalAgentModeSessions", "listLocalSkills") => {
                 json!(self.engine.list_local_skills())
@@ -2532,6 +2583,46 @@ mod tests {
     }
 
     #[test]
+    fn mcp_errors_are_ipc_failures_and_never_schema_default_success() {
+        let (_engine, router) = make_router();
+        for (service, member, args) in [
+            ("MCP", "connect", vec![]),
+            ("MCP", "setMcpServerConfigs", vec![]),
+            ("MCP", "setMcpServerConfigs", vec![json!({"bad":{"command":""}})]),
+            ("LocalAgentModeSessions", "authenticateMcpServer", vec![json!("missing")]),
+            ("LocalSessions", "toggleMcpServer", vec![json!("missing")]),
+        ] {
+            let reply = router.dispatch(&EipcInvokePayload {
+                channel: format!("$eipc_message$_{}_$_quixi.settings_$_{}_$_{}", EIPC_UUID_MAIN, service, member),
+                args,
+            });
+            assert!(reply.error.is_some(), "{service}.{member} should return an IPC error: {reply:?}");
+            assert!(reply.result.is_none(), "{service}.{member} must not fabricate a result on error");
+        }
+        let missing_tool = router.dispatch(&EipcInvokePayload {
+            channel: format!("$eipc_message$_{}_$_quixi.web_$_LocalAgentModeSessions_$_mcpCallTool", EIPC_UUID_MAIN),
+            args: vec![],
+        });
+        assert_eq!(missing_tool.result.unwrap()["isError"], true);
+    }
+
+    #[test]
+    fn malformed_mcp_config_is_reported_without_replacing_the_file() {
+        let (engine, router) = make_router();
+        let malformed = "{\"mcpServers\": ";
+        std::fs::write(&engine.mcp_host.config_path, malformed).unwrap();
+        for member in ["getMcpServersConfig", "getMcpServersConfigWithStatus"] {
+            let reply = router.dispatch(&EipcInvokePayload {
+                channel: format!("$eipc_message$_{}_$_quixi.settings_$_MCP_$_{}", EIPC_UUID_MAIN, member),
+                args: vec![],
+            });
+            assert!(reply.error.is_some(), "{member} should surface the malformed configuration");
+            assert!(reply.result.is_none());
+        }
+        assert_eq!(std::fs::read_to_string(&engine.mcp_host.config_path).unwrap(), malformed);
+    }
+
+    #[test]
     fn test_eipc_services_and_stores() {
         let (_engine, router) = make_router();
 
@@ -2767,143 +2858,35 @@ mod tests {
     }
 
     #[test]
-    fn test_mcp_computer_use_and_browser_use_e2e() {
+    fn test_mcp_builtin_catalog_and_unknown_tool_failure() {
         let (_engine, router) = make_router();
-
-        // 1. Verify LocalAgentModeSessions.getLocalMcpServers returns all 34 MCP servers (5 user + 29 internal)
-        let mcp_servers = router
-            .dispatch(&EipcInvokePayload {
-                channel: format!(
-                    "$eipc_message$_{}_$_quixi.web_$_LocalAgentModeSessions_$_getLocalMcpServers",
-                    EIPC_UUID_MAIN
-                ),
-                args: vec![],
-            })
-            .result
-            .unwrap();
-        let servers_arr = mcp_servers.as_array().unwrap();
-        assert!(servers_arr.len() >= 28);
-        assert!(servers_arr
-            .iter()
-            .any(|s| s["uuid"] == "b0a3b6e5-7ca0-462a-8e6f-bac087408b17"
-                && s["name"] == "computer-use"
-                && s["tools"].as_array().unwrap().len() >= 44));
-        assert!(servers_arr
-            .iter()
-            .any(|s| s["uuid"] == "a8f3c7e2-4b9d-4f1a-8c3e-9d2a5b7f8e1c"
-                && s["name"] == "quixi-in-chrome"
-                && s["tools"].as_array().unwrap().len() >= 22));
-        assert!(servers_arr
-            .iter()
-            .any(|s| s["uuid"] == "bda6af03-834c-4496-98d1-c0e6d52b99ce"
-                && (s["name"] == "QuixiDesk Browser" || s["name"] == "QuixiDesk Preview")
-                && s["tools"].as_array().unwrap().len() >= 29));
-
-        // 2. Verify ComputerUse tool execution via directMcpCallTool
-        let cu_pos = router
-            .dispatch(&EipcInvokePayload {
-                channel: format!(
-                    "$eipc_message$_{}_$_quixi.web_$_LocalAgentModeSessions_$_directMcpCallTool",
-                    EIPC_UUID_MAIN
-                ),
-                args: vec![
-                    json!("b0a3b6e5-7ca0-462a-8e6f-bac087408b17"),
-                    json!("cursor_position"),
-                    json!({}),
-                ],
-            })
-            .result
-            .unwrap();
-        assert_eq!(cu_pos["isError"], false);
-        assert!(cu_pos["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("\"x\":"));
-
-        let cu_apps = router
-            .dispatch(&EipcInvokePayload {
-                channel: format!(
-                    "$eipc_message$_{}_$_quixi.web_$_LocalAgentModeSessions_$_directMcpCallTool",
-                    EIPC_UUID_MAIN
-                ),
-                args: vec![
-                    json!("computer-use"),
-                    json!("list_apps"),
-                    json!({}),
-                ],
-            })
-            .result
-            .unwrap();
-        assert_eq!(cu_apps["isError"], false);
-        assert!(!cu_apps["content"][0]["text"].as_str().unwrap().is_empty());
-
-        // 3. Verify BrowserUse tool execution via mcpCallTool
-        let tabs_ctx = router
-            .dispatch(&EipcInvokePayload {
-                channel: format!(
-                    "$eipc_message$_{}_$_quixi.web_$_LocalAgentModeSessions_$_mcpCallTool",
-                    EIPC_UUID_MAIN
-                ),
-                args: vec![
-                    json!("session_1"),
-                    json!("a8f3c7e2-4b9d-4f1a-8c3e-9d2a5b7f8e1c"),
-                    json!("tabs_context_mcp"),
-                    json!({ "createIfEmpty": true }),
-                ],
-            })
-            .result
-            .unwrap();
-        assert_eq!(tabs_ctx["isError"], false);
-        assert!(tabs_ctx["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("tabGroupId"));
-
-        let read_page = router
-            .dispatch(&EipcInvokePayload {
-                channel: format!(
-                    "$eipc_message$_{}_$_quixi.web_$_LocalAgentModeSessions_$_directMcpCallTool",
-                    EIPC_UUID_MAIN
-                ),
-                args: vec![
-                    json!("quixi-in-chrome"),
-                    json!("read_page"),
-                    json!({ "tabId": 1, "filter": "all" }),
-                ],
-            })
-            .result
-            .unwrap();
-        assert_eq!(read_page["isError"], false);
-        assert!(read_page["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("[ref_1]"));
-
-        // 4. Verify ComputerUseTcc and ChromeExtension IPC services
-        let tcc_apps = router
-            .dispatch(&EipcInvokePayload {
-                channel: format!(
-                    "$eipc_message$_{}_$_quixi.web_$_ComputerUseTcc_$_listInstalledApps",
-                    EIPC_UUID_MAIN
-                ),
-                args: vec![],
-            })
-            .result
-            .unwrap();
-        assert!(tcc_apps.is_array());
-        assert!(!tcc_apps.as_array().unwrap().is_empty());
-
-        let chrome_exts = router
-            .dispatch(&EipcInvokePayload {
-                channel: format!(
-                    "$eipc_message$_{}_$_quixi.web_$_ChromeExtension_$_getConnectedExtensions",
-                    EIPC_UUID_MAIN
-                ),
-                args: vec![],
-            })
-            .result
-            .unwrap();
-        assert!(!chrome_exts.as_array().unwrap().is_empty());
+        let reply = router.dispatch(&EipcInvokePayload {
+            channel: format!("$eipc_message$_{}_$_quixi.web_$_LocalAgentModeSessions_$_getLocalMcpServers", EIPC_UUID_MAIN),
+            args: vec![],
+        });
+        let servers = reply.result.unwrap();
+        let servers = servers.as_array().unwrap();
+        let builtins: Vec<_> = servers.iter().filter(|s| s["builtin"] == true).collect();
+        assert!(!builtins.is_empty());
+        for server in &builtins {
+            assert_eq!(server["status"], "ready");
+            assert_eq!(server["isConnected"], true);
+            assert_eq!(server["toolsEnumerated"], true);
+            for tool in server["tools"].as_array().unwrap() {
+                assert!(!tool["name"].as_str().unwrap().is_empty());
+                assert!(tool["inputSchema"].is_object());
+            }
+        }
+        for (name, required_tool) in [("computer-use", "cursor_position"), ("quixi-in-chrome", "read_page"), ("QuixiDesk Browser", "tabs_context_mcp")] {
+            let server = builtins.iter().find(|s| s["name"] == name).unwrap();
+            assert!(server["tools"].as_array().unwrap().iter().any(|tool| tool["name"] == required_tool));
+        }
+        // Verify dispatch without driving the user's operating system or browser.
+        let reply = router.dispatch(&EipcInvokePayload {
+            channel: format!("$eipc_message$_{}_$_quixi.web_$_LocalAgentModeSessions_$_directMcpCallTool", EIPC_UUID_MAIN),
+            args: vec![json!("quixi-workspace"), json!("nonexistent_tool"), json!({})],
+        });
+        assert_eq!(reply.result.unwrap()["isError"], true);
     }
 
     #[test]

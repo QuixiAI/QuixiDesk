@@ -3,7 +3,13 @@ use base64::Engine;
 use serde_json::{json, Value};
 
 pub(crate) fn encode_result(value: &Value) -> String {
-    fn walk(v: &Value, images: &mut Vec<Value>) -> Value {
+    const TEXT_LIMIT: usize = 12_000;
+    fn walk(
+        v: &Value,
+        images: &mut Vec<Value>,
+        remaining: &mut usize,
+        omitted: &mut usize,
+    ) -> Value {
         if let Some(map) = v.as_object() {
             let mime = map
                 .get("mimeType")
@@ -30,21 +36,57 @@ pub(crate) fn encode_result(value: &Value) -> String {
             }
             Value::Object(
                 map.iter()
-                    .map(|(k, v)| (k.clone(), walk(v, images)))
+                    .map(|(k, v)| {
+                        // Structured results are machine-readable data, not a
+                        // display preview. Preserve their exact shape/values.
+                        let value = if k == "structuredContent" {
+                            v.clone()
+                        } else if k == "text" && v.is_string() {
+                            let source = v.as_str().unwrap();
+                            let count = source.chars().count();
+                            let keep = count.min(*remaining);
+                            *remaining -= keep;
+                            *omitted += count - keep;
+                            if keep == count {
+                                v.clone()
+                            } else {
+                                Value::String(format!(
+                                    "{}\n[Text truncated; see _quixiTruncation.]",
+                                    source.chars().take(keep).collect::<String>()
+                                ))
+                            }
+                        } else {
+                            walk(v, images, remaining, omitted)
+                        };
+                        (k.clone(), value)
+                    })
                     .collect(),
             )
         } else if let Some(items) = v.as_array() {
-            Value::Array(items.iter().map(|v| walk(v, images)).collect())
+            Value::Array(
+                items
+                    .iter()
+                    .map(|v| walk(v, images, remaining, omitted))
+                    .collect(),
+            )
         } else {
             v.clone()
         }
     }
     let mut images = Vec::new();
-    let text = walk(value, &mut images)
-        .to_string()
-        .chars()
-        .take(12000)
-        .collect::<String>();
+    let mut remaining = TEXT_LIMIT;
+    let mut omitted = 0;
+    let mut result = walk(value, &mut images, &mut remaining, &mut omitted);
+    if omitted > 0 {
+        let notice = json!({"omittedTextCharacters":omitted,"textCharacterLimit":TEXT_LIMIT,
+            "message":"Text content is incomplete. structuredContent and isError are preserved. Narrow the request if the omitted text is needed; do not claim to have inspected it."});
+        if let Some(object) = result.as_object_mut() {
+            object.insert("_quixiTruncation".into(), notice);
+        } else {
+            result = json!({"result":result,"_quixiTruncation":notice});
+        }
+    }
+    let text = result.to_string();
     if images.is_empty() {
         text
     } else {
@@ -109,5 +151,35 @@ mod tests {
         );
         assert!(encoded.contains("Do not claim"));
         assert!(encoded.contains("isError"));
+    }
+    #[test]
+    fn large_mcp_text_keeps_valid_json_structured_results_and_failure_status() {
+        let structured =
+            json!({"value":"界".repeat(14000),"text":"unaltered machine-readable text"});
+        let encoded = encode_result(&json!({"content":[{"type":"text","text":"é".repeat(13000)},
+            {"type":"text","text":"later text"}],"structuredContent":structured,"isError":true}));
+        let result: Value =
+            serde_json::from_str(&encoded).expect("truncated MCP results must remain valid JSON");
+        assert_eq!(result["structuredContent"], structured);
+        assert_eq!(result["isError"], true);
+        assert_eq!(result["_quixiTruncation"]["omittedTextCharacters"], 1010);
+        assert!(result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with(&"é".repeat(12000)));
+        assert!(result["content"][1]["text"]
+            .as_str()
+            .unwrap()
+            .contains("truncated"));
+    }
+    #[test]
+    fn structured_content_is_not_reinterpreted_as_display_media() {
+        let structured = json!({"image":"a".repeat(1000),"type":"image","text":"raw data"});
+        let result: Value = serde_json::from_str(&encode_result(
+            &json!({"structuredContent":structured,"content":[]}),
+        ))
+        .unwrap();
+        assert_eq!(result["structuredContent"], structured);
+        assert!(result.get("_quixi_tool_media").is_none());
     }
 }

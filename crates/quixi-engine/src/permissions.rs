@@ -74,18 +74,23 @@ impl QuixiEngine {
         input: &Value, cwd: &str, fallback_mode: &str, cancelled: &AtomicBool) -> (String,bool) {
         if let Err(error)=agent_tools::validate_input(name,input) {return (error,true);}
         if cancelled.load(Ordering::SeqCst) {return ("Task stopped. No action performed.".into(),true);}
+        let mcp_identity=if name==agent_tools::TOOL_MCP_CALL {
+            match self.mcp_host.server_identity(input["server"].as_str().unwrap_or_default()) {
+                Ok(identity)=>Some(identity),Err(error)=>return(format!("MCP server is unavailable: {error}"),true),
+            }
+        }else{None};
         let outside=file_access_outside_workspace(name,input,cwd);
-        let needs=|mode:&str| agent_tools::requires_approval(name,input,mode) || (outside&&!matches!(mode,"auto"|"bypassPermissions"));
+        let needs=|mode:&str| agent_tools::requires_approval_with_host(name,input,mode,&self.mcp_host) || (outside&&!matches!(mode,"auto"|"bypassPermissions"));
         let mode=self.current_permission_mode(session_id,fallback_mode);
         if !needs(&mode) {
-            return agent_tools::execute_cancellable(name,input,cwd,&mode,&self.mcp_host,cancelled);
+            return agent_tools::execute_cancellable_with_mcp_identity(name,input,cwd,&mode,&self.mcp_host,cancelled,mcp_identity.as_deref());
         }
         if cancelled.load(Ordering::SeqCst) {return ("Task stopped. No action performed.".into(),true);}
         let request_id=Uuid::new_v4().to_string();
         let signal=Arc::new(AtomicU8::new(0));
         self.pending_approvals.write().insert(request_id.clone(),PendingToolApproval {
             session_id:session_id.into(), decision:signal.clone(),
-            request:json!({"requestId":request_id,"sessionId":session_id,"toolCallId":call_id,"toolName":name,"input":input,"cwd":cwd,"outsideWorkspace":outside,"subagent":self.subagent_for_call(session_id,call_id)}),
+            request:json!({"requestId":request_id,"sessionId":session_id,"toolCallId":call_id,"toolName":name,"input":input,"cwd":cwd,"outsideWorkspace":outside,"mcpServerIdentity":mcp_identity,"subagent":self.subagent_for_call(session_id,call_id)}),
         });
         self.permission_event(session_id,"tool_permission_requested");
         let start=Instant::now();
@@ -102,7 +107,7 @@ impl QuixiEngine {
         if outcome!=1 || cancelled.load(Ordering::SeqCst) {
             return ("The action was not approved or the task was stopped. No action was performed. Do not retry it without a new user request.".into(),true);
         }
-        agent_tools::execute_cancellable(name,input,cwd,"auto",&self.mcp_host,cancelled)
+        agent_tools::execute_cancellable_with_mcp_identity(name,input,cwd,"auto",&self.mcp_host,cancelled,mcp_identity.as_deref())
     }
 }
 

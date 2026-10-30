@@ -49,7 +49,7 @@ The native runtime development and analysis benefited from **[REA](https://githu
 - **Built-In In-App Browser Use & Computer Use (Out of the Box):**
   - **In-App Browser:** Opens a docked browser pane inside QuixiDesk with multi-tab navigation, isolated page snapshots, and interactive `[ref_N]` accessibility element inspection.
   - **Computer Use:** Native macOS CoreGraphics screen capture, cursor control, keyboard/mouse synthesis, and window inspection (`44` tools active out of the box).
-  - **Pre-Bundled Workspace & Productivity MCPs:** Includes `quixi-workspace` (file index, git pool, shell host), `applescript`, `pdf`, `memory`, `fetch`, `github`, `office365`, `Framebuffer`, `visualize`, and `scheduled-tasks` pre-configured with zero manual setup.
+  - **Built-in and external MCP tools:** Workspace files, Git, shell, desktop/browser automation, memory, fetch, and macOS AppleScript adapters. External servers use persistent stdio, Streamable HTTP, or SSE connections with real discovery, readiness, OAuth, and actionable errors. See the [MCP guide](docs/mcp.md).
 - **Original Interface:** System typography, light and dark themes, keyboard navigation, and responsive layouts. The replacement interface currently uses English.
 
 Select a workspace folder before sending a file task. **Manual** allows directory listings and file reads, then pauses for approval before changes or commands. **Allow once** approves the displayed action; **Allow file edits** permits edits in that conversation while commands continue to ask. **Auto** permits tool actions without individual approval. Approving an action resumes the current request.
@@ -267,7 +267,7 @@ QuixiDesk/
 │   ├── quixi-app/        # Native tao + wry WKWebView shell, custom app:// protocol & original UI
 │   ├── quixi-ipc/        # Desktop service and event router
 │   ├── quixi-engine/     # Session orchestrator, multi-provider LLM router & streaming engine
-│   ├── quixi-mcp/        # Built-in MCP host (Computer Use, Browser Use, Workspace, AppleScript, PDF, Memory)
+│   ├── quixi-mcp/        # Persistent MCP clients, discovery, OAuth, and built-in adapters
 │   ├── quixi-platform/   # macOS CoreGraphics Computer Use, In-App Browser Use & SafeFS sandbox
 │   ├── quixi-workspace/  # Native file indexer, git pool engine, transcript search & PTY shell host
 │   ├── quixi-netstack/   # Egress policy & credential management

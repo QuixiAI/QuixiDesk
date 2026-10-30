@@ -13,6 +13,12 @@ const wait = () => new Promise((resolve) => setTimeout(resolve, 40));
 async function fixture({
   artifacts = [],
   subagents = [],
+  mcpServers = [],
+  mcpConfig = {},
+  mcpActionError = null,
+  mcpSaveError = null,
+  mcpAuthUrl = "https://example.invalid/oauth/authorize?state=fixture",
+  mcpAuthDelayed = false,
   providerId = "custom",
   permissions = [],
   schedules = [],
@@ -135,6 +141,27 @@ async function fixture({
       sessions.push({sessionId:id,title:task.displayName,cwd:task.cwd,spaceId:null,permissionMode:"default",isRunning:true,bufferedMessages:[]});
       return {sessionId:id};
     }
+    if (member === "getLocalMcpServers") return structuredClone(mcpServers);
+    if (member === "getMcpServersConfig") return structuredClone(mcpConfig);
+    if (member === "setMcpServerConfigs") {
+      if (mcpSaveError) return {error:mcpSaveError};
+      return {ok:true};
+    }
+    if (service === "MCP" && ["connect", "reconnect", "refresh", "disconnect", "authenticate", "cancelAuthentication", "forgetAuthentication"].includes(member)) {
+      if (mcpActionError) return {error:mcpActionError};
+      const server = mcpServers.find(s=>s.name===args[0]);
+      if (!server) return {error:"Unknown server"};
+      if (member === "forgetAuthentication") { server.hasAuth=false; server.status="disconnected"; server.isConnected=false; return {ok:true}; }
+      if (member === "authenticate") {
+        server.status = "authenticating";
+        server.authAttempt = `attempt-${calls.length}`;
+        if (!mcpAuthDelayed) server.authorizationUrl = mcpAuthUrl;
+        return {status:"authenticating"};
+      }
+      server.status = member === "cancelAuthentication" ? "needs_auth" : member === "disconnect" ? "disconnected" : member === "refresh" ? "refreshing" : "starting";
+      server.isConnected = false;
+      return {ok:true};
+    }
     if (
       member === "listLocalSkills" ||
       member === "getLocalMcpServers" ||
@@ -146,6 +173,7 @@ async function fixture({
   };
   const api = async (route, body) => {
     calls.push({ route, body });
+    if (route === "/__eipc__/open-external") return {ok:true};
     if (route === "/api/quixi/providers") return providers;
     if (route === "/api/quixi/providers/complete-onboarding") return providers;
     if (route === "/api/quixi/providers/test") return { ok: true, message: `Connected (${catalogModels.length} models available)`, discoveredModels: catalogModels };
@@ -902,5 +930,184 @@ test("subagent activity stays collapsed and separate from the parent transcript"
     assert.equal(history.querySelectorAll("script").length, 0);
     assert.equal(f.w.owned, undefined);
     assert.ok(f.calls.some(c=>c.member==="getSubagent" && c.args[0]==="fixture-one" && c.args[1]==="child-one"));
+  } finally { f.close(); }
+});
+
+
+test("MCP readiness and stale catalogs are shown honestly and failures can be retried", async () => {
+  const servers = [{name:"rea",status:"failed",isConnected:false,toolsEnumerated:true,catalogStale:true,tools:[{name:"inspect",inputSchema:{type:"object"}}],error:{kind:"spawn",message:"Could not start npx"}}];
+  const f = await fixture({mcpServers:servers,mcpActionError:"Executable was not found"});
+  try {
+    await f.click("Tools & skills");
+    const row = f.w.document.querySelector('[data-server="rea"]');
+    assert.equal(row.querySelector(".mcp-state").textContent,"Failed");
+    assert.match(row.textContent,/last-known catalog · connection not verified/);
+    assert.match(row.textContent,/Could not start npx/);
+    assert.equal(row.querySelector('[data-mcp-action="connect"]').hidden,true);
+    await f.click("Retry rea");
+    assert.match(f.w.document.getElementById("toasts").textContent,/Executable was not found/);
+    assert.equal(row.querySelector(".mcp-state").textContent,"Failed");
+    assert.ok(f.calls.some(c=>c.service==="MCP" && c.member==="reconnect" && c.args[0]==="rea"));
+  } finally { f.close(); }
+});
+
+test("MCP connect and status refresh preserve row identity and catalog controls", async () => {
+  const servers = [{name:"rea",status:"configured",isConnected:false,toolsEnumerated:false,tools:[],transport:"stdio",cwd:"/tmp/project",generation:0}];
+  const f = await fixture({mcpServers:servers});
+  try {
+    await f.click("Tools & skills");
+    const row = f.w.document.querySelector('[data-server="rea"]');
+    assert.equal(row.querySelector(".mcp-state").textContent,"Not connected");
+    const diagnostics = row.querySelector(".mcp-diagnostics"); diagnostics.open = true;
+    assert.match(diagnostics.textContent,/Transport: stdio/);
+    await f.click("Connect rea");
+    assert.equal(row.querySelector(".mcp-state").textContent,"Starting");
+    assert.equal(row.querySelector('[data-mcp-action="disconnect"]').hidden,false);
+    Object.assign(servers[0],{status:"ready",isConnected:true,toolsEnumerated:true,tools:[{name:"analyze",description:"Inspect a binary",inputSchema:{type:"object",properties:{path:{type:"string"}}}}]});
+    f.w.dispatchEvent(new f.w.CustomEvent("quixi:event",{detail:{channel:"quixi:mcp-updated",payload:{}}}));
+    await wait();
+    assert.equal(f.w.document.querySelector('[data-server="rea"]'),row);
+    assert.equal(row.querySelector(".mcp-diagnostics"),diagnostics);
+    assert.equal(diagnostics.open,true);
+    assert.equal(row.querySelector(".mcp-state").textContent,"Ready");
+    assert.match(row.textContent,/1 tool discovered/);
+    assert.equal(row.querySelector('[data-mcp-action="catalog"]').disabled,false);
+    await f.click("Disconnect rea");
+    assert.equal(row.querySelector(".mcp-state").textContent,"Disconnected");
+    assert.match(row.textContent,/last-known catalog/);
+  } finally { f.close(); }
+});
+
+test("MCP catalog preserves full schemas, escapes tool content and keeps search/disclosure state", async () => {
+  const schema={type:"object",properties:{mode:{oneOf:[{const:"fast"},{const:"complete"}]}},additionalProperties:false,$defs:{nested:{type:"string",pattern:"^[a-z]+$"}}};
+  const servers=[{name:"rea",status:"ready",isConnected:true,toolsEnumerated:true,tools:[{name:"analyze",description:"<script>window.owned=true</script> Analyze an artifact",inputSchema:schema,outputSchema:{type:"object"},annotations:{readOnlyHint:true}},{name:"close",description:"Close a session",inputSchema:{type:"object"}}]}];
+  const f=await fixture({mcpServers:servers});
+  try {
+    await f.click("Tools & skills");await f.click("View tools for rea");
+    const search=f.w.document.querySelector('[aria-label="Search tools for rea"]');
+    search.value="analy";search.dispatchEvent(new f.w.Event("input",{bubbles:true}));search.focus();
+    let detail=f.w.document.querySelector(".mcp-tool");detail.open=true;
+    assert.equal(f.w.document.querySelectorAll(".mcp-tool").length,1);
+    assert.deepEqual(JSON.parse(detail.querySelector("pre").textContent).inputSchema,schema);
+    assert.equal(detail.querySelectorAll("script").length,0);assert.equal(f.w.owned,undefined);
+    servers[0].tools[0].description="Updated analysis description";
+    f.w.dispatchEvent(new f.w.CustomEvent("quixi:event",{detail:{channel:"quixi:mcp-updated",payload:{}}}));await wait();
+    assert.equal(f.w.document.activeElement,search);assert.equal(search.value,"analy");
+    detail=f.w.document.querySelector(".mcp-tool");assert.equal(detail.open,true);assert.match(detail.textContent,/Updated analysis/);
+  } finally { f.close(); }
+});
+
+test("MCP remote configuration accepts HTTP and keeps backend save errors visible", async () => {
+  const f=await fixture({mcpConfig:{rea:{command:"npx",args:["rea-agents","mcp"]}},mcpSaveError:"Existing configuration is unreadable; no changes saved."});
+  try {
+    await f.click("Tools & skills");await f.click("Configure connections");
+    const config={mcpServers:{remote:{transport:"http",url:"https://example.invalid/mcp",headers:{Authorization:"test-fixture"},enabled:true}}};
+    f.type("dialog textarea",JSON.stringify(config));
+    f.w.document.querySelector("dialog form").dispatchEvent(new f.w.Event("submit",{bubbles:true,cancelable:true}));await wait();
+    assert.ok(f.calls.some(c=>c.member==="setMcpServerConfigs" && c.args[0].remote.url===config.mcpServers.remote.url));
+    assert.match(f.w.document.querySelector("dialog .form-error").textContent,/Existing configuration is unreadable/);
+    assert.equal(f.w.document.querySelector("dialog").open,true);
+  } finally { f.close(); }
+});
+
+test("MCP polling stops after leaving the Tools page", async () => {
+  const f=await fixture({mcpServers:[{name:"rea",status:"configured",tools:[]}]});
+  try {
+    await f.click("Tools & skills");await f.click("New task");
+    const count=f.calls.filter(c=>c.member==="getLocalMcpServers").length;
+    await new Promise(resolve=>setTimeout(resolve,2100));
+    assert.equal(f.calls.filter(c=>c.member==="getLocalMcpServers").length,count);
+  } finally { f.close(); }
+});
+
+
+test("MCP malformed configuration cannot open an empty replacement editor", async () => {
+  const f=await fixture({mcpConfig:{error:"MCP configuration is not valid JSON"}});
+  try {
+    await f.click("Tools & skills");await f.click("Configure connections");
+    assert.match(f.w.document.getElementById("toasts").textContent,/configuration is not valid JSON/);
+    assert.equal(f.w.document.querySelector("dialog textarea"),null);
+    assert.equal(f.calls.some(c=>c.member==="setMcpServerConfigs"),false);
+  } finally { f.close(); }
+});
+
+
+test("MCP OAuth opens the browser, remains pending until discovery and can be cancelled", async () => {
+  const servers=[{name:"remote",status:"needs_auth",isConnected:false,toolsEnumerated:false,tools:[],error:{kind:"auth",message:"Sign in to continue"}}];
+  const f=await fixture({mcpServers:servers});
+  try {
+    await f.click("Tools & skills");await f.click("Sign in remote");
+    const row=f.w.document.querySelector('[data-server="remote"]');
+    assert.equal(row.querySelector(".mcp-state").textContent,"Waiting for sign-in");
+    assert.match(row.querySelector(".mcp-auth-hint").textContent,/Complete sign-in in your browser/);
+    assert.ok(f.calls.some(c=>c.route==="/__eipc__/open-external" && c.body.url.startsWith("https://example.invalid/oauth/authorize")));
+    assert.doesNotMatch(row.querySelector(".mcp-catalog-count").textContent,/discovered/);
+    await f.click("Open sign-in page for remote");
+    assert.equal(f.calls.filter(c=>c.route==="/__eipc__/open-external").length,2);
+    await f.click("Cancel sign-in remote");
+    assert.equal(row.querySelector(".mcp-state").textContent,"Sign-in required");
+    assert.equal(row.querySelector('[data-mcp-action="cancelAuthentication"]').hidden,true);
+    assert.ok(f.calls.some(c=>c.member==="cancelAuthentication"));
+    await f.click("Sign in remote");
+    Object.assign(servers[0],{status:"ready",isConnected:true,toolsEnumerated:true,error:null});
+    f.w.dispatchEvent(new f.w.CustomEvent("quixi:event",{detail:{channel:"quixi:mcp-updated",payload:{}}}));await wait();
+    assert.equal(row.querySelector(".mcp-state").textContent,"Ready");
+    assert.equal(row.querySelector('[data-mcp-action="openAuth"]').hidden,true);
+  } finally { f.close(); }
+});
+
+test("MCP OAuth rejects non-web authorization URLs and builtins have no connection controls", async () => {
+  const f=await fixture({mcpAuthUrl:"file:///tmp/unsafe",mcpServers:[{name:"remote",status:"needs_auth",tools:[]},{name:"builtin",builtin:true,status:"ready",isConnected:true,toolsEnumerated:true,tools:[{name:"read",inputSchema:{type:"object"}}]}]});
+  try {
+    await f.click("Tools & skills");await f.click("Sign in remote");
+    assert.match(f.w.document.getElementById("toasts").textContent,/Only HTTP and HTTPS/);
+    assert.equal(f.calls.some(c=>c.route==="/__eipc__/open-external"),false);
+    const builtin=f.w.document.querySelector('[data-server="builtin"]');
+    for (const button of builtin.querySelectorAll('[data-mcp-action]')) assert.equal(button.hidden,button.dataset.mcpAction!=="catalog");
+  } finally { f.close(); }
+});
+
+
+test("MCP asynchronous authorization opens only once when metadata becomes ready", async () => {
+  const servers=[{name:"remote",status:"needs_auth",tools:[]}];
+  const f=await fixture({mcpServers:servers,mcpAuthDelayed:true});
+  try {
+    await f.click("Tools & skills");await f.click("Sign in remote");
+    assert.match(f.w.document.querySelector(".mcp-auth-hint").textContent,/Preparing secure sign-in/);
+    assert.equal(f.calls.filter(c=>c.route==="/__eipc__/open-external").length,0);
+    servers[0].authorizationUrl="https://example.invalid/oauth/authorize?state=later";
+    for (let i=0;i<3;i++) {
+      f.w.dispatchEvent(new f.w.CustomEvent("quixi:event",{detail:{channel:"quixi:mcp-updated",payload:{}}}));await wait();
+    }
+    assert.equal(f.calls.filter(c=>c.route==="/__eipc__/open-external").length,1);
+    await f.click("Cancel sign-in remote");
+    assert.equal(f.w.document.querySelector('[data-mcp-action="openAuth"]').hidden,true);
+  } finally { f.close(); }
+});
+
+
+test("MCP lifecycle controls stay visually hidden with the real stylesheet", async () => {
+  const f=await fixture({mcpServers:[{name:"rea",status:"ready",isConnected:true,toolsEnumerated:true,tools:[]}]});
+  try {
+    const style=f.w.document.createElement("style");style.textContent=fs.readFileSync(path.join(__dirname,"../../resources/ui/app.css"),"utf8");f.w.document.head.append(style);
+    await f.click("Tools & skills");
+    const row=f.w.document.querySelector('[data-server="rea"]');
+    assert.equal(f.w.getComputedStyle(row.querySelector('[data-mcp-action="authenticate"]')).display,"none");
+    assert.equal(f.w.getComputedStyle(row.querySelector('[data-mcp-action="connect"]')).display,"none");
+    assert.notEqual(f.w.getComputedStyle(row.querySelector('[data-mcp-action="disconnect"]')).display,"none");
+  } finally { f.close(); }
+});
+
+test("MCP forget-sign-in requires explicit confirmation and updates connection state", async () => {
+  const f=await fixture({mcpServers:[{name:"remote",status:"ready",hasAuth:true,isConnected:true,toolsEnumerated:true,tools:[]}]});
+  try {
+    await f.click("Tools & skills");await f.click("Forget sign-in for remote");
+    assert.equal(f.calls.some(c=>c.member==="forgetAuthentication"),false);
+    assert.match(f.w.document.querySelector("dialog").textContent,/remove its saved sign-in credentials/);
+    f.w.document.querySelector("dialog button.danger").click();await wait();
+    assert.ok(f.calls.some(c=>c.member==="forgetAuthentication" && c.args[0]==="remote"));
+    const row=f.w.document.querySelector('[data-server="remote"]');
+    assert.equal(row.querySelector(".mcp-state").textContent,"Disconnected");
+    assert.equal(row.querySelector('[data-mcp-action="forgetAuthentication"]').hidden,true);
   } finally { f.close(); }
 });

@@ -1,35 +1,131 @@
-use anyhow::Result;
+use anyhow::{bail, Context, Result};
+mod client;
+mod oauth;
+mod sse;
 use quixi_platform::{BrowserUse, ComputerUse};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", default)]
 pub struct McpServerConfigEntry {
     pub command: String,
-    #[serde(default)]
     pub args: Vec<String>,
-    #[serde(default)]
     pub env: HashMap<String, String>,
+    pub lifecycle: String,
+    pub transport: Option<String>,
+    pub url: Option<String>,
+    pub headers: HashMap<String, String>,
+    pub cwd: Option<String>,
+    pub enabled: bool,
+    pub connect_timeout_ms: u64,
+    pub discovery_timeout_ms: u64,
+    pub request_timeout_ms: u64,
+    pub max_pages: usize,
+    pub max_tools: usize,
+    pub idle_timeout_ms: u64,
+    #[serde(flatten)]
+    pub extra: HashMap<String, Value>,
 }
-
+impl Default for McpServerConfigEntry {
+    fn default() -> Self {
+        Self {
+            command: String::new(),
+            args: vec![],
+            env: HashMap::new(),
+            lifecycle: "initialize".into(),
+            transport: None,
+            url: None,
+            headers: HashMap::new(),
+            cwd: None,
+            enabled: true,
+            connect_timeout_ms: 15000,
+            discovery_timeout_ms: 60000,
+            request_timeout_ms: 120000,
+            max_pages: 128,
+            max_tools: 10000,
+            idle_timeout_ms: 300000,
+            extra: HashMap::new(),
+        }
+    }
+}
+impl McpServerConfigEntry {
+    pub fn transport_kind(&self) -> &str {
+        self.transport
+            .as_deref()
+            .unwrap_or(if self.url.is_some() { "http" } else { "stdio" })
+    }
+    fn validate(&self) -> Result<()> {
+        if !["initialize", "auto", "discover"].contains(&self.lifecycle.as_str()) {
+            bail!("Unsupported MCP lifecycle mode");
+        }
+        match self.transport_kind() {
+            "stdio" => {
+                if self.command.trim().is_empty() {
+                    bail!("stdio command must not be empty");
+                }
+                if self.command.contains('\0') {
+                    bail!("Invalid command");
+                }
+            }
+            "http" | "sse" => {
+                let u = url::Url::parse(self.url.as_deref().unwrap_or(""))?;
+                if !matches!(u.scheme(), "http" | "https") || u.host_str().is_none() {
+                    bail!("MCP URL must use http or https");
+                }
+                if !u.username().is_empty() || u.password().is_some() {
+                    bail!("Use headers for credentials, not URL user information");
+                }
+                for (k, v) in &self.headers {
+                    reqwest::header::HeaderName::from_bytes(k.as_bytes())?;
+                    reqwest::header::HeaderValue::from_str(v)?;
+                }
+            }
+            other => bail!("Unsupported MCP transport '{other}'"),
+        }
+        for ms in [
+            self.connect_timeout_ms,
+            self.discovery_timeout_ms,
+            self.request_timeout_ms,
+        ] {
+            if !(100..=3600000).contains(&ms) {
+                bail!("MCP timeouts must be between 100 and 3600000 milliseconds");
+            }
+        }
+        if self.idle_timeout_ms != 0 && !(100..=86400000).contains(&self.idle_timeout_ms) {
+            bail!("Invalid idle timeout");
+        }
+        if !(1..=4096).contains(&self.max_pages) || !(1..=100000).contains(&self.max_tools) {
+            bail!("Invalid MCP catalog limits");
+        }
+        Ok(())
+    }
+}
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct DesktopMcpConfigFile {
-    #[serde(default)]
     pub mcp_servers: HashMap<String, McpServerConfigEntry>,
+    #[serde(flatten)]
+    pub extra: HashMap<String, Value>,
 }
-
 pub struct McpHost {
     pub config_path: PathBuf,
+    manager: client::Manager,
+    config_lock: parking_lot::Mutex<()>,
 }
 
 impl McpHost {
+    pub fn shutdown(&self) {
+        self.manager.shutdown();
+    }
+
     pub fn new() -> Self {
         Self::new_with_data_dir(&quixi_proto::paths::data_dir())
     }
@@ -60,10 +156,6 @@ impl McpHost {
                     "command": "quixi-mcp-builtin",
                     "args": ["--applescript"]
                 },
-                "pdf": {
-                    "command": "quixi-mcp-builtin",
-                    "args": ["--pdf"]
-                },
                 "memory": {
                     "command": "quixi-mcp-builtin",
                     "args": ["--memory"]
@@ -72,14 +164,6 @@ impl McpHost {
                     "command": "quixi-mcp-builtin",
                     "args": ["--fetch"]
                 },
-                "github": {
-                    "command": "quixi-mcp-builtin",
-                    "args": ["--github"]
-                },
-                "office365": {
-                    "command": "quixi-mcp-builtin",
-                    "args": ["--office365"]
-                }
             }
         });
 
@@ -99,14 +183,24 @@ impl McpHost {
                 // Application-owned browser adapters are identified by their
                 // executable and flags, rather than historical display names.
                 // External user-defined server names are never rewritten.
-                let renamed: Vec<_> = parsed.mcp_servers.iter().filter_map(|(name, entry)| {
-                    if !entry.command.contains("quixi-mcp-builtin") { return None; }
-                    let canonical = if entry.args.iter().any(|a| a == "--browser-use") { "quixi-in-chrome" }
-                        else if entry.args.iter().any(|a| a == "--in-app-browser") { "QuixiDesk Browser" }
-                        else { return None; };
-                    (name != canonical && !name.starts_with(&format!("{canonical} (")))
-                        .then(|| (name.clone(), canonical.to_string(), entry.clone()))
-                }).collect();
+                let renamed: Vec<_> = parsed
+                    .mcp_servers
+                    .iter()
+                    .filter_map(|(name, entry)| {
+                        if !entry.command.contains("quixi-mcp-builtin") {
+                            return None;
+                        }
+                        let canonical = if entry.args.iter().any(|a| a == "--browser-use") {
+                            "quixi-in-chrome"
+                        } else if entry.args.iter().any(|a| a == "--in-app-browser") {
+                            "QuixiDesk Browser"
+                        } else {
+                            return None;
+                        };
+                        (name != canonical && !name.starts_with(&format!("{canonical} (")))
+                            .then(|| (name.clone(), canonical.to_string(), entry.clone()))
+                    })
+                    .collect();
                 for (old, canonical, entry) in renamed {
                     // Keep every customized adapter if two old names converge.
                     let mut new = canonical.clone();
@@ -125,11 +219,8 @@ impl McpHost {
                     ("quixi-in-chrome", "--browser-use"),
                     ("QuixiDesk Browser", "--in-app-browser"),
                     ("applescript", "--applescript"),
-                    ("pdf", "--pdf"),
                     ("memory", "--memory"),
                     ("fetch", "--fetch"),
-                    ("github", "--github"),
-                    ("office365", "--office365"),
                 ] {
                     if !parsed.mcp_servers.contains_key(name) {
                         parsed.mcp_servers.insert(
@@ -138,32 +229,85 @@ impl McpHost {
                                 command: "quixi-mcp-builtin".to_string(),
                                 args: vec![arg.to_string()],
                                 env: HashMap::new(),
+                                ..Default::default()
                             },
                         );
                         changed = true;
                     }
                 }
                 if changed {
-                    let _ = fs::write(
-                        &config_path,
-                        serde_json::to_string_pretty(&parsed).unwrap_or_default(),
-                    );
+                    if let Ok(bytes) = serde_json::to_vec_pretty(&parsed) {
+                        let _ = Self::atomic_config_write(&config_path, &bytes);
+                    }
                 }
             }
         }
-        Self { config_path }
+        Self {
+            config_path,
+            manager: client::Manager::new(quixi_dir),
+            config_lock: parking_lot::Mutex::new(()),
+        }
     }
 
+    pub fn read_config_checked(&self) -> Result<DesktopMcpConfigFile> {
+        let _guard = self.config_lock.lock();
+        self.read_config_unlocked()
+    }
+    fn read_config_unlocked(&self) -> Result<DesktopMcpConfigFile> {
+        let raw = fs::read(&self.config_path).context("Could not read MCP configuration")?;
+        let cfg: DesktopMcpConfigFile =
+            serde_json::from_slice(&raw).context("Invalid MCP configuration JSON")?;
+        for (name, entry) in &cfg.mcp_servers {
+            if name.trim().is_empty() {
+                bail!("MCP server name must not be empty");
+            }
+            entry
+                .validate()
+                .with_context(|| format!("Invalid MCP configuration for '{name}'"))?;
+        }
+        self.manager.reconcile(&cfg.mcp_servers);
+        Ok(cfg)
+    }
     pub fn read_config(&self) -> DesktopMcpConfigFile {
-        fs::read_to_string(&self.config_path)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
+        self.read_config_checked().unwrap_or_default()
+    }
+    pub fn write_config(&self, mcp_servers: &Value) -> Result<()> {
+        let _guard = self.config_lock.lock();
+        let entries: HashMap<String, McpServerConfigEntry> =
+            serde_json::from_value(mcp_servers.clone()).context("mcpServers must be an object")?;
+        for (name, entry) in &entries {
+            if name.trim().is_empty() {
+                bail!("MCP server name must not be empty");
+            }
+            entry
+                .validate()
+                .with_context(|| format!("Invalid MCP configuration for '{name}'"))?;
+        }
+        let mut wrapper: Value = if self.config_path.exists() {
+            serde_json::from_slice(&fs::read(&self.config_path)?)
+                .context("Existing MCP configuration is invalid; repair it before saving")?
+        } else {
+            json!({})
+        };
+        wrapper
+            .as_object_mut()
+            .context("MCP configuration must be an object")?
+            .insert("mcpServers".into(), mcp_servers.clone());
+        Self::atomic_config_write(&self.config_path, &serde_json::to_vec_pretty(&wrapper)?)?;
+        self.manager.reconcile(&entries);
+        Ok(())
     }
 
-    pub fn write_config(&self, mcp_servers: &Value) -> Result<()> {
-        let wrapper = json!({ "mcpServers": mcp_servers });
-        fs::write(&self.config_path, serde_json::to_string_pretty(&wrapper)?)?;
+    fn atomic_config_write(path: &Path, bytes: &[u8]) -> Result<()> {
+        let parent = path
+            .parent()
+            .context("MCP configuration directory missing")?;
+        let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+        temp.write_all(bytes)?;
+        temp.as_file().sync_all()?;
+        temp.persist(path)?;
+        #[cfg(unix)]
+        fs::File::open(parent)?.sync_all()?;
         Ok(())
     }
 
@@ -964,23 +1108,19 @@ impl McpHost {
     }
 
     pub fn applescript_tools() -> Vec<Value> {
-        vec![
-            json!({
-                "name": "run_applescript",
-                "description": "Execute macOS AppleScript (`osascript`) to automate native Mac applications and System Events.",
-                "inputSchema": { "type": "object", "properties": { "script": { "type": "string" } }, "required": ["script"] }
-            }),
-        ]
+        vec![json!({
+            "name": "run_applescript",
+            "description": "Execute macOS AppleScript (`osascript`) to automate native Mac applications and System Events.",
+            "inputSchema": { "type": "object", "properties": { "script": { "type": "string" } }, "required": ["script"] }
+        })]
     }
 
     pub fn pdf_tools() -> Vec<Value> {
-        vec![
-            json!({
-                "name": "extract_pdf_text",
-                "description": "Extract text and metadata from a PDF document on disk.",
-                "inputSchema": { "type": "object", "properties": { "path": { "type": "string" } }, "required": ["path"] }
-            }),
-        ]
+        vec![json!({
+            "name": "extract_pdf_text",
+            "description": "Extract text and metadata from a PDF document on disk.",
+            "inputSchema": { "type": "object", "properties": { "path": { "type": "string" } }, "required": ["path"] }
+        })]
     }
 
     pub fn memory_tools() -> Vec<Value> {
@@ -999,13 +1139,11 @@ impl McpHost {
     }
 
     pub fn fetch_tools() -> Vec<Value> {
-        vec![
-            json!({
-                "name": "fetch_url",
-                "description": "Fetch a web URL and open/render it in the built-in browser while returning extracted text.",
-                "inputSchema": { "type": "object", "properties": { "url": { "type": "string" } }, "required": ["url"] }
-            }),
-        ]
+        vec![json!({
+            "name": "fetch_url",
+            "description": "Fetch a web URL and open/render it in the built-in browser while returning extracted text.",
+            "inputSchema": { "type": "object", "properties": { "url": { "type": "string" } }, "required": ["url"] }
+        })]
     }
 
     /// Out-of-the-box installed desktop extensions (`Extensions.getInstalledExtensionsWithState`).
@@ -1109,483 +1247,421 @@ impl McpHost {
     }
 
     /// Returns all internal MCP servers (`isInternal: true`) matching `InternalMcpServerManager.getAppServersInfo()`
-    pub fn list_internal_servers(&self) -> Vec<Value> {
-        let cu_tools = Self::computer_use_tools();
-        let chrome_tools = Self::browser_tools();
-        let browser_tools = Self::browser_and_preview_tools();
-        let ws_tools = Self::workspace_tools();
-        let o365_tools = Self::office365_tools();
-
-        let servers = vec![
-            (
-                "computer-use",
-                "b0a3b6e5-7ca0-462a-8e6f-bac087408b17",
-                cu_tools,
-            ),
-            (
-                "quixi-in-chrome",
-                "a8f3c7e2-4b9d-4f1a-8c3e-9d2a5b7f8e1c",
-                chrome_tools,
-            ),
-            (
-                "QuixiDesk Browser",
-                "bda6af03-834c-4496-98d1-c0e6d52b99ce",
-                browser_tools.clone(),
-            ),
-            (
-                "QuixiDesk Preview",
-                "cda6af03-834c-4496-98d1-c0e6d52b99cf",
-                browser_tools,
-            ),
-            (
-                "Framebuffer",
-                "10013aa5-ba71-498e-9a4e-10c1504a45c1",
-                vec![
-                    json!({ "name": "framebuffer_list", "description": "List framebuffer sources.", "inputSchema": { "type": "object", "properties": {} } }),
-                    json!({ "name": "framebuffer_attach", "description": "Open a named framebuffer source in the preview panel.", "inputSchema": { "type": "object", "properties": { "name": { "type": "string" } }, "required": ["name"] } }),
-                    json!({ "name": "framebuffer_screenshot", "description": "Capture the current framebuffer frame.", "inputSchema": { "type": "object", "properties": { "name": { "type": "string" } }, "required": ["name"] } }),
-                    json!({ "name": "framebuffer_zoom", "description": "Crop a region of the last framebuffer_screenshot.", "inputSchema": { "type": "object", "properties": { "name": { "type": "string" }, "x": { "type": "number" }, "y": { "type": "number" }, "width": { "type": "number" }, "height": { "type": "number" } }, "required": ["name", "x", "y", "width", "height"] } }),
-                    json!({ "name": "framebuffer_cursor_position", "description": "Return the last pointer position.", "inputSchema": { "type": "object", "properties": { "name": { "type": "string" } }, "required": ["name"] } }),
-                    json!({ "name": "framebuffer_click", "description": "Click at (x, y) on the framebuffer.", "inputSchema": { "type": "object", "properties": { "name": { "type": "string" }, "x": { "type": "number" }, "y": { "type": "number" } }, "required": ["name", "x", "y"] } }),
-                    json!({ "name": "framebuffer_move", "description": "Move pointer to (x, y) on the framebuffer.", "inputSchema": { "type": "object", "properties": { "name": { "type": "string" }, "x": { "type": "number" }, "y": { "type": "number" } }, "required": ["name", "x", "y"] } }),
-                    json!({ "name": "framebuffer_drag", "description": "Drag from `from` to `to` on the framebuffer.", "inputSchema": { "type": "object", "properties": { "name": { "type": "string" }, "from": { "type": "object" }, "to": { "type": "object" } }, "required": ["name", "from", "to"] } }),
-                    json!({ "name": "framebuffer_scroll", "description": "Scroll wheel on the framebuffer.", "inputSchema": { "type": "object", "properties": { "name": { "type": "string" }, "x": { "type": "number" }, "y": { "type": "number" }, "direction": { "type": "string" }, "amount": { "type": "number" } }, "required": ["name", "x", "y", "direction", "amount"] } }),
-                    json!({ "name": "framebuffer_type", "description": "Type text into the framebuffer.", "inputSchema": { "type": "object", "properties": { "name": { "type": "string" }, "text": { "type": "string" } }, "required": ["name", "text"] } }),
-                    json!({ "name": "framebuffer_key", "description": "Press a key chord on the framebuffer.", "inputSchema": { "type": "object", "properties": { "name": { "type": "string" }, "chord": { "type": "string" } }, "required": ["name", "chord"] } }),
-                    json!({ "name": "framebuffer_hold_key", "description": "Hold a key down on the framebuffer.", "inputSchema": { "type": "object", "properties": { "name": { "type": "string" }, "key": { "type": "string" }, "durationMs": { "type": "number" } }, "required": ["name", "key", "durationMs"] } }),
-                ],
-            ),
-            (
-                "visualize",
-                "34c3fca1-1148-457c-893f-b629d47bc9d7",
-                vec![
-                    json!({
-                        "name": "read_me",
-                        "description": "Returns required context for show_widget (CSS variables, colors, typography, layout rules, examples).",
-                        "inputSchema": { "type": "object", "properties": { "modules": { "type": "array", "items": { "type": "string" } } } }
-                    }),
-                    json!({
-                        "name": "show_widget",
-                        "description": "Render an interactive SVG or HTML visualization widget inline in chat.",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "title": { "type": "string" },
-                                "widget_code": { "type": "string" },
-                                "loading_messages": { "type": "array", "items": { "type": "string" } }
-                            },
-                            "required": ["title", "widget_code"]
-                        },
-                        "_meta": { "ui": { "resourceUri": "ui://visualize/widget.html" } }
-                    }),
-                ],
-            ),
-            (
-                "Window Halo",
-                "636ab6f5-a669-4adb-b932-26595ced3e89",
-                vec![
-                    json!({ "name": "halo_attach", "description": "Draw a coloured glow behind a running macOS app's window.", "inputSchema": { "type": "object", "properties": { "appName": { "type": "string" }, "pid": { "type": "number" }, "label": { "type": "string" } } } }),
-                    json!({ "name": "halo_detach", "description": "Remove a halo previously attached with halo_attach.", "inputSchema": { "type": "object", "properties": { "appName": { "type": "string" }, "pid": { "type": "number" } } } }),
-                ],
-            ),
-            (
-                "mcp-registry",
-                "8e22a1f5-ee4a-4ab4-b99b-c82e971ebd28",
-                vec![
-                    json!({ "name": "search_mcp_registry", "description": "Search for available connectors in the MCP registry.", "inputSchema": { "type": "object", "properties": { "keywords": { "type": "array", "items": { "type": "string" } } }, "required": ["keywords"] } }),
-                    json!({ "name": "suggest_connectors", "description": "Display connector suggestions to the user with Connect buttons.", "inputSchema": { "type": "object", "properties": { "uuids": { "type": "array", "items": { "type": "string" } } }, "required": ["uuids"] } }),
-                    json!({ "name": "list_connectors", "description": "Render the user's installed connectors as an interactive card.", "inputSchema": { "type": "object", "properties": { "keywords": { "type": "array", "items": { "type": "string" } } } } }),
-                ],
-            ),
-            (
-                "plugins",
-                "7f50c7a2-4369-4ac9-9666-83ab8d7f6bea",
-                vec![
-                    json!({ "name": "suggest_plugin_install", "description": "Render an inline plugin install card in the message stream.", "inputSchema": { "type": "object", "properties": { "contextLabel": { "type": "string" }, "plugins": { "type": "array" } }, "required": ["contextLabel", "plugins"] } }),
-                    json!({ "name": "list_plugins", "description": "Render the user's installed plugins as an interactive card.", "inputSchema": { "type": "object", "properties": { "keywords": { "type": "array", "items": { "type": "string" } } } } }),
-                    json!({ "name": "search_plugins", "description": "Search for installable plugins that match the user's request.", "inputSchema": { "type": "object", "properties": { "userIntent": { "type": "string" } }, "required": ["userIntent"] } }),
-                ],
-            ),
-            (
-                "skills",
-                "5f89cf73-627e-46ed-893a-750e52d0a50b",
-                vec![
-                    json!({ "name": "list_skills", "description": "Render the user's installed slash-menu skills as an interactive widget.", "inputSchema": { "type": "object", "properties": { "skill_names": { "type": "array", "items": { "type": "string" } } } } }),
-                    json!({ "name": "suggest_skills", "description": "Render an interactive widget of standalone skills the user can add.", "inputSchema": { "type": "object", "properties": { "keywords": { "type": "array", "items": { "type": "string" } } } } }),
-                ],
-            ),
-            (
-                "cowork-onboarding",
-                "9105c415-238f-4baa-8790-396b4db1be09",
-                vec![
-                    json!({ "name": "show_onboarding_role_picker", "description": "Render a clickable role-picker chip row during Cowork onboarding.", "inputSchema": { "type": "object", "properties": {} } }),
-                ],
-            ),
-            (
-                "dev-debug",
-                "7e5c02ee-f301-4a0f-918e-d324e58d554f",
-                vec![
-                    json!({ "name": "get_roots", "description": "Returns the file roots advertised to MCP servers in this session.", "inputSchema": { "type": "object", "properties": {} } }),
-                ],
-            ),
-            (
-                "terminal",
-                "b94dfe7c-203b-402b-9c46-4dcd448f0c3b",
-                vec![
-                    json!({ "name": "read_terminal", "description": "Read trailing output lines from the Terminal panel.", "inputSchema": { "type": "object", "properties": { "lines": { "type": "number" }, "tab_id": { "type": "string" }, "grep": { "type": "string" } } } }),
-                    json!({ "name": "open_terminal_tab", "description": "Open a new tab in the Terminal panel.", "inputSchema": { "type": "object", "properties": { "cwd": { "type": "string" }, "title": { "type": "string" } } } }),
-                    json!({ "name": "list_terminal_tabs", "description": "List open tabs in the Terminal panel.", "inputSchema": { "type": "object", "properties": {} } }),
-                    json!({ "name": "stop_terminal_tab", "description": "Stop or close a terminal tab.", "inputSchema": { "type": "object", "properties": { "tab_id": { "type": "string" }, "close": { "type": "boolean" } }, "required": ["tab_id"] } }),
-                    json!({ "name": "run_in_terminal", "description": "Run a command in a terminal tab.", "inputSchema": { "type": "object", "properties": { "command": { "type": "string" }, "cwd": { "type": "string" } }, "required": ["command"] } }),
-                ],
-            ),
-            (
-                "QuixiDesk iOS Simulator",
-                "57ee2155-2a58-490d-a966-7ccf8491571c",
-                vec![
-                    json!({ "name": "control", "description": "Control iOS Simulator (attach, launch, screenshot, inspect, tap, swipe, text, button, rotate, detach).", "inputSchema": { "type": "object", "properties": { "action": { "type": "string" }, "udid": { "type": "string" } }, "required": ["action"] } }),
-                    json!({ "name": "build", "description": "Check Xcode build status for iOS Simulator.", "inputSchema": { "type": "object", "properties": { "action": { "type": "string" } } } }),
-                    json!({ "name": "logs", "description": "Read iOS Simulator logs and crash reports.", "inputSchema": { "type": "object", "properties": { "action": { "type": "string" } } } }),
-                    json!({ "name": "debug", "description": "Attach LLDB debugger to iOS Simulator app.", "inputSchema": { "type": "object", "properties": { "action": { "type": "string" } } } }),
-                ],
-            ),
-            (
-                "QuixiDesk Android Emulator",
-                "07f65f9d-33a1-4654-ba37-5f9e10aa5689",
-                vec![
-                    json!({ "name": "control", "description": "Control Android Emulator (attach, launch, screenshot, inspect, tap, swipe, text, button, detach).", "inputSchema": { "type": "object", "properties": { "action": { "type": "string" } }, "required": ["action"] } }),
-                    json!({ "name": "logs", "description": "Read Android logcat entries.", "inputSchema": { "type": "object", "properties": { "action": { "type": "string" } } } }),
-                ],
-            ),
-            (
-                "scheduled-tasks",
-                "13d93732-2129-4781-a001-691c71b69d63",
-                vec![
-                    json!({ "name": "create_scheduled_task", "description": "Create a recurring or one-shot scheduled task.", "inputSchema": { "type": "object", "properties": { "name": { "type": "string" }, "prompt": { "type": "string" }, "cron": { "type": "string" } }, "required": ["name", "prompt"] } }),
-                    json!({ "name": "update_scheduled_task", "description": "Update an existing scheduled task.", "inputSchema": { "type": "object", "properties": { "id": { "type": "string" }, "name": { "type": "string" }, "prompt": { "type": "string" } }, "required": ["id"] } }),
-                    json!({ "name": "delete_scheduled_task", "description": "Delete a scheduled task.", "inputSchema": { "type": "object", "properties": { "id": { "type": "string" } }, "required": ["id"] } }),
-                    json!({ "name": "list_scheduled_tasks", "description": "List all scheduled tasks.", "inputSchema": { "type": "object", "properties": {} } }),
-                    json!({ "name": "run_scheduled_task", "description": "Trigger a scheduled task immediately.", "inputSchema": { "type": "object", "properties": { "id": { "type": "string" } }, "required": ["id"] } }),
-                    json!({ "name": "list_task_runs", "description": "List recent execution runs of a scheduled task.", "inputSchema": { "type": "object", "properties": { "id": { "type": "string" } } } }),
-                    json!({ "name": "start_watching", "description": "Start watching a scheduled task run.", "inputSchema": { "type": "object", "properties": { "id": { "type": "string" } } } }),
-                    json!({ "name": "stop_watching", "description": "Stop watching a scheduled task run.", "inputSchema": { "type": "object", "properties": { "id": { "type": "string" } } } }),
-                ],
-            ),
-            (
-                "ccd_session",
-                "3a47babc-65de-4869-b865-47a0d3f0c1ed",
-                vec![
-                    json!({ "name": "spawn_task", "description": "Spawn a background task in the current session.", "inputSchema": { "type": "object", "properties": { "prompt": { "type": "string" } } } }),
-                    json!({ "name": "dismiss_task", "description": "Dismiss a spawned task.", "inputSchema": { "type": "object", "properties": { "taskId": { "type": "string" } } } }),
-                    json!({ "name": "mark_chapter", "description": "Mark a chapter boundary in the session transcript.", "inputSchema": { "type": "object", "properties": { "title": { "type": "string" } } } }),
-                    json!({ "name": "start_session", "description": "Start a new Code session.", "inputSchema": { "type": "object", "properties": { "prompt": { "type": "string" }, "cwd": { "type": "string" } } } }),
-                    json!({ "name": "hand_off_to_session", "description": "Hand off work to another session.", "inputSchema": { "type": "object", "properties": { "sessionId": { "type": "string" } } } }),
-                    json!({ "name": "list_start_targets", "description": "List available project directories and repositories.", "inputSchema": { "type": "object", "properties": {} } }),
-                ],
-            ),
-            (
-                "ccd_directory",
-                "1a92b889-f135-4008-9061-80f87e958751",
-                vec![
-                    json!({ "name": "request_directory", "description": "Request access to an additional directory.", "inputSchema": { "type": "object", "properties": { "path": { "type": "string" } }, "required": ["path"] } }),
-                    json!({ "name": "change_directory", "description": "Move this session to a different project directory.", "inputSchema": { "type": "object", "properties": { "path": { "type": "string" } }, "required": ["path"] } }),
-                    json!({ "name": "propose_branch", "description": "Propose creating a new Git branch for edits.", "inputSchema": { "type": "object", "properties": { "suggested": { "type": "string" } }, "required": ["suggested"] } }),
-                ],
-            ),
-            (
-                "ccd_session_mgmt",
-                "8e0701d5-8683-4b58-9860-a2cc1cfc9422",
-                vec![
-                    json!({ "name": "list_sessions", "description": "List sessions on this computer.", "inputSchema": { "type": "object", "properties": {} } }),
-                    json!({ "name": "get_session", "description": "Get details of a session.", "inputSchema": { "type": "object", "properties": { "session_id": { "type": "string" } } } }),
-                    json!({ "name": "search_session_transcripts", "description": "Search across session transcripts.", "inputSchema": { "type": "object", "properties": { "query": { "type": "string" } } } }),
-                    json!({ "name": "set_session_title", "description": "Set the title of a session.", "inputSchema": { "type": "object", "properties": { "session_id": { "type": "string" }, "title": { "type": "string" } } } }),
-                    json!({ "name": "get_usage", "description": "Get session token and cost usage.", "inputSchema": { "type": "object", "properties": {} } }),
-                ],
-            ),
-            (
-                "ccd_connectors",
-                "5b0f8f6c-2f0a-4d6b-9a51-3c2c9d7e4a18",
-                vec![
-                    json!({ "name": "session_connectors_status", "description": "Check status of MCP connectors in this session.", "inputSchema": { "type": "object", "properties": {} } }),
-                    json!({ "name": "set_session_connector_enabled", "description": "Enable or disable an MCP connector in this session.", "inputSchema": { "type": "object", "properties": { "name": { "type": "string" }, "enabled": { "type": "boolean" } } } }),
-                    json!({ "name": "reconnect_session_connector", "description": "Reconnect a failed MCP connector.", "inputSchema": { "type": "object", "properties": { "name": { "type": "string" } } } }),
-                ],
-            ),
-            (
-                "ccd_host",
-                "c7226828-f75a-4818-bb9a-2f4abf6467ea",
-                vec![
-                    json!({ "name": "open_in_editor", "description": "Open a file from this session in the user's code editor.", "inputSchema": { "type": "object", "properties": { "path": { "type": "string" } }, "required": ["path"] } }),
-                    json!({ "name": "reveal_path", "description": "Reveal a file or folder in Finder.", "inputSchema": { "type": "object", "properties": { "path": { "type": "string" } }, "required": ["path"] } }),
-                    json!({ "name": "request_keep_awake", "description": "Prevent the computer from sleeping while the session works.", "inputSchema": { "type": "object", "properties": { "until": { "type": "string" } } } }),
-                ],
-            ),
-            (
-                "ccd_pr",
-                "5b1f4c1e-2f0a-4a52-9d6c-3c8e7a41b9d0",
-                vec![
-                    json!({ "name": "get_status", "description": "Get status of pull requests bound to this session.", "inputSchema": { "type": "object", "properties": {} } }),
-                    json!({ "name": "set_monitor", "description": "Turn PR CI monitoring on or off.", "inputSchema": { "type": "object", "properties": { "enabled": { "type": "boolean" } } } }),
-                    json!({ "name": "set_auto_merge", "description": "Turn PR auto-merge on or off.", "inputSchema": { "type": "object", "properties": { "enabled": { "type": "boolean" } } } }),
-                    json!({ "name": "bind_pr", "description": "Bind a GitHub pull request URL to this session.", "inputSchema": { "type": "object", "properties": { "url": { "type": "string" } }, "required": ["url"] } }),
-                    json!({ "name": "unbind_pr", "description": "Dismiss a bound pull request from this session.", "inputSchema": { "type": "object", "properties": { "url": { "type": "string" } } } }),
-                ],
-            ),
-            (
-                "ccd_sidebar",
-                "5b1d6c1e-2f0a-4c8e-9a37-0d4f6b2e8c91",
-                vec![
-                    json!({ "name": "list_groups", "description": "List sidebar session groups.", "inputSchema": { "type": "object", "properties": {} } }),
-                    json!({ "name": "create_group", "description": "Create a sidebar session group.", "inputSchema": { "type": "object", "properties": { "name": { "type": "string" } }, "required": ["name"] } }),
-                    json!({ "name": "list_sections", "description": "List sidebar sections.", "inputSchema": { "type": "object", "properties": {} } }),
-                ],
-            ),
-            (
-                "ccd_turn",
-                "9d2c4a71-6b3e-4f58-a1c9-7e5b0d8f3a26",
-                vec![
-                    json!({ "name": "update_plan", "description": "Update the turn step-by-step plan checklist.", "inputSchema": { "type": "object", "properties": { "items": { "type": "array", "items": { "type": "string" } }, "done": { "type": "array", "items": { "type": "number" } }, "start": { "type": "number" } } } }),
-                    json!({ "name": "wrap_up", "description": "Present a recap or multiple-choice question at the end of a turn.", "inputSchema": { "type": "object", "properties": { "question": { "type": "string" }, "options": { "type": "array", "items": { "type": "string" } } } } }),
-                ],
-            ),
-            (
-                "ccd_window",
-                "56285402-9c8c-4c2c-b47b-2f3e9ba5d210",
-                vec![
-                    json!({ "name": "open_session_in", "description": "Open another session in split view or a pop-out window.", "inputSchema": { "type": "object", "properties": { "session_id": { "type": "string" } } } }),
-                    json!({ "name": "close_split", "description": "Close a split view pane.", "inputSchema": { "type": "object", "properties": {} } }),
-                    json!({ "name": "set_sidebar_collapsed", "description": "Collapse or expand the sidebar.", "inputSchema": { "type": "object", "properties": { "collapsed": { "type": "boolean" } }, "required": ["collapsed"] } }),
-                    json!({ "name": "get_window_layout", "description": "Get the current split view and sidebar layout.", "inputSchema": { "type": "object", "properties": {} } }),
-                ],
-            ),
-            (
-                "ccd_view",
-                "6f4f70a3-2c58-4f8e-9d7a-3b1c5e2a9c41",
-                vec![
-                    json!({ "name": "show_pane", "description": "Show a session side pane (terminal, browser, diff, files, artifacts).", "inputSchema": { "type": "object", "properties": { "pane": { "type": "string" } }, "required": ["pane"] } }),
-                    json!({ "name": "close_pane", "description": "Close a session side pane.", "inputSchema": { "type": "object", "properties": { "pane": { "type": "string" } }, "required": ["pane"] } }),
-                    json!({ "name": "get_layout", "description": "Get open panes and transcript view mode.", "inputSchema": { "type": "object", "properties": {} } }),
-                    json!({ "name": "set_transcript_view", "description": "Switch transcript view mode.", "inputSchema": { "type": "object", "properties": { "transcriptView": { "type": "string" } } } }),
-                ],
-            ),
-            (
-                "ccd_settings",
-                "2b7c91e4-5d3a-4f6e-8c1b-9a0d7e3f5b62",
-                vec![
-                    json!({ "name": "get_settings", "description": "Read the user's QuixiDesk settings.", "inputSchema": { "type": "object", "properties": {} } }),
-                    json!({ "name": "set_setting", "description": "Change a QuixiDesk setting.", "inputSchema": { "type": "object", "properties": { "key": { "type": "string" }, "value": {} }, "required": ["key", "value"] } }),
-                ],
-            ),
-            (
-                "workspace",
-                "a05f2752-b0d0-4e5e-97f4-0c85957a5eb7",
-                ws_tools,
-            ),
-            (
-                "office",
-                "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-                o365_tools,
-            ),
-        ];
-
-        servers
-            .into_iter()
-            .map(|(name, uuid, tools)| {
-                json!({
-                    "name": name,
-                    "uuid": uuid,
-                    "isInternal": true,
-                    "isConnected": true,
-                    "status": "connected",
-                    "tools": tools,
-                    "resources": [],
-                    "prompts": []
+    pub fn builtin_catalog(name: &str) -> Vec<Value> {
+        Self::builtin_tools(name).unwrap_or_default()
+    }
+    fn builtin_tools(name: &str) -> Option<Vec<Value>> {
+        let tools = match name {
+            "workspace" | "quixi-workspace" => Self::workspace_tools(),
+            "computer-use" => Self::computer_use_tools(),
+            "quixi-in-chrome" => Self::browser_tools(),
+            "QuixiDesk Browser" | "QuixiDesk Preview" => Self::browser_and_preview_tools(),
+            "applescript" => Self::applescript_tools(),
+            "memory" => Self::memory_tools(),
+            "fetch" => Self::fetch_tools(),
+            "github" | "office" | "office365" | "pdf" => vec![],
+            _ => return None,
+        };
+        Some(
+            tools
+                .into_iter()
+                .filter(|t| {
+                    !matches!(
+                        t["name"].as_str().unwrap_or(""),
+                        "gif_creator" | "show_widget" | "extract_pdf_text"
+                    )
                 })
-            })
+                .collect(),
+        )
+    }
+    fn canonical_name(&self, name: &str) -> Result<String> {
+        let cfg = self.read_config_checked()?;
+        if cfg.mcp_servers.contains_key(name) {
+            return Ok(name.into());
+        }
+        cfg.mcp_servers
+            .keys()
+            .find(|n| Self::internal_server_uuid(n) == Some(name))
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("Unknown MCP server '{name}'"))
+    }
+    fn entry_is_builtin(name: &str, entry: &McpServerConfigEntry) -> bool {
+        entry.command == "quixi-mcp-builtin"
+            && entry.transport_kind() == "stdio"
+            && Self::builtin_tools(name).is_some()
+    }
+    pub fn is_builtin_server(&self, name: &str) -> bool {
+        let Ok(name) = self.canonical_name(name) else {
+            return false;
+        };
+        self.read_config_checked()
+            .ok()
+            .and_then(|c| c.mcp_servers.get(&name).cloned())
+            .is_some_and(|e| Self::entry_is_builtin(&name, &e))
+    }
+    pub fn list_internal_servers(&self) -> Vec<Value> {
+        self.list_server_statuses()
+            .into_iter()
+            .filter(|s| s["builtin"] == true)
             .collect()
     }
-
-    /// Returns the combined list of user-configured MCP servers (`serverSource: "user_config"`)
-    /// and internal MCP servers (`isInternal: true`) for `getLocalMcpServers()`.
     pub fn list_local_mcp_servers(&self) -> Vec<Value> {
-        let mut list = self.list_internal_servers();
-        for srv in self.list_server_statuses() {
-            let name = srv.get("name").and_then(|v| v.as_str()).unwrap_or("");
-            let exists = list.iter().any(|existing| {
-                let en = existing.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                !name.is_empty() && en == name
-            });
-            if !exists {
-                list.push(srv);
-            }
-        }
-        list
+        self.list_server_statuses()
     }
-
-    /// Returns direct/user-configured MCP server statuses for `getDirectMcpServerStatuses()`.
     pub fn list_server_statuses(&self) -> Vec<Value> {
-        let cfg = self.read_config();
-        let mut entries: Vec<(String, McpServerConfigEntry)> = cfg.mcp_servers.into_iter().collect();
-        entries.sort_by(|a, b| a.0.cmp(&b.0));
-
-        let mut list = Vec::new();
-        for (name, entry) in entries {
-            let tools = match name.as_str() {
-                "computer-use" => Self::computer_use_tools(),
-                "quixi-in-chrome" => Self::browser_tools(),
-                "QuixiDesk Browser" | "QuixiDesk Preview" => Self::browser_and_preview_tools(),
-                "applescript" => Self::applescript_tools(),
-                "pdf" => Self::pdf_tools(),
-                "memory" => Self::memory_tools(),
-                "fetch" => Self::fetch_tools(),
-                "github" => Self::github_tools(),
-                "office" | "office365" => Self::office365_tools(),
-                _ => Self::workspace_tools(),
-            };
-            let uuid = Self::internal_server_uuid(&name).unwrap_or("a05f2752-b0d0-4e5e-97f4-0c85957a5eb7");
-            list.push(json!({
-                "name": name,
-                "uuid": uuid,
-                "url": "",
-                "transport": "stdio",
-                "builtin": entry.command == "quixi-mcp-builtin",
-                "isInternal": false,
-                "serverSource": "user_config",
-                "isConnected": true,
-                "hasAuth": false,
-                "runsOnSessionHost": false,
-                "wireKey": name,
-                "toolsEnumerated": true,
-                "status": "connected",
-                "command": entry.command,
-                "args": entry.args,
-                "tools": tools,
-                "resources": [],
-                "prompts": []
-            }));
-        }
-        list
-    }
-
-    /// Unified MCP tool dispatcher supporting all internal, builtin, and external stdio MCP servers.
-    pub fn call_tool(
-        &self,
-        server_name_or_uuid: &str,
-        tool_name: &str,
-        args: &Value,
-        default_cwd: &Path,
-    ) -> Result<Value> {
-        // Strip optional `mcp__<server>__` prefix if caller passed a prefixed tool name
-        let clean_tool = if let Some(rest) = tool_name.strip_prefix("mcp__") {
-            rest.split_once("__").map(|(_, t)| t).unwrap_or(tool_name)
-        } else {
-            tool_name
+        let cfg = match self.read_config_checked() {
+            Ok(c) => c,
+            Err(e) => {
+                return vec![
+                    json!({"name":"Configuration","status":"failed","isConnected":false,"toolsEnumerated":false,"tools":[],"error":{"kind":"configuration","message":format!("{e:#}")}}),
+                ]
+            }
         };
-
-        // Check if this is a user-configured external stdio command (not `quixi-mcp-builtin`)
-        let cfg = self.read_config();
-        if let Some(entry) = cfg.mcp_servers.get(server_name_or_uuid) {
-            if !entry.command.contains("quixi-mcp-builtin") && !entry.command.is_empty() {
-                if let Ok(ext_res) =
-                    Self::call_external_stdio_tool(entry, clean_tool, args, default_cwd)
-                {
-                    return Ok(ext_res);
+        let mut statuses = self.manager.statuses();
+        let mut result = Vec::new();
+        for (name, entry) in cfg.mcp_servers {
+            let builtin = Self::entry_is_builtin(&name, &entry);
+            let disconnected = self.manager.is_disconnected(&name);
+            if !builtin {
+                if let Some(s) = statuses.remove(&name) {
+                    result.push(s);
+                    continue;
+                }
+            }
+            let unsupported = builtin && Self::builtin_tools(&name).is_some_and(|t| t.is_empty());
+            let ready = builtin && entry.enabled && !disconnected && !unsupported;
+            result.push(json!({"name":name,"uuid":if builtin{Self::internal_server_uuid(&name).unwrap_or(&name)}else{&name},"wireKey":name,"builtin":builtin,"isInternal":builtin,"serverSource":"user_config","transport":entry.transport_kind(),"status":if !entry.enabled{"disabled"}else if disconnected{"disconnected"}else if unsupported{"failed"}else if ready{"ready"}else{"configured"},"isConnected":ready,"toolsEnumerated":ready,"catalogStale":false,"tools":if ready{Self::builtin_tools(&name).unwrap_or_default()}else{vec![]},"resources":[],"prompts":[],"error":if unsupported{json!({"kind":"unsupported","message":"This legacy built-in connector is not implemented. Configure a working external MCP server instead."})}else{Value::Null},"generation":0}));
+        }
+        result.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+        result
+    }
+    fn external_entry(&self, name: &str, cwd: &Path) -> Result<Arc<client::Entry>> {
+        let _guard = self.config_lock.lock();
+        let cfg = self.read_config_unlocked()?;
+        let entry = cfg
+            .mcp_servers
+            .get(name)
+            .ok_or_else(|| anyhow::anyhow!("Unknown MCP server '{name}'"))?;
+        self.manager.entry(name, entry, cwd)
+    }
+    pub fn start_connection(&self, name: &str, cwd: &Path) -> Result<()> {
+        let name = self.canonical_name(name)?;
+        self.manager.enable(&name);
+        if !self.is_builtin_server(&name) {
+            client::Manager::start(self.external_entry(&name, cwd)?, false);
+        }
+        Ok(())
+    }
+    pub fn reconnect_server(&self, name: &str, cwd: &Path) -> Result<()> {
+        let name = self.canonical_name(name)?;
+        self.manager.reconnect(&name);
+        self.start_connection(&name, cwd)
+    }
+    pub fn refresh_server(&self, name: &str, cwd: &Path) -> Result<()> {
+        let name = self.canonical_name(name)?;
+        if !self.is_builtin_server(&name) {
+            client::Manager::start(self.external_entry(&name, cwd)?, true);
+        }
+        Ok(())
+    }
+    pub fn disconnect_server(&self, name: &str) -> Result<()> {
+        let name = self.canonical_name(name)?;
+        self.manager.disconnect(&name);
+        Ok(())
+    }
+    pub fn authenticate_server(&self, name: &str, cwd: &Path) -> Result<Value> {
+        let name = self.canonical_name(name)?;
+        let cfg = self.read_config_checked()?;
+        if cfg.mcp_servers[&name].transport_kind() == "stdio" {
+            bail!("OAuth sign-in requires a remote HTTP MCP server");
+        }
+        self.manager.enable(&name);
+        let entry = self.external_entry(&name, cwd)?;
+        Ok(client::Manager::authenticate(entry))
+    }
+    pub fn clear_server_auth(&self, name: &str) -> Result<()> {
+        let name = self.canonical_name(name)?;
+        let cfg = self.read_config_checked()?;
+        let url = cfg.mcp_servers[&name]
+            .url
+            .as_deref()
+            .context("This server does not use remote authentication")?;
+        self.manager.cancel_auth(&name);
+        self.manager.disconnect(&name);
+        client::block_on(oauth::clear(
+            self.config_path
+                .parent()
+                .context("Missing profile directory")?,
+            &name,
+            url,
+        ))?;
+        self.manager.reconnect(&name);
+        self.manager.disconnect(&name);
+        Ok(())
+    }
+    pub fn cancel_authentication_server(&self, name: &str) -> Result<()> {
+        let name = self.canonical_name(name)?;
+        self.manager.cancel_auth(&name);
+        Ok(())
+    }
+    pub fn discover_tools(
+        &self,
+        server: Option<&str>,
+        query: Option<&str>,
+        cursor: usize,
+        cwd: &Path,
+        cancelled: &AtomicBool,
+    ) -> Result<Value> {
+        if cancelled.load(Ordering::SeqCst) {
+            bail!("MCP discovery cancelled");
+        }
+        let server = server.map(|s| self.canonical_name(s)).transpose()?;
+        let mut specific = None;
+        if let Some(name) = &server {
+            if !self.is_builtin_server(name) {
+                let entry = self.external_entry(name, cwd)?;
+                client::block_on(client::Manager::discover(&entry, cancelled))?;
+                specific = Some(entry.status());
+            }
+        }
+        let servers: Vec<_> = if let Some(s) = specific {
+            vec![s]
+        } else {
+            self.list_server_statuses()
+                .into_iter()
+                .filter(|s| server.as_ref().is_none_or(|n| s["name"] == *n))
+                .collect()
+        };
+        if server.is_some()
+            && servers
+                .iter()
+                .any(|s| s["status"] != "ready" || s["catalogStale"] == true)
+        {
+            bail!("MCP server is unavailable; connect or enable it before discovering tools");
+        }
+        let mut tools = Vec::new();
+        let needle = query.unwrap_or("").to_lowercase();
+        for s in &servers {
+            if s["status"] != "ready" || s["catalogStale"] == true {
+                continue;
+            }
+            if let Some(ts) = s["tools"].as_array() {
+                for t in ts {
+                    if !needle.is_empty()
+                        && !format!("{} {} {}", s["name"], t["name"], t["description"])
+                            .to_lowercase()
+                            .contains(&needle)
+                    {
+                        continue;
+                    }
+                    let mut t = t.clone();
+                    t["server"] = s["name"].clone();
+                    tools.push(t);
                 }
             }
         }
-
-        self.call_builtin_tool(clean_tool, args, default_cwd)
-    }
-
-    /// Spawns an external stdio MCP server, performs JSON-RPC `initialize` + `tools/call`, and returns the result.
-    pub fn call_external_stdio_tool(
-        entry: &McpServerConfigEntry,
-        tool_name: &str,
-        args: &Value,
-        default_cwd: &Path,
-    ) -> Result<Value> {
-        let mut cmd = Command::new(&entry.command);
-        if let Some(profile) = quixi_proto::paths::test_profile() {
-            cmd.env_clear().env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
-                .env("QUIXI_TEST_PROFILE", profile)
-                .env("QUIXI_AUTOMATION_PORT", quixi_proto::paths::automation_port().to_string());
+        tools.sort_by(|a, b| {
+            a["server"]
+                .as_str()
+                .cmp(&b["server"].as_str())
+                .then(a["name"].as_str().cmp(&b["name"].as_str()))
+        });
+        if cursor > tools.len() {
+            bail!("Invalid MCP discovery cursor");
         }
-        cmd.args(&entry.args)
-            .envs(&entry.env)
-            .current_dir(default_cwd)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-
-        let mut child = cmd.spawn()?;
-        if let Some(mut stdin) = child.stdin.take() {
-            let init_req = json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "initialize",
-                "params": {
-                    "protocolVersion": "2025-11-25",
-                    "capabilities": {},
-                    "clientInfo": { "name": "QuixiDesk", "version": "3.6556.7" }
-                }
-            });
-            let notify_init = json!({
-                "jsonrpc": "2.0",
-                "method": "notifications/initialized"
-            });
-            let call_req = json!({
-                "jsonrpc": "2.0",
-                "id": 2,
-                "method": "tools/call",
-                "params": {
-                    "name": tool_name,
-                    "arguments": args
-                }
-            });
-            let payload = format!("{}\n{}\n{}\n", init_req, notify_init, call_req);
-            let _ = stdin.write_all(payload.as_bytes());
-            let _ = stdin.flush();
+        let mut end = cursor;
+        let mut bytes = 0;
+        while end < tools.len() && end - cursor < 20 {
+            let size = serde_json::to_vec(&tools[end])?.len();
+            if end > cursor && bytes + size > 65536 {
+                break;
+            }
+            bytes += size;
+            end += 1;
         }
 
-        if let Some(stdout) = child.stdout.take() {
-            let reader = BufReader::new(stdout);
-            for line in reader.lines().take(20).flatten() {
-                if let Ok(val) = serde_json::from_str::<Value>(&line) {
-                    if val.get("id").and_then(|v| v.as_i64()) == Some(2) {
-                        let _ = child.kill();
-                        if let Some(res) = val.get("result") {
-                            return Ok(res.clone());
-                        }
+        let summaries: Vec<_> = servers
+            .into_iter()
+            .map(|mut s| {
+                for key in ["tools", "resources", "prompts"] {
+                    let count = s[key].as_array().map_or(0, Vec::len);
+                    s.as_object_mut().unwrap().remove(key);
+                    s[format!("{key}Count")] = json!(count);
+                }
+                for key in ["stderr", "authorizationUrl", "authAttempt"] {
+                    s.as_object_mut().unwrap().remove(key);
+                }
+                if let Some(instructions) = s["instructions"].as_str() {
+                    if instructions.chars().count() > 4096 {
+                        s["instructions"] =
+                            json!(instructions.chars().take(4096).collect::<String>());
+                        s["instructionsTruncated"] = json!(true);
                     }
                 }
+                s
+            })
+            .collect();
+        Ok(
+            json!({"servers":summaries,"tools":tools[cursor..end],"nextCursor":if end<tools.len(){Some(end)}else{None}}),
+        )
+    }
+    pub fn call_tool(&self, server: &str, tool: &str, args: &Value, cwd: &Path) -> Result<Value> {
+        self.call_tool_cancellable(server, tool, args, cwd, &AtomicBool::new(false))
+    }
+    pub fn server_identity(&self, server: &str) -> Result<String> {
+        let cfg = self.read_config_checked()?;
+        let name = Self::resolve_config_name(&cfg, server)?;
+        Self::config_identity(&name, &cfg.mcp_servers[&name])
+    }
+    fn resolve_config_name(cfg: &DesktopMcpConfigFile, name: &str) -> Result<String> {
+        if cfg.mcp_servers.contains_key(name) {
+            return Ok(name.into());
+        }
+        cfg.mcp_servers
+            .keys()
+            .find(|n| Self::internal_server_uuid(n) == Some(name))
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("Unknown MCP server '{name}'"))
+    }
+    fn config_identity(name: &str, entry: &McpServerConfigEntry) -> Result<String> {
+        use sha2::{Digest, Sha256};
+        fn canonical(value: Value) -> Value {
+            match value {
+                Value::Object(map) => {
+                    let sorted: std::collections::BTreeMap<_, _> =
+                        map.into_iter().map(|(k, v)| (k, canonical(v))).collect();
+                    Value::Object(sorted.into_iter().collect())
+                }
+                Value::Array(a) => Value::Array(a.into_iter().map(canonical).collect()),
+                v => v,
             }
         }
-        let _ = child.kill();
-        anyhow::bail!("External stdio MCP server did not return a tools/call response")
+        let value = canonical(json!({"name":name,"config":entry}));
+        Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(&value)?)))
     }
-
-    pub fn list_resources(&self, server_name_or_uuid: &str) -> Vec<Value> {
-        if server_name_or_uuid == "visualize"
-            || server_name_or_uuid == "34c3fca1-1148-457c-893f-b629d47bc9d7"
-        {
-            return vec![json!({
-                "uri": "ui://visualize/widget.html",
-                "name": "Interactive Widget Container",
-                "mimeType": "text/html"
-            })];
+    pub fn call_tool_cancellable(
+        &self,
+        server: &str,
+        tool: &str,
+        args: &Value,
+        cwd: &Path,
+        cancelled: &AtomicBool,
+    ) -> Result<Value> {
+        self.call_tool_with_identity(server, tool, args, cwd, cancelled, None)
+    }
+    pub fn call_tool_with_identity(
+        &self,
+        server: &str,
+        tool: &str,
+        args: &Value,
+        cwd: &Path,
+        cancelled: &AtomicBool,
+        expected: Option<&str>,
+    ) -> Result<Value> {
+        if cancelled.load(Ordering::SeqCst) {
+            bail!("MCP call cancelled");
         }
-        vec![]
+        let config_guard = self.config_lock.lock();
+        let cfg = self.read_config_unlocked()?;
+        let name = Self::resolve_config_name(&cfg, server)?;
+        let config = &cfg.mcp_servers[&name];
+        let identity = Self::config_identity(&name, config)?;
+        if expected.is_some_and(|expected| expected != identity) {
+            bail!("MCP server configuration changed after approval; request approval again before executing");
+        }
+        if !config.enabled {
+            bail!("MCP server '{name}' is disabled");
+        }
+        if self.manager.is_disconnected(&name) {
+            bail!("MCP server '{name}' is disconnected");
+        }
+        if Self::entry_is_builtin(&name, config) {
+            let definition = Self::builtin_tools(&name)
+                .unwrap_or_default()
+                .into_iter()
+                .find(|t| t["name"] == tool)
+                .ok_or_else(|| anyhow::anyhow!("Unknown tool '{tool}' on MCP server '{name}'"))?;
+            client::validate_instance(&definition["inputSchema"], args)?;
+            drop(config_guard);
+            self.call_builtin_tool(tool, args, cwd)
+        } else {
+            let entry = self.manager.entry(&name, config, cwd)?;
+            drop(config_guard);
+            client::block_on(client::Manager::call(&entry, tool, args, cancelled))
+        }
     }
 
-    pub fn read_resource(&self, _server_name_or_uuid: &str, uri: &str) -> Value {
-        json!({
-            "contents": [{
-                "uri": uri,
-                "mimeType": "text/html",
-                "text": "<div class=\"quixi-widget-host\"></div>"
-            }]
-        })
+    pub fn list_resources(&self, server: &str) -> Vec<Value> {
+        self.list_server_statuses()
+            .into_iter()
+            .find(|s| s["name"] == server && s["status"] == "ready" && s["catalogStale"] != true)
+            .and_then(|s| s["resources"].as_array().cloned())
+            .unwrap_or_default()
+    }
+    pub fn read_resource_checked(
+        &self,
+        server: &str,
+        uri: &str,
+        cwd: &Path,
+        cancelled: &AtomicBool,
+    ) -> Result<Value> {
+        let name = self.canonical_name(server)?;
+        if self.is_builtin_server(&name) {
+            bail!("MCP server '{name}' does not expose resources");
+        }
+        let entry = self.external_entry(&name, cwd)?;
+        client::block_on(client::Manager::resource(
+            &entry,
+            "resources/read",
+            json!({"uri":uri}),
+            cancelled,
+        ))
+    }
+    pub fn get_prompt(
+        &self,
+        server: &str,
+        name: &str,
+        args: &Value,
+        cwd: &Path,
+        cancelled: &AtomicBool,
+    ) -> Result<Value> {
+        let server = self.canonical_name(server)?;
+        if self.is_builtin_server(&server) {
+            bail!("MCP server '{server}' does not expose prompts");
+        }
+        let entry = self.external_entry(&server, cwd)?;
+        client::block_on(client::Manager::resource(
+            &entry,
+            "prompts/get",
+            json!({"name":name,"arguments":args}),
+            cancelled,
+        ))
+    }
+    pub fn read_resource(&self, server: &str, uri: &str) -> Value {
+        self.read_resource_checked(
+            server,
+            uri,
+            Path::new(quixi_proto::paths::default_workspace_str()),
+            &AtomicBool::new(false),
+        )
+        .unwrap_or_else(|e| json!({"error":format!("{e:#}"),"isError":true}))
+    }
+
+    pub fn call_builtin_server_tool(
+        &self,
+        server: &str,
+        tool: &str,
+        args: &Value,
+        cwd: &Path,
+    ) -> Result<Value> {
+        let definition = Self::builtin_catalog(server)
+            .into_iter()
+            .find(|t| t["name"] == tool)
+            .ok_or_else(|| {
+                anyhow::anyhow!("Unknown tool '{tool}' on built-in MCP server '{server}'")
+            })?;
+        client::validate_instance(&definition["inputSchema"], args)?;
+        self.call_builtin_tool(tool, args, cwd)
     }
 
     pub fn call_builtin_tool(
@@ -1641,6 +1717,7 @@ impl McpHost {
                     default_cwd.join(path)
                 };
                 let existing = fs::read_to_string(&target_path)?;
+                if target_str.is_empty()||!existing.contains(target_str){bail!("Edit target was not found; file was not changed");}
                 let updated = existing.replacen(target_str, replacement, 1);
                 fs::write(&target_path, &updated)?;
                 Ok(json!({
@@ -1655,7 +1732,7 @@ impl McpHost {
                 } else {
                     default_cwd.join(path)
                 };
-                let _ = fs::remove_file(&target);
+                fs::remove_file(&target)?;
                 Ok(json!({
                     "content": [{ "type": "text", "text": format!("Deleted {}", target.display()) }],
                     "isError": false
@@ -1687,7 +1764,7 @@ impl McpHost {
                 let res = quixi_workspace::ShellHostEngine::run_bash_command(default_cwd, cmd)?;
                 Ok(json!({
                     "content": [{ "type": "text", "text": serde_json::to_string_pretty(&res)? }],
-                    "isError": false
+                    "isError": res["ok"] == false
                 }))
             }
             "git_status" => {
@@ -2322,23 +2399,7 @@ impl McpHost {
                     "isError": false
                 }))
             }
-            "gif_creator" => {
-                let action = args
-                    .get("action")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("start_recording");
-                let mut mgr = quixi_platform::browser_state().lock().unwrap();
-                match action {
-                    "start_recording" => mgr.gif_recording = true,
-                    "stop_recording" => mgr.gif_recording = false,
-                    "clear" => mgr.gif_frames = 0,
-                    _ => {}
-                }
-                Ok(json!({
-                    "content": [{ "type": "text", "text": format!("GIF creator action '{}' completed.", action) }],
-                    "isError": false
-                }))
-            }
+            "gif_creator" => bail!("GIF recording is not implemented"),
 
             // =========================================================================
             // 4. VISUALIZE / SIMULATORS / SCHEDULED TASKS / REGISTRY / PLUGINS / SKILLS
@@ -2350,19 +2411,6 @@ impl McpHost {
                 }],
                 "isError": false
             })),
-            "show_widget" => {
-                let title = args
-                    .get("title")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("widget");
-                Ok(json!({
-                    "content": [{
-                        "type": "text",
-                        "text": format!("Rendered interactive widget '{}'.", title)
-                    }],
-                    "isError": false
-                }))
-            }
             "search_mcp_registry" | "list_connectors" | "suggest_connectors" => Ok(json!({
                 "content": [{
                     "type": "text",
@@ -2421,24 +2469,7 @@ impl McpHost {
                     "isError": false
                 }))
             }
-            "extract_pdf_text" => {
-                let p = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
-                let resolved = if Path::new(p).is_absolute() {
-                    PathBuf::from(p)
-                } else {
-                    default_cwd.join(p)
-                };
-                let info = if resolved.exists() {
-                    let len = resolved.metadata().map(|m| m.len()).unwrap_or(0);
-                    format!("Extracted PDF document at {} ({} bytes)", resolved.display(), len)
-                } else {
-                    format!("PDF path not found: {}", resolved.display())
-                };
-                Ok(json!({
-                    "content": [{ "type": "text", "text": info }],
-                    "isError": false
-                }))
-            }
+            "extract_pdf_text" | "show_widget" => bail!("This built-in capability is not implemented. Configure an MCP server that provides it."),
             "store_memory" | "recall_memory" => {
                 let mem_file = self.config_path.parent().unwrap().join("memory/MEMORY.md");
                 // Keep earlier application-owned notes available without binding
@@ -2469,13 +2500,7 @@ impl McpHost {
                     }))
                 }
             }
-            _ => Ok(json!({
-                "content": [{
-                    "type": "text",
-                    "text": format!("Executed tool '{}' with args {}", tool_name, args)
-                }],
-                "isError": false
-            })),
+            _ => bail!("Unsupported built-in MCP tool '{tool_name}'"),
         }
     }
 
@@ -2494,93 +2519,37 @@ impl McpHost {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
-    fn test_mcp_host_all_servers_and_tools() {
-        let host = McpHost::new();
-        let statuses = host.list_server_statuses();
-        assert!(statuses.len() >= 5);
-
-        let all_local = host.list_local_mcp_servers();
-        assert!(all_local.len() >= 25);
-
-        // Verify computer-use and quixi-in-chrome internal servers exist with exact UUIDs
-        let has_cu = all_local.iter().any(|s| {
-            s["name"] == "computer-use"
-                && s["uuid"] == "b0a3b6e5-7ca0-462a-8e6f-bac087408b17"
-                && s["isInternal"] == true
-        });
-        assert!(has_cu);
-
-        let has_chrome = all_local.iter().any(|s| {
-            s["name"] == "quixi-in-chrome"
-                && s["uuid"] == "a8f3c7e2-4b9d-4f1a-8c3e-9d2a5b7f8e1c"
-                && s["isInternal"] == true
-        });
-        assert!(has_chrome);
-
-        let cwd = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap();
-
-        // 1. Workspace tools
-        let read_res = host
-            .call_tool("quixi-workspace", "read_file", &json!({ "path": "Cargo.toml" }), cwd)
-            .unwrap();
-        assert_eq!(read_res["isError"], false);
-        assert!(read_res["content"][0]["text"]
-            .as_str()
-            .unwrap_or("")
-            .contains("[workspace]"));
-
-        // 2. Computer Use tools
-        let cursor_res = host
-            .call_tool("computer-use", "cursor_position", &json!({}), cwd)
-            .unwrap();
-        assert_eq!(cursor_res["isError"], false);
-
-        let screen_res = host
-            .call_tool("computer-use", "screenshot", &json!({}), cwd)
-            .unwrap();
-        assert_eq!(screen_res["isError"], false);
-        assert_eq!(screen_res["content"][1]["type"], "image");
-
-        let apps_res = host
-            .call_tool("computer-use", "list_apps", &json!({}), cwd)
-            .unwrap();
-        assert_eq!(apps_res["isError"], false);
-
-        // 3. Browser Use tools (quixi-in-chrome & QuixiDesk Browser)
-        let tabs_res = host
-            .call_tool("quixi-in-chrome", "tabs_context_mcp", &json!({ "createIfEmpty": true }), cwd)
-            .unwrap();
-        assert_eq!(tabs_res["isError"], false);
-        assert!(tabs_res["content"][0]["text"]
-            .as_str()
-            .unwrap_or("")
-            .contains("tabGroupId"));
-
-        let read_page_res = host
-            .call_tool("quixi-in-chrome", "read_page", &json!({ "tabId": 1 }), cwd)
-            .unwrap();
-        assert_eq!(read_page_res["isError"], false);
-        assert!(read_page_res["content"][0]["text"]
-            .as_str()
-            .unwrap_or("")
-            .contains("[ref_1]"));
-
-        let batch_res = host
+    fn builtin_catalog_routes_only_implemented_tools_on_the_named_server() {
+        let root = tempfile::tempdir().unwrap();
+        let host = McpHost::new_with_data_dir(root.path());
+        assert!(host
+            .list_local_mcp_servers()
+            .iter()
+            .all(|s| s["builtin"] == true && s["status"] == "ready"));
+        let file = root.path().join("example.txt");
+        fs::write(&file, "fixture").unwrap();
+        let result = host
             .call_tool(
-                "quixi-in-chrome",
-                "browser_batch",
-                &json!({
-                    "actions": [
-                        { "name": "form_input", "input": { "tabId": 1, "ref": "ref_3", "value": "QuixiDesk" } },
-                        { "name": "computer", "input": { "tabId": 1, "action": "left_click", "ref": "ref_4" } }
-                    ]
-                }),
-                cwd,
+                "quixi-workspace",
+                "read_file",
+                &json!({"path":"example.txt"}),
+                root.path(),
             )
             .unwrap();
-        assert_eq!(batch_res["isError"], false);
+        assert_eq!(result["content"][0]["text"], "fixture");
+        assert!(host
+            .call_tool(
+                "memory",
+                "write_file",
+                &json!({"path":"wrong.txt","content":"bad"}),
+                root.path()
+            )
+            .is_err());
+        assert!(!root.path().join("wrong.txt").exists());
+        assert!(host
+            .call_builtin_tool("not_a_tool", &json!({}), root.path())
+            .is_err());
     }
 }
 
@@ -2589,30 +2558,56 @@ mod resource_migration_tests {
     use super::*;
     #[test]
     fn owned_browser_names_migrate_without_changing_external_commands() {
-        let root = std::env::temp_dir().join(format!("quixi-mcp-migration-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let root = std::env::temp_dir().join(format!(
+            "quixi-mcp-migration-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         fs::create_dir_all(&root).unwrap();
         let input = json!({"mcpServers": {
             "previous-browser-name":{"command":"quixi-mcp-builtin","args":["--browser-use"],"env":{"KEEP":"fixture"}},
             "private-external-server":{"command":"external-tool","args":["--custom"],"env":{"KEEP":"external"}}
         }});
-        fs::write(root.join("quixi_desktop_config.json"), serde_json::to_vec(&input).unwrap()).unwrap();
+        fs::write(
+            root.join("quixi_desktop_config.json"),
+            serde_json::to_vec(&input).unwrap(),
+        )
+        .unwrap();
         let host = McpHost::new_with_data_dir(&root);
         let cfg = host.read_config();
         assert!(!cfg.mcp_servers.contains_key("previous-browser-name"));
         assert_eq!(cfg.mcp_servers["quixi-in-chrome"].env["KEEP"], "fixture");
-        assert_eq!(cfg.mcp_servers["private-external-server"].command, "external-tool");
-        assert_eq!(cfg.mcp_servers["private-external-server"].env["KEEP"], "external");
+        assert_eq!(
+            cfg.mcp_servers["private-external-server"].command,
+            "external-tool"
+        );
+        assert_eq!(
+            cfg.mcp_servers["private-external-server"].env["KEEP"],
+            "external"
+        );
         fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn colliding_browser_names_keep_both_configurations_after_restart() {
-        let root = std::env::temp_dir().join(format!("quixi-mcp-collision-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let root = std::env::temp_dir().join(format!(
+            "quixi-mcp-collision-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         fs::create_dir_all(&root).unwrap();
         let input = json!({"mcpServers": {
             "previous-browser-name":{"command":"quixi-mcp-builtin","args":["--browser-use"],"env":{"KEEP":"old"}},
             "quixi-in-chrome":{"command":"quixi-mcp-builtin","args":["--browser-use"],"env":{"KEEP":"current"}}
         }});
-        fs::write(root.join("quixi_desktop_config.json"), serde_json::to_vec(&input).unwrap()).unwrap();
+        fs::write(
+            root.join("quixi_desktop_config.json"),
+            serde_json::to_vec(&input).unwrap(),
+        )
+        .unwrap();
         for _ in 0..2 {
             let host = McpHost::new_with_data_dir(&root);
             let cfg = host.read_config();
@@ -2624,14 +2619,31 @@ mod resource_migration_tests {
     }
     #[test]
     fn earlier_memory_notes_survive_the_current_filename() {
-        let root = std::env::temp_dir().join(format!("quixi-memory-migration-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let root = std::env::temp_dir().join(format!(
+            "quixi-memory-migration-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         fs::create_dir_all(root.join("memory")).unwrap();
         let previous = root.join("memory/previous-notes.md");
         fs::write(&previous, "KEEP-OLDER-NOTES").unwrap();
         let host = McpHost::new_with_data_dir(&root);
-        let recalled = host.call_tool("memory", "recall_memory", &json!({}), &root).unwrap();
-        assert!(recalled["content"][0]["text"].as_str().unwrap().contains("KEEP-OLDER-NOTES"));
-        host.call_tool("memory", "store_memory", &json!({"key":"new","value":"KEEP-NEW-NOTE"}), &root).unwrap();
+        let recalled = host
+            .call_tool("memory", "recall_memory", &json!({}), &root)
+            .unwrap();
+        assert!(recalled["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("KEEP-OLDER-NOTES"));
+        host.call_tool(
+            "memory",
+            "store_memory",
+            &json!({"key":"new","value":"KEEP-NEW-NOTE"}),
+            &root,
+        )
+        .unwrap();
         let saved = fs::read_to_string(root.join("memory/MEMORY.md")).unwrap();
         assert!(saved.contains("KEEP-OLDER-NOTES") && saved.contains("KEEP-NEW-NOTE"));
         assert_eq!(fs::read_to_string(previous).unwrap(), "KEEP-OLDER-NOTES");

@@ -2104,3 +2104,24 @@ dialog:focus {
 .schedule-detail{display:block;margin-top:4px}
 
 .subagent-panel{border:1px solid var(--border);border-radius:12px;padding:12px 16px;margin:16px 0}.subagent-panel>summary{cursor:pointer;font-size:14px}.subagent-row{display:flex;align-items:center;gap:12px;padding:12px 0;border-top:1px solid var(--border);margin-top:10px}.subagent-row p{margin:5px 0}.subagent-history pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:360px;overflow:auto;font-size:12px}.subagent-history details{margin:12px 0}
+
+.mcp-connections { display: grid; gap: 14px; }
+.mcp-connection { border: 1px solid var(--line); border-radius: 14px; padding: 18px 20px; }
+.mcp-heading { display: flex; align-items: center; gap: 12px; }
+.mcp-heading h3 { margin: 0; overflow-wrap: anywhere; }
+.mcp-connection p { margin: 10px 0 0; overflow-wrap: anywhere; }
+.mcp-controls { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
+.mcp-controls button { font-size: 13px; }
+.mcp-connection[data-status="ready"] .mcp-state { color: var(--accent); }
+.mcp-connection[data-status="failed"] .mcp-state, .mcp-connection[data-status="needs_auth"] .mcp-state { color: var(--danger); }
+.mcp-tool-results { margin-top: 16px; }
+.mcp-tool { border-top: 1px solid var(--line); padding: 12px 0; }
+.mcp-tool summary { cursor: pointer; overflow-wrap: anywhere; font-weight: 600; }
+.mcp-tool p { white-space: pre-wrap; overflow-wrap: anywhere; }
+.mcp-schema { font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 420px; overflow: auto; }
+
+.mcp-diagnostics { margin-top: 12px; color: var(--muted); font-size: 13px; }
+.mcp-diagnostics summary { cursor: pointer; }
+.mcp-diagnostics pre { max-height: 200px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.mcp-connections [hidden] { display: none !important; }

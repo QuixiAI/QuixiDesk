@@ -13,3 +13,20 @@ tracing.workspace = true
 quixi-workspace.workspace = true
 quixi-platform.workspace = true
 quixi-proto.workspace = true
+rmcp = { version = "3.8.0", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "reqwest-tls-no-provider", "auth"] }
+jsonschema = { version = "0.45", default-features = false }
+tokio.workspace = true
+tokio-util = "0.7"
+futures-util.workspace = true
+sha2.workspace = true
+uuid.workspace = true
+url.workspace = true
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "json", "stream"] }
+process-wrap = { version = "10", features = ["tokio1", "process-group", "job-object"] }
+
+tempfile = "3"
+async-trait = "0.1"
+aes-gcm = "0.10"
+base64.workspace = true
+keyring = { version = "3.6.3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust", "vendored"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
