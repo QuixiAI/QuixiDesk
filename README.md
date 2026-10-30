@@ -4,7 +4,7 @@
 
 # QuixiDesk
 
-**A Native Rust Desktop Workspace for AI**
+**A Native Rust Desktop Workspace for AI — macOS, Windows & Linux**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-14B8A6.svg)](LICENSE)
 [![Built with Rust](https://img.shields.io/badge/Built%20with-Rust-0F172A?logo=rust)](Cargo.toml)
@@ -14,11 +14,11 @@
 
 ---
 
-**QuixiDesk** is a native Rust (`tao` + `wry`) desktop workspace with **pluggable LLM providers**, **built-in MCP tools**, and a **unified task/chat workspace**. Its native host runs without an Electron or Node.js application runtime.
+**QuixiDesk** is a native Rust (`tao` + `wry`) desktop workspace for **macOS, Windows, and Linux**, with **pluggable LLM providers**, **built-in MCP tools**, and a **unified task/chat workspace**. Its native host runs without an Electron or Node.js application runtime.
 
 ## Screenshots
 
-Current macOS interface, shown with a sample club-planning workspace.
+QuixiDesk 3.6556.9 on macOS, captured from the running app with an isolated demo profile. The fictional Campus Makers Club conversation and model catalog are sample data.
 
 ### Start a task
 
@@ -26,11 +26,19 @@ Current macOS interface, shown with a sample club-planning workspace.
 
 ### Work through a conversation
 
-![QuixiDesk conversation showing compact tool activity and an updated interactive meeting planner](docs/screenshots/quixidesk-conversation.jpg)
+![QuixiDesk conversation with a sample three-part club meeting agenda and project context](docs/screenshots/quixidesk-conversation.jpg)
 
 ### Choose a model
 
-![QuixiDesk model picker in light theme, searching OpenRouter's advertised models](docs/screenshots/quixidesk-models.jpg)
+![QuixiDesk model picker in light theme, with a sample custom-provider catalog, model search, and an option to add unadvertised models](docs/screenshots/quixidesk-models.jpg)
+
+### Keep project context together
+
+![Campus Makers Club project page with its conversation, shared instructions, folder controls, and linked schedule](docs/screenshots/quixidesk-projects.jpg)
+
+### Schedule recurring work
+
+![Weekly schedule editor with instructions, Wednesday afternoon timing, upcoming runs, and project context and permissions](docs/screenshots/quixidesk-schedules.jpg)
 
 ---
 
@@ -54,11 +62,23 @@ The native runtime development and analysis benefited from **[REA](https://githu
 
 Select a workspace folder before sending a file task. **Manual** allows directory listings and file reads, then pauses for approval before changes or commands. **Allow once** approves the displayed action; **Allow file edits** permits edits in that conversation while commands continue to ask. **Auto** permits tool actions without individual approval. Approving an action resumes the current request.
 
-In a project, **Add folder** opens the native folder chooser. **Enter path** also accepts home-folder shortcuts such as `~/Projects/my-project`, paths with spaces, and quoted paths copied from your file manager.
+**Projects** bring instructions, folders, conversations, and related artifacts and schedules together on one page. Tasks started from a project inherit its instructions and selected folder; personal and project drafts stay separate. A conversation without a selected folder has no workspace file tools—choose a folder when it needs to read or change local files.
+
+In a project, **Manage folders → Add folder** opens the native folder chooser on macOS. **Enter path** also accepts home-folder shortcuts such as `~/Projects/my-project`, paths with spaces, and quoted paths copied from your file manager.
+
+**Attachments** support PNG, JPEG, GIF, WebP, and UTF-8 text files: up to 8 files per message, 5 MiB per image, 1 MiB per text file, and 20 MiB combined. Images require a vision-capable model. Loading and failed attachments remain visible; fix or remove failures before sending. PDF and Office document ingestion is not supported. Unsent attachments are held in memory and do not survive an app restart.
+
+**Edit** and **Retry** create a new conversation branch, preserving the original transcript and a link back to it. Stop an active task before branching.
 
 Tool calls and their results appear together in a collapsible activity group. **Stop** cancels pending approvals and preserves any answer text already received. Follow-up requests retain earlier tool results, and artifact revisions can update the existing preview without changing its link.
 
-Use **Find in conversation** (Cmd/Ctrl+F) to highlight matches and move through them with Enter/Shift+Enter or Cmd/Ctrl+G. Screenshot tool results appear as images and are forwarded to vision-capable models through the OpenAI-compatible and OpenAI OAuth tool paths. Fresh screenshot requests capture fresh observations.
+Use **Search** to find conversation titles and messages, project names and instructions, artifact metadata, and schedule names and prompts. Filter by category or include archived conversations. Within a conversation, **Find in conversation** (Cmd/Ctrl+F) highlights matches; Enter/Shift+Enter or Cmd/Ctrl+G moves between them. Screenshot tool results appear as images and are forwarded to vision-capable models through the OpenAI-compatible and OpenAI OAuth tool paths. Fresh screenshot requests capture fresh observations.
+
+**Artifacts** has a searchable, sortable gallery with pinning, preview and source views, duplication, and revision restoration. **Export HTML** saves a local file without overwriting an existing filename; **Continue in chat** lets you refine the artifact. Artifacts are stored locally; cloud publishing and synchronization are not provided.
+
+In **Tools & skills**, use **Add connection** to configure an MCP server through a form, or **Advanced JSON** for direct configuration. Connections can be edited, enabled, disabled, and removed individually. Search installed skills, read their instructions, or choose **Try in a new task** to prepare a prompt with the skill files attached for review before sending.
+
+**Settings → Application & audio** shows the installed version, storage status, keyboard shortcuts, and available audio features. Read-aloud and in-app dictation depend on the system webview's speech services; dictation may require microphone permission and an online service. When in-app recognition is unavailable, use your operating system's dictation in the prompt.
 
 **Stop** terminates running Bash command trees. Commands have a 120-second default timeout; a task can request up to one hour. Manual and Allow file edits modes ask before file access outside the selected workspace, including symlink targets. Auto mode grants broader access; these approvals are not an operating-system sandbox.
 
@@ -66,7 +86,7 @@ Long conversations automatically summarize older provider context near the model
 
 **Subagents** handle bounded parts of a request with their own saved activity. The parent supplies an explicit assignment and receives a short result; child tool chatter stays in the expandable **Subagents** panel. Children inspect files by default. Delegated edits and commands use the conversation's current permissions, and approval cards identify the requesting child. **Stop** cancels the parent and its children. Interrupted children remain visible after restart and are never automatically replayed. See [Subagent design](docs/subagents.md) for limits and provider behavior.
 
-**Schedules** execute while QuixiDesk is open, in the computer’s local time zone. Five-field cron accepts numeric or named weekdays. The app reports missed times and skips catch-up runs; it also skips overlapping runs of the same schedule. **Run now** starts a conversation immediately, and **View last run** opens it. Existing definitions from older builds need to be enabled or saved once to activate automatic dispatch. Manual-mode runs still wait for tool approvals.
+**Schedules** offer daily, weekday, weekly, hourly, and custom five-field cron schedules, with next-run previews in the computer’s local time zone. **Context & permissions** selects the project, folder, model, and approval mode. Automatic runs require QuixiDesk to remain open. The app reports missed times and skips catch-up runs; it also skips overlapping runs of the same schedule. **Run now** starts a conversation immediately without moving the next scheduled occurrence, and **View last run** opens it. Run states distinguish work in progress, pending approval, completion, failure, and interruption. Existing definitions from older builds need to be enabled or saved once to activate automatic dispatch. Manual-mode runs still wait for tool approvals.
 
 Provider credentials are encrypted with AES-256-GCM; the encryption key is held in macOS Keychain, Windows Credential Manager, or the Linux Secret Service. Linux needs an unlocked desktop secret service (such as GNOME Keyring or KWallet with Secret Service support). Existing plaintext provider settings migrate on successful unlock/save. If unlocking or saving fails, the existing file is preserved and the app reports the error. Disposable test profiles use a separate local test key and must not contain production credentials.
 
@@ -205,7 +225,7 @@ There is no MSI or Windows signing/installer workflow yet. Keep the resources di
 
 Native CoreGraphics/AppleScript computer-use integration is macOS-specific. Linux and Windows builds do not currently provide the same native computer-use and folder-picker capabilities. Building the cross-platform shell does not imply full native-feature parity.
 
-The engine opens the source checkout as its default workspace in development. Set `QUIXI_WORKSPACE` to an explicit folder to override it. `QUIXI_RESOURCES_DIR` overrides resource discovery. Normal app data is stored under the OS user's `.quixi` directory; test profiles below use a separate location. Configure a provider in the app after launch; no API credential is required to compile or run the tests.
+`QUIXI_WORKSPACE` overrides the engine's development workspace default, which otherwise uses the source checkout. This does not grant folderless conversations access to that directory: choose a folder in the composer or start a task from a project with a configured folder. `QUIXI_RESOURCES_DIR` overrides resource discovery. Normal app data is stored under the OS user's `.quixi` directory; test profiles below use a separate location. Configure a provider in the app after launch; no API credential is required to compile or run the tests.
 
 ### Tests and disposable account profiles
 
@@ -245,13 +265,13 @@ The original interface has a separate development-only Node.js test suite. Node.
 
 ```sh
 npm ci --prefix tests/ui
-npm test --prefix tests/ui
+node --test tests/ui/*.test.cjs
 python3 scripts/audit-product-assets.py
 ```
 
-The asset audit rejects imported branding and private font bundles and checks the integrity of redistributable artifact libraries and their licenses. The UI tests cover drafts, streaming, tool failures, project context, sandbox attributes, and concurrent updates; they do not replace native desktop or browser security testing.
+The asset audit rejects imported branding and private font bundles and checks the integrity of redistributable artifact libraries and their licenses. The UI tests cover drafts, attachments, conversation branches, streaming, tool failures, project context, search, schedules, MCP connection forms, sandbox attributes, and concurrent updates; they do not replace native desktop or browser security testing.
 
-Schedules can be saved and run manually; automatic dispatch is not currently implemented. The replacement interface currently uses English. Native desktop validation and the full E2E catalog remain separate from the automated regression checks.
+Native desktop validation and the full E2E catalog remain separate from the automated regression checks.
 
 On Linux, after a release build, run real WebKit frame isolation and navigation checks with `python3 scripts/test-linux-ui.py` (requires `xvfb-run`, `dbus-run-session`, and Python 3). It starts only a local fixture server and disposable profile and records its JSON results in a temporary directory. `--output` and `--port` select an evidence directory and unused automation port.
 
