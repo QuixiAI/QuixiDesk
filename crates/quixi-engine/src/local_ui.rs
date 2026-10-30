@@ -139,6 +139,53 @@ impl QuixiEngine {
         }
     }
 
+    pub fn save_space_checked(&self, space: &CoworkSpace) -> Result<(), String> {
+        if space.name.trim().is_empty() || space.name.len() > 240 { return Err("Enter a project name (up to 240 characters).".into()); }
+        if space.id.contains(['/', '\\']) || !space.id.starts_with("space_") { return Err("Invalid project identifier.".into()); }
+        storage::atomic_write(&self.data_dir.join("spaces").join(format!("{}.json",space.id)), &serde_json::to_vec(space).map_err(|e|e.to_string())?).map_err(|e|format!("Project was not saved: {e}"))
+    }
+
+    pub fn duplicate_local_artifact(&self, id: &str) -> Value {
+        let Some(mut artifact) = self.artifacts.read().get(id).cloned() else { return json!({"error":"Artifact not found."}); };
+        let new_id=Uuid::new_v4().to_string();
+        artifact["id"]=json!(new_id); artifact["name"]=json!(format!("{} (copy)",artifact["name"].as_str().unwrap_or("Artifact")));
+        artifact["title"]=artifact["name"].clone(); artifact["versions"]=json!([]); artifact["revision"]=json!(1);
+        artifact["createdAt"]=json!(Utc::now().timestamp_millis()); artifact["updatedAt"]=artifact["createdAt"].clone();
+        let path=self.data_dir.join("artifacts").join(format!("{new_id}.json"));
+        if let Err(e)=storage::atomic_write(&path,&serde_json::to_vec(&artifact).unwrap()) { return json!({"error":format!("Copy was not saved: {e}")}); }
+        self.artifacts.write().insert(new_id,artifact.clone());
+        self.emit_eipc("quixi.web","CoworkArtifacts","onArtifactsChanged",json!({}));
+        artifact
+    }
+
+    pub fn restore_local_artifact(&self, id: &str, revision: u64) -> Value {
+        let Some(artifact)=self.artifacts.read().get(id).cloned() else { return json!({"error":"Artifact not found."}); };
+        let Some(version)=artifact["versions"].as_array().and_then(|v|v.iter().find(|v|v["revision"].as_u64()==Some(revision))) else { return json!({"error":"Revision is no longer available."}); };
+        let (message,error)=self.create_local_artifact(artifact["createdBySessionId"].as_str().unwrap_or_default(),&json!({"id":id,"title":version["title"],"html":version["html"]}));
+        if error { json!({"error":message}) } else { self.artifacts.read().get(id).cloned().unwrap_or(Value::Null) }
+    }
+
+    pub fn export_local_artifact(&self, id: &str, folder: &str) -> Value {
+        use std::io::Write;
+        let Some(artifact)=self.artifacts.read().get(id).cloned() else { return json!({"error":"Artifact not found."}); };
+        let folder=match resolve_folder_path(folder,&dirs::home_dir().unwrap_or_else(std::env::temp_dir)) { Ok(path)=>path,Err(e)=>return json!({"error":e}) };
+        let name:String=artifact["name"].as_str().unwrap_or("artifact").chars().take(80).map(|c| if c.is_alphanumeric() || c=='-' || c=='_' {c} else {'-'}).collect();
+        let name=if name.trim_matches('-').is_empty(){"artifact"}else{name.trim_matches('-')};
+        for suffix in 0..1000 {
+            let file=folder.join(if suffix==0 {format!("{name}.html")}else{format!("{name}-{suffix}.html")});
+            match fs::OpenOptions::new().write(true).create_new(true).open(&file) {
+                Ok(mut out)=>{
+                    let contents=artifact["html"].as_str().unwrap_or_default();
+                    if let Err(e)=out.write_all(contents.as_bytes()).and_then(|_|out.sync_all()) { let _=fs::remove_file(&file);return json!({"error":format!("Export failed: {e}")}); }
+                    return json!({"path":file.to_string_lossy()});
+                },
+                Err(e) if e.kind()==std::io::ErrorKind::AlreadyExists=>continue,
+                Err(e)=>return json!({"error":format!("Export failed: {e}")}),
+            }
+        }
+        json!({"error":"Too many files with this name. Choose another folder."})
+    }
+
     pub fn update_local_artifact(&self, id: &str, key: &str, value: Value) -> bool {
         let mut artifacts = self.artifacts.write();
         let Some(current) = artifacts.get(id) else {
@@ -153,9 +200,9 @@ impl QuixiEngine {
             updated["title"] = value;
         }
         updated["updatedAt"] = json!(Utc::now().timestamp_millis());
-        if fs::write(
-            self.data_dir.join("artifacts").join(format!("{id}.json")),
-            serde_json::to_vec(&updated).unwrap(),
+        if storage::atomic_write(
+            &self.data_dir.join("artifacts").join(format!("{id}.json")),
+            &serde_json::to_vec(&updated).unwrap(),
         )
         .is_err()
         {
@@ -198,8 +245,8 @@ impl QuixiEngine {
                 true,
             );
         }
+        let mut artifacts = self.artifacts.write();
         let existing = {
-            let artifacts = self.artifacts.read();
             if let Some(id) = input["id"].as_str() {
                 match artifacts.get(id) {
                     Some(a) if a["createdBySessionId"] == session_id => Some(a.clone()),
@@ -216,14 +263,23 @@ impl QuixiEngine {
             .map(str::to_owned).unwrap_or_else(|| Uuid::new_v4().to_string());
         let now = Utc::now().timestamp_millis();
         let created = existing.as_ref().and_then(|a| a["createdAt"].as_i64()).unwrap_or(now);
-        let artifact = json!({"id":id,"name":title,"title":title,"description":"Private local HTML preview",
+        let mut artifact = json!({"id":id,"name":title,"title":title,"description":"Private local HTML preview",
             "html":html,"createdAt":created,"updatedAt":now,"createdBySessionType":"cowork",
             "createdBySessionId":session_id,"isStarred":false});
+        let mut versions = existing.as_ref().and_then(|a| a["versions"].as_array()).cloned().unwrap_or_default();
+        if let Some(old) = &existing {
+            versions.push(json!({"revision":old["revision"].as_u64().unwrap_or(1),"html":old["html"],"title":old["title"],"savedAt":old["updatedAt"]}));
+        }
+        if versions.len() > 20 { versions.drain(..versions.len()-20); }
+        artifact["versions"] = json!(versions);
+        artifact["revision"] = json!(existing.as_ref().and_then(|a| a["revision"].as_u64()).unwrap_or(if existing.is_some(){1}else{0}) + 1);
+        artifact["isStarred"] = existing.as_ref().map(|a|a["isStarred"].clone()).unwrap_or(json!(false));
         let path = self.data_dir.join("artifacts").join(format!("{id}.json"));
-        if let Err(err) = fs::write(path, serde_json::to_vec(&artifact).unwrap()) {
+        if let Err(err) = storage::atomic_write(&path, &serde_json::to_vec(&artifact).unwrap()) {
             return (format!("Could not save local artifact: {err}"), true);
         }
-        self.artifacts.write().insert(id.clone(), artifact);
+        artifacts.insert(id.clone(), artifact);
+        drop(artifacts);
         self.emit_eipc(
             "quixi.web",
             "CoworkArtifacts",
@@ -362,6 +418,31 @@ mod tests {
         assert_eq!(reopened.artifacts.read()[&id]["title"], "Meeting budget");
         drop(reopened);
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn artifact_restore_duplicate_and_export_preserve_original_data() {
+        let root=std::env::temp_dir().join(format!("quixi-artifact-actions-{}",Uuid::new_v4()));
+        let engine=QuixiEngine::new_with_data_dir(PathBuf::new(),root.clone());
+        assert!(!engine.create_local_artifact("qa",&json!({"title":"Club","html":"first"})).1);
+        let id=engine.artifacts.read().keys().next().unwrap().clone();
+        assert!(!engine.create_local_artifact("qa",&json!({"id":id,"title":"Club","html":"second"})).1);
+        let restored=engine.restore_local_artifact(&id,1);
+        assert_eq!(restored["html"],"first");assert_eq!(restored["revision"],3);
+        assert_eq!(restored["versions"][1]["html"],"second");
+        assert!(engine.restore_local_artifact(&id,99).get("error").is_some());
+        let copy=engine.duplicate_local_artifact(&id);
+        assert_ne!(copy["id"],id);assert_eq!(copy["revision"],1);assert_eq!(copy["html"],"first");
+        let one=engine.export_local_artifact(&id,root.to_str().unwrap());
+        fs::write(one["path"].as_str().unwrap(),"user changes").unwrap();
+        let two=engine.export_local_artifact(&id,root.to_str().unwrap());
+        assert_ne!(one["path"],two["path"]);
+        assert_eq!(fs::read_to_string(one["path"].as_str().unwrap()).unwrap(),"user changes");
+        assert_eq!(fs::read_to_string(two["path"].as_str().unwrap()).unwrap(),"first");
+        drop(engine);
+        let reopened=QuixiEngine::new_with_data_dir(PathBuf::new(),root.clone());
+        assert_eq!(reopened.artifacts.read()[&id]["revision"],3);
+        drop(reopened);fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

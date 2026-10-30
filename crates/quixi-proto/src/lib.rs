@@ -99,6 +99,8 @@ impl EipcReplyPayload {
 #[serde(rename_all = "camelCase")]
 pub struct LocalAgentSession {
     pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forked_from: Option<SessionForkOrigin>,
     pub cwd: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cli_session_id: Option<String>,
@@ -139,6 +141,8 @@ fn default_perm_mode() -> String {
 #[serde(rename_all = "camelCase")]
 pub struct LocalCodeSession {
     pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forked_from: Option<SessionForkOrigin>,
     pub cwd: String,
     pub origin_cwd: String,
     pub is_running: bool,
@@ -155,6 +159,13 @@ pub struct LocalCodeSession {
     pub title: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionForkOrigin {
+    pub session_id: String,
+    pub message_uuid: String,
 }
 
 /// CoworkSpace record matching `CoworkSpaces` in `index.chunk-CZuIlEEC.js`

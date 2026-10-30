@@ -355,6 +355,22 @@ fn discovery_does_not_launch_without_server_and_protocol_methods_are_rejected() 
 }
 
 #[test]
+fn folderless_mcp_uses_private_process_directory_without_granting_a_workspace() {
+    let fixture=Fixture::new("auto");
+    let sid=fixture.engine.start_agent_session(&json!({"permissionMode":"auto"}));
+    let cwd=fixture.engine.mcp_workspace("");
+    assert!(cwd.starts_with(&fixture.engine.data_dir));assert!(cwd.is_dir());
+    let (output,failed)=fixture.engine.execute_tool_with_approval(&sid,"discover","McpDiscover",&json!({"server":"engine-fixture"}),"","auto",&AtomicBool::new(false));
+    assert!(!failed,"{output}");assert!(output.contains("read_item"));
+    let (output,failed)=fixture.engine.execute_tool_with_approval(&sid,"call","McpCall",&json!({"server":"engine-fixture","tool":"read_item","arguments":{"key":"token"}}),"","auto",&AtomicBool::new(false));
+    assert!(!failed,"{output}");assert!(output.contains("PROJECT TOKEN 42"));
+    assert!(!fixture.engine.mcp_host.ready_tools(&cwd).is_empty());
+    let session=fixture.engine.agent_sessions.read()[&sid].clone();assert_eq!(session.cwd,"");assert!(session.user_selected_folders.is_empty());
+    let (_,failed)=fixture.engine.execute_tool_with_approval(&sid,"read","Read",&json!({"file_path":"Cargo.toml"}),"","auto",&AtomicBool::new(false));assert!(failed);
+    fixture.engine.mcp_host.disconnect_server("engine-fixture").unwrap();
+}
+
+#[test]
 fn external_override_of_builtin_name_cannot_bypass_manual_approval() {
     let fixture = Fixture::new("default");
     fixture

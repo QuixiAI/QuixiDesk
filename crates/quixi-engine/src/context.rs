@@ -13,6 +13,8 @@ pub(crate) fn estimated_tokens(messages: &[Value]) -> usize {
                 content["text"].as_str().unwrap_or_default().len() / 3
                     + content["images"].as_array().map_or(0, |a| a.len() * 2500)
                     + 128
+            } else if let Some(blocks)=m["content"].as_array() {
+                blocks.iter().map(|block| if block["type"]=="image_url" {2500} else {block.to_string().len()/3+32}).sum::<usize>()+32
             } else {
                 text.len() / 3 + 32
             }

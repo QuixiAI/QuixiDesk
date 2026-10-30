@@ -1,0 +1,20 @@
+/* Original schedule editor layout. */
+.schedule-editor { width: min(680px, calc(100vw - 32px)); overflow: hidden; }
+.schedule-editor[open] { display: flex; flex-direction: column; }
+.schedule-editor .dialog-head { flex: 0 0 auto; }
+.schedule-editor .dialog-body { display: grid; gap: 12px; overflow: auto; min-height: 0; padding: 18px 22px; }
+.schedule-editor .dialog-body > p { margin: 0; }
+.schedule-time-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 14px; align-items: start; }
+.schedule-editor [hidden] { display: none !important; }
+.schedule-folder-actions { display: flex; gap: 8px; margin-top: -8px; }
+.schedule-preview { padding: 10px 14px; background: var(--raised, rgba(128,128,128,.07)); border: 1px solid var(--line, rgba(128,128,128,.22)); border-radius: 12px; font-size: 12px; min-height: 40px; }
+.schedule-preview ol { margin: 5px 0; padding-left: 21px; }
+.schedule-preview small { color: var(--muted); }
+.schedule-editor textarea { min-height: 78px; max-height: 160px; }
+.schedule-editor input, .schedule-editor select { min-width: 0; width: 100%; }
+.schedule-context { border: 1px solid var(--line); border-radius: 10px; }
+.schedule-context > summary { padding: 12px 14px; cursor: pointer; font-size: 13px; }
+.schedule-context-summary { display: block; margin: 5px 0 0 17px; color: var(--muted); line-height: 1.5; overflow-wrap: anywhere; }
+.schedule-context-fields { display: grid; gap: 12px; padding: 0 14px 14px; }
+.schedule-context-fields > p { margin: 0; }
+.schedule-editor .schedule-editor-actions { flex: 0 0 auto; margin: 0; padding: 12px 22px; border-top: 1px solid var(--line); background: var(--panel); }

@@ -75,8 +75,13 @@ impl QuixiEngine {
         self.execute_tool_with_approval_and_mcp_identity(session_id,call_id,name,input,cwd,fallback_mode,cancelled,None)
     }
     pub(crate) fn execute_tool_with_approval_and_mcp_identity(&self, session_id:&str,call_id:&str,name:&str,input:&Value,cwd:&str,fallback_mode:&str,cancelled:&AtomicBool,expected:Option<&str>)->(String,bool){
+        if cwd.trim().is_empty() && crate::chat_workflows::needs_workspace(name) {
+            return ("No folder is selected for this conversation. Ask the user to choose a folder before reading files, making edits, or running commands. No action was performed.".into(),true);
+        }
         if let Err(error)=agent_tools::validate_input(name,input) {return (error,true);}
         if cancelled.load(Ordering::SeqCst) {return ("Task stopped. No action performed.".into(),true);}
+        let mcp_workspace=self.mcp_workspace(cwd);
+        let execution_cwd=if matches!(name,agent_tools::TOOL_MCP_CALL|agent_tools::TOOL_MCP_DISCOVER) {mcp_workspace.to_str().unwrap_or(cwd)} else {cwd};
         let mcp_identity=if name==agent_tools::TOOL_MCP_CALL {
             match self.mcp_host.server_identity(input["server"].as_str().unwrap_or_default()) {
                 Ok(identity)=>{if expected.is_some_and(|v|v!=identity){return ("MCP server configuration changed after the tool was advertised. Discover it again before requesting execution.".into(),true);}Some(identity)},Err(error)=>return(format!("MCP server is unavailable: {error}"),true),
@@ -86,7 +91,7 @@ impl QuixiEngine {
         let needs=|mode:&str| agent_tools::requires_approval_with_host(name,input,mode,&self.mcp_host) || (outside&&!matches!(mode,"auto"|"bypassPermissions"));
         let mode=self.current_permission_mode(session_id,fallback_mode);
         if !needs(&mode) {
-            return agent_tools::execute_cancellable_with_mcp_identity(name,input,cwd,&mode,&self.mcp_host,cancelled,mcp_identity.as_deref());
+            return agent_tools::execute_cancellable_with_mcp_identity(name,input,execution_cwd,&mode,&self.mcp_host,cancelled,mcp_identity.as_deref());
         }
         if cancelled.load(Ordering::SeqCst) {return ("Task stopped. No action performed.".into(),true);}
         let request_id=Uuid::new_v4().to_string();
@@ -110,7 +115,7 @@ impl QuixiEngine {
         if outcome!=1 || cancelled.load(Ordering::SeqCst) {
             return ("The action was not approved or the task was stopped. No action was performed. Do not retry it without a new user request.".into(),true);
         }
-        agent_tools::execute_cancellable_with_mcp_identity(name,input,cwd,"auto",&self.mcp_host,cancelled,mcp_identity.as_deref())
+        agent_tools::execute_cancellable_with_mcp_identity(name,input,execution_cwd,"auto",&self.mcp_host,cancelled,mcp_identity.as_deref())
     }
 }
 

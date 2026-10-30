@@ -30,8 +30,17 @@ pub(crate) fn provider_history(transcript: &[Value]) -> Vec<Value> {
                     messages.push(json!({"role":"tool","tool_call_id":id,"content":output,"is_error":is_error}));
                 }
             }
-        } else if message["type"] == "user" && !text.trim().is_empty() {
-            messages.push(json!({"role":"user","content":text}));
+        } else if message["type"] == "user" {
+            let content: Vec<Value> = blocks.iter().filter_map(|block| match block["type"].as_str() {
+                Some("text") => Some(json!({"type":"text","text":block["text"]})),
+                Some("image_url") => Some(json!({"type":"image_url","image_url":block["image_url"]})),
+                _ => None,
+            }).collect();
+            if content.iter().any(|block|block["type"]=="image_url") {
+                messages.push(json!({"role":"user","content":content}));
+            } else if !text.trim().is_empty() {
+                messages.push(json!({"role":"user","content":text}));
+            }
         }
     }
     messages

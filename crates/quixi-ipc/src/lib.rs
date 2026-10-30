@@ -115,7 +115,7 @@ impl EipcRouter {
             &parsed.member,
             &req.args,
         );
-        if (parsed.service == "MCP" || parsed.member.contains("Mcp")) && raw_res["error"].is_string() {
+        if (parsed.service == "MCP" || parsed.member.contains("Mcp") || matches!(parsed.member.as_str(),"sendMessage"|"sendMessageV2"|"forkMessage")) && raw_res["error"].is_string() {
             return EipcReplyPayload::err(raw_res["error"].as_str().unwrap().to_owned());
         }
         let dot_key = format!("{}.{}", parsed.service, parsed.member);
@@ -151,9 +151,10 @@ impl EipcRouter {
             .unwrap_or_default();
         if name.trim().is_empty() { return json!({"error":"An MCP server name is required."}); }
         let cwd = session_cwd.as_deref().or_else(|| if service == "MCP" { args.get(1).and_then(Value::as_str).filter(|s| !s.is_empty()) } else { None })
-            .unwrap_or(quixi_proto::paths::default_workspace_str());
+            .unwrap_or("");
+        let cwd=self.engine.mcp_workspace(cwd);
         if action == "authenticate" {
-            return match self.engine.mcp_host.authenticate_server(name, Path::new(cwd)) {
+            return match self.engine.mcp_host.authenticate_server(name, &cwd) {
                 Ok(result) => result,
                 Err(error) => json!({"error":format!("{error:#}")}),
             };
@@ -161,9 +162,9 @@ impl EipcRouter {
         let result = match action {
             "cancelAuthentication" => self.engine.mcp_host.cancel_authentication_server(name),
             "forgetAuthentication" => self.engine.mcp_host.clear_server_auth(name),
-            "connect" => self.engine.mcp_host.start_connection(name, Path::new(cwd)),
-            "reconnect" => self.engine.mcp_host.reconnect_server(name, Path::new(cwd)),
-            "refresh" => self.engine.mcp_host.refresh_server(name, Path::new(cwd)),
+            "connect" => self.engine.mcp_host.start_connection(name, &cwd),
+            "reconnect" => self.engine.mcp_host.reconnect_server(name, &cwd),
+            "refresh" => self.engine.mcp_host.refresh_server(name, &cwd),
             "disconnect" => self.engine.mcp_host.disconnect_server(name),
             _ => return json!({"error":"Unknown MCP connection action."}),
         };
@@ -268,7 +269,7 @@ impl EipcRouter {
             }),
             ("DesktopInfo", "getDefaultBrowserName") => json!("Safari"),
             ("DesktopInfo", "getSystemInfo") => json!({
-                "app_version": "3.6556.8",
+                "app_version": "3.6556.9",
                 "os_version": "15.0",
                 "os_pretty_name": "macOS Sequoia",
                 "cpu_model": "Apple Silicon",
@@ -527,7 +528,7 @@ impl EipcRouter {
                 "isNestBuild": false,
                 "commitTimestamp": "2026-10-26T00:00:00.000Z",
                 "buildType": "prod",
-                "appVersion": "3.6556.8"
+                "appVersion": env!("CARGO_PKG_VERSION")
             }),
             ("AboutWindow", "ancientJournal") => Value::Null,
 
@@ -636,6 +637,14 @@ impl EipcRouter {
                     .map(|s| json!(s))
                     .unwrap_or_else(|| json!({ "sessionId": session_id }))
             }
+            ("LocalAgentModeSessions" | "LocalSessions", "sendMessageV2") => {
+                let sid=args.first().and_then(Value::as_str).unwrap_or_default();
+                self.engine.send_chat_message(sid,args.get(1).unwrap_or(&Value::Null)).unwrap_or_else(|error|json!({"error":error}))
+            }
+            ("LocalAgentModeSessions" | "LocalSessions", "forkMessage") => {
+                let sid=args.first().and_then(Value::as_str).unwrap_or_default();
+                self.engine.fork_chat_message(sid,args.get(1).unwrap_or(&Value::Null)).unwrap_or_else(|error|json!({"error":error}))
+            }
             ("LocalAgentModeSessions", "sendMessage") => {
                 if args.is_empty() {
                     return Value::Null;
@@ -643,8 +652,7 @@ impl EipcRouter {
                 let sid = args.first().and_then(|v| v.as_str()).unwrap_or("");
                 let msg = args.get(1).and_then(|v| v.as_str()).unwrap_or("");
                 let msg_uuid = args.get(4).and_then(|v| v.as_str());
-                self.engine.send_agent_message_with_uuid(sid, msg, msg_uuid);
-                json!({ "dispatched": true })
+                self.engine.send_chat_message(sid,&json!({"text":msg,"messageUuid":msg_uuid})).unwrap_or_else(|error|json!({"error":error}))
             }
             ("LocalAgentModeSessions", "updateSession") => {
                 let sid = args.first().and_then(|v| v.as_str()).unwrap_or("");
@@ -687,6 +695,8 @@ impl EipcRouter {
                                         .iter()
                                         .filter_map(|x| x.as_str().map(|s| s.to_string()))
                                         .collect();
+                                    sess.cwd=sess.user_selected_folders.first().cloned().unwrap_or_default();
+                                    sess.folder_exists=!sess.cwd.is_empty() && Path::new(&sess.cwd).is_dir();
                                 }
                                 if let Some(projs) = opts
                                     .get("userSelectedProjectUuids")
@@ -941,6 +951,12 @@ impl EipcRouter {
                     if tool.is_empty() {
                         json!({ "content": [{"type":"text","text":"An MCP server and tool name are required."}], "isError": true })
                     } else {
+                        let session_cwd=if args.len()>=4 {
+                            let sid=args[0].as_str().unwrap_or_default();
+                            self.engine.agent_sessions.read().get(sid).map(|session|session.cwd.clone())
+                                .or_else(||self.engine.code_sessions.read().get(sid).map(|session|session.cwd.clone()))
+                        } else {None};
+                        let cwd=self.engine.mcp_workspace(session_cwd.as_deref().unwrap_or_default());
                         let out = self
                             .engine
                             .mcp_host
@@ -948,7 +964,7 @@ impl EipcRouter {
                                 server,
                                 tool,
                                 &tool_args,
-                                Path::new(quixi_proto::paths::default_workspace_str()),
+                                &cwd,
                             )
                             .unwrap_or_else(|e| {
                                 json!({
@@ -1304,8 +1320,7 @@ impl EipcRouter {
                 let sid = args.first().and_then(|v| v.as_str()).unwrap_or("");
                 let msg = args.get(1).and_then(|v| v.as_str()).unwrap_or("");
                 let msg_uuid = args.get(7).and_then(|v| v.as_str());
-                self.engine.send_code_message_with_uuid(sid, msg, msg_uuid);
-                Value::Null
+                self.engine.send_chat_message(sid,&json!({"text":msg,"messageUuid":msg_uuid})).unwrap_or_else(|error|json!({"error":error}))
             }
             ("LocalSessions", "updateSession") => {
                 let sid = args.first().and_then(|v| v.as_str()).unwrap_or("");
@@ -1869,7 +1884,7 @@ impl EipcRouter {
                     links: vec![],
                     projects: vec![],
                 };
-                self.engine.persist_cowork_space(&sp);
+                if let Err(error)=self.engine.save_space_checked(&sp) { return json!({"error":error}); }
                 self.engine
                     .cowork_spaces
                     .write()
@@ -1888,7 +1903,8 @@ impl EipcRouter {
                 let mut updated_sp = None;
                 {
                     let mut spaces = self.engine.cowork_spaces.write();
-                    if let Some(sp) = spaces.get_mut(id) {
+                    if let Some(current) = spaces.get(id) {
+                        let mut sp = current.clone();
                         if let Some(n) = updates.get("name").and_then(|v| v.as_str()) {
                             sp.name = n.to_string();
                         }
@@ -1905,8 +1921,9 @@ impl EipcRouter {
                             sp.color = col.to_string();
                         }
                         sp.updated_at = now_ms;
-                        self.engine.persist_cowork_space(sp);
-                        updated_sp = Some(sp.clone());
+                        if let Err(error)=self.engine.save_space_checked(&sp) { return json!({"error":error}); }
+                        spaces.insert(id.to_owned(),sp.clone());
+                        updated_sp = Some(sp);
                     }
                 }
                 if let Some(sp) = updated_sp {
@@ -1923,14 +1940,14 @@ impl EipcRouter {
             }
             ("CoworkSpaces", "deleteSpace") => {
                 let id = args.first().and_then(|v| v.as_str()).unwrap_or("");
+                if !id.starts_with("space_") || id.contains(['/', '\\']) { return json!({"error":"Invalid project identifier."}); }
+                if !self.engine.cowork_spaces.read().contains_key(id) { return json!(false); }
+                let path=self.engine.data_dir.join("spaces").join(format!("{id}.json"));
+                if let Err(error)=fs::remove_file(&path) {
+                    if error.kind()!=std::io::ErrorKind::NotFound {return json!({"error":format!("Project was not removed: {error}")});}
+                }
                 let removed = self.engine.cowork_spaces.write().remove(id);
-                let _ = fs::remove_file(
-                    self.engine
-                        .data_dir
-                        .join("spaces")
-                        .join(format!("{}.json", id)),
-                );
-                if removed.is_some() || !id.is_empty() {
+                if removed.is_some() {
                     self.engine.emit_eipc(
                         "quixi.web",
                         "CoworkSpaces",
@@ -1947,8 +1964,8 @@ impl EipcRouter {
                 let folder_path = args
                     .get(1)
                     .and_then(|v| v.as_str())
-                    .filter(|s| !s.trim().is_empty())
-                    .unwrap_or(quixi_proto::paths::default_workspace_str());
+                    .filter(|s| !s.trim().is_empty()).unwrap_or("");
+                if !Path::new(folder_path).is_absolute() || !Path::new(folder_path).is_dir() { return json!({"error":"Choose an existing folder."}); }
                 {
                     let mut trusted = self.engine.trusted_folders.write();
                     if !trusted.contains(&folder_path.to_string()) {
@@ -1958,7 +1975,8 @@ impl EipcRouter {
                 let mut updated_sp = None;
                 {
                     let mut spaces = self.engine.cowork_spaces.write();
-                    if let Some(sp) = spaces.get_mut(id) {
+                    if let Some(current) = spaces.get(id) {
+                        let mut sp = current.clone();
                         if !sp.folders.iter().any(|f| f.path == folder_path) {
                             let name = Path::new(folder_path)
                                 .file_name()
@@ -1971,8 +1989,9 @@ impl EipcRouter {
                             });
                         }
                         sp.updated_at = now_ms;
-                        self.engine.persist_cowork_space(sp);
-                        updated_sp = Some(sp.clone());
+                        if let Err(error)=self.engine.save_space_checked(&sp) { return json!({"error":error}); }
+                        spaces.insert(id.to_owned(),sp.clone());
+                        updated_sp = Some(sp);
                     }
                 }
                 if let Some(sp) = updated_sp {
@@ -1992,11 +2011,13 @@ impl EipcRouter {
                 let mut updated_sp = None;
                 {
                     let mut spaces = self.engine.cowork_spaces.write();
-                    if let Some(sp) = spaces.get_mut(id) {
+                    if let Some(current) = spaces.get(id) {
+                        let mut sp = current.clone();
                         sp.folders.retain(|f| f.path != folder_path);
                         sp.updated_at = now_ms;
-                        self.engine.persist_cowork_space(sp);
-                        updated_sp = Some(sp.clone());
+                        if let Err(error)=self.engine.save_space_checked(&sp) { return json!({"error":error}); }
+                        spaces.insert(id.to_owned(),sp.clone());
+                        updated_sp = Some(sp);
                     }
                 }
                 if let Some(sp) = updated_sp {
@@ -2225,6 +2246,9 @@ impl EipcRouter {
                 let list: Vec<Value> = self.engine.artifacts.read().values().cloned().collect();
                 json!(list)
             }
+            ("CoworkArtifacts", "duplicateArtifact") => self.engine.duplicate_local_artifact(args.first().and_then(Value::as_str).unwrap_or_default()),
+            ("CoworkArtifacts", "restoreArtifactVersion") => self.engine.restore_local_artifact(args.first().and_then(Value::as_str).unwrap_or_default(),args.get(1).and_then(Value::as_u64).unwrap_or_default()),
+            ("CoworkArtifacts", "exportArtifactHtml") => self.engine.export_local_artifact(args.first().and_then(Value::as_str).unwrap_or_default(),args.get(1).and_then(Value::as_str).unwrap_or_default()),
             ("CoworkArtifacts", "deleteArtifact") => {
                 let id = args.first().and_then(|v| v.as_str()).unwrap_or("");
                 json!(self.engine.delete_local_artifact(id))
@@ -2242,16 +2266,12 @@ impl EipcRouter {
             ("CoworkScheduledTasks", "runScheduledTask") => {
                 self.engine.run_scheduled_task(args.first().and_then(Value::as_str).unwrap_or_default())
             }
+            ("CoworkScheduledTasks", "previewSchedule") => {
+                self.engine.preview_schedule(args.first().and_then(Value::as_str).unwrap_or_default())
+            }
             ("CoworkScheduledTasks", "getAllScheduledTasks")
             | ("CCDScheduledTasks", "getAllScheduledTasks") => {
-                let list: Vec<Value> = self
-                    .engine
-                    .scheduled_tasks
-                    .read()
-                    .values()
-                    .cloned()
-                    .collect();
-                json!(list)
+                json!(self.engine.scheduled_task_list())
             }
             ("CoworkScheduledTasks", "createScheduledTask")
             | ("CoworkScheduledTasks", "updateScheduledTask")

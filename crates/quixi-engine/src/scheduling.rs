@@ -79,6 +79,100 @@ pub(crate) fn next_run(expression: &str, after: i64) -> Result<i64, String> {
     result.ok_or("This schedule has no future occurrence.".into())
 }
 impl QuixiEngine {
+    pub fn preview_schedule(&self, expression: &str) -> Value {
+        let mut after = Utc::now().timestamp_millis();
+        let mut runs = Vec::new();
+        for _ in 0..3 {
+            match next_run(expression, after) {
+                Ok(next) => {
+                    runs.push(next);
+                    after = next;
+                }
+                Err(error) => return json!({"error":error}),
+            }
+        }
+        json!({"runs":runs,"timezone":chrono::Local::now().format("%Z").to_string(),"missedRunPolicy":"skip"})
+    }
+
+    /// Reconcile run state with its conversation. "Finished" means the turn ended,
+    /// not a guarantee that the model accomplished the user's requested work.
+    pub fn scheduled_task_list(&self) -> Vec<Value> {
+        let _guard = self.schedule_dispatch.lock();
+        let mut tasks = self.scheduled_tasks.write();
+        let sessions = self.agent_sessions.read();
+        for (id, task) in tasks.iter_mut() {
+            if !matches!(
+                task["lastRunStatus"].as_str(),
+                Some("started" | "running" | "waiting_approval")
+            ) {
+                continue;
+            }
+            let sid = task["lastSessionId"].as_str().unwrap_or_default();
+            let (status, message) = match sessions.get(sid) {
+                None => (
+                    "interrupted",
+                    "The run's conversation is unavailable. Run again to retry.".to_string(),
+                ),
+                Some(s) if s.error.is_some() => ("failed", s.error.clone().unwrap_or_default()),
+                Some(s) if s.is_running && !s.pending_tool_permissions.is_empty() => (
+                    "waiting_approval",
+                    "Open the run to approve or decline its requested action.".to_string(),
+                ),
+                Some(s) if s.is_running => ("running", "The conversation is running.".to_string()),
+                Some(s) => {
+                    let result = s
+                        .buffered_messages
+                        .iter()
+                        .rev()
+                        .find(|m| m["type"] == "result");
+                    if result.is_some_and(|r| r["is_error"] == true) {
+                        (
+                            "failed",
+                            "The run reported an error. Open the conversation for details."
+                                .to_string(),
+                        )
+                    } else if result.is_some() {
+                        (
+                            "finished",
+                            "The run finished. Open its conversation to review the result."
+                                .to_string(),
+                        )
+                    } else {
+                        ("interrupted", "The run stopped before a final result. Open the conversation or run again.".to_string())
+                    }
+                }
+            };
+            if task["lastRunStatus"] == status && task["lastRunMessage"] == message {
+                continue;
+            }
+            let mut updated = task.clone();
+            updated["lastRunStatus"] = json!(status);
+            updated["lastRunMessage"] = json!(message);
+            if matches!(status, "finished" | "failed" | "interrupted") {
+                updated["lastFinishedAt"] = json!(Utc::now().timestamp_millis());
+            }
+            let path = self
+                .data_dir
+                .join("scheduled_tasks")
+                .join(format!("{id}.json"));
+            if storage::atomic_write(&path, &serde_json::to_vec_pretty(&updated).unwrap()).is_ok() {
+                *task = updated;
+            }
+        }
+        let mut rows: Vec<_> = tasks
+            .values()
+            .filter(|task| task["status"] != "deleted")
+            .cloned()
+            .collect();
+        rows.sort_by_key(|task| {
+            task["displayName"]
+                .as_str()
+                .unwrap_or_default()
+                .to_lowercase()
+        });
+        rows
+    }
+
     pub(crate) fn start_scheduler(self: &Arc<Self>) {
         if cfg!(test) {
             return;
@@ -96,6 +190,7 @@ impl QuixiEngine {
         self.dispatch_schedule(id, Utc::now().timestamp_millis(), false)
     }
     pub(crate) fn dispatch_due_schedules(self: &Arc<Self>, now: i64) {
+        self.scheduled_task_list();
         let ids: Vec<String> = self
             .scheduled_tasks
             .read()
@@ -142,20 +237,32 @@ impl QuixiEngine {
             Some("Scheduled time was missed while the app was closed or asleep. No catch-up task was run.")
         } else if self.provider_manager.get_public_state()["hasConfiguredProvider"] != true {
             Some("No provider is configured.")
-        } else if !Path::new(task["cwd"].as_str().unwrap_or_default()).is_dir() {
+        } else if task["model"].as_str().is_some_and(|model| {
+            !model.is_empty() && self.provider_manager.resolve_connected_model(Some(model)) != model
+        }) {
+            Some("The selected model is no longer available. Edit the schedule to choose another model.")
+        } else if task["spaceId"]
+            .as_str()
+            .is_some_and(|id| !self.cowork_spaces.read().contains_key(id))
+        {
+            Some("The associated project is unavailable. Edit this schedule to choose another project.")
+        } else if task["cwd"]
+            .as_str()
+            .is_some_and(|cwd| !cwd.is_empty() && !Path::new(cwd).is_dir())
+        {
             Some("Workspace folder is unavailable.")
         } else {
             None
         };
-        if !automatic && problem.is_some() {
-            return json!({"error":problem});
+        // A manual retry must not move the next scheduled occurrence.
+        if automatic {
+            task["nextRunAt"] = next_run(task["cronExpression"].as_str().unwrap_or_default(), now)
+                .map_or(Value::Null, |t| json!(t));
         }
-        task["nextRunAt"] = next_run(task["cronExpression"].as_str().unwrap_or_default(), now)
-            .map_or(Value::Null, |t| json!(t));
         task["lastAttemptAt"] = json!(now);
         let sid = format!("local_{}", Uuid::new_v4());
         if let Some(problem) = problem {
-            task["lastRunStatus"] = json!("skipped");
+            task["lastRunStatus"] = json!(if automatic { "skipped" } else { "blocked" });
             task["lastRunMessage"] = json!(problem);
         } else {
             task["lastSessionId"] = json!(sid);
@@ -172,7 +279,7 @@ impl QuixiEngine {
         }
         self.scheduled_tasks.write().insert(id.into(), task.clone());
         if problem.is_none() {
-            self.start_agent_session(&json!({"sessionId":sid,"title":task["displayName"],"message":task["prompt"],"cwd":task["cwd"],"userSelectedFolders":task["userSelectedFolders"],"model":task["model"],"permissionMode":task["permissionMode"]}));
+            self.start_agent_session(&json!({"sessionId":sid,"title":task["displayName"],"message":task["prompt"],"cwd":task["cwd"],"userSelectedFolders":task["userSelectedFolders"],"spaceId":task["spaceId"],"model":task["model"],"permissionMode":task["permissionMode"]}));
         }
         self.emit_eipc(
             "quixi.web",
@@ -180,7 +287,9 @@ impl QuixiEngine {
             "onScheduledTaskEvent",
             json!({"type":"scheduled_task_updated","scheduledTask":task}),
         );
-        if problem.is_some() {
+        if !automatic && problem.is_some() {
+            json!({"error":problem})
+        } else if problem.is_some() {
             json!({"skipped":true})
         } else {
             json!({"sessionId":sid})
@@ -190,6 +299,114 @@ impl QuixiEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn isolated_engine() -> (Arc<QuixiEngine>, PathBuf) {
+        let root = std::env::temp_dir().join(format!("quixi-schedule-{}", Uuid::new_v4()));
+        let engine = QuixiEngine::new_with_data_dir(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../resources"),
+            root.clone(),
+        );
+        (engine, root)
+    }
+    #[test]
+    fn previews_use_the_same_cron_engine_and_explicit_skip_policy() {
+        let (e, root) = isolated_engine();
+        let preview = e.preview_schedule("0 9 * * 1-5");
+        let runs = preview["runs"].as_array().unwrap();
+        assert_eq!(runs.len(), 3);
+        assert_eq!(preview["missedRunPolicy"], "skip");
+        for pair in runs.windows(2) {
+            assert_eq!(
+                next_run("0 9 * * 1-5", pair[0].as_i64().unwrap()).unwrap(),
+                pair[1].as_i64().unwrap()
+            );
+        }
+        assert!(e.preview_schedule("90 9 * * *")["error"].is_string());
+        drop(e);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn identical_names_create_distinct_tasks_and_folderless_tasks_stay_folderless() {
+        let (e, root) = isolated_engine();
+        let first = e.create_or_update_scheduled_task(
+            &json!({"name":"Briefing", "prompt":"First", "cwd":""}),
+        );
+        let second = e.create_or_update_scheduled_task(
+            &json!({"name":"Briefing", "prompt":"Second", "cwd":""}),
+        );
+        assert_ne!(first["id"], second["id"]);
+        assert_eq!(first["cwd"], "");
+        assert_eq!(first["userSelectedFolders"], json!([]));
+        assert_eq!(
+            e.scheduled_tasks.read()[first["id"].as_str().unwrap()]["prompt"],
+            "First"
+        );
+        assert!(
+            e.create_or_update_scheduled_task(&json!({"name":"Bad", "spaceId":"missing"}))["error"]
+                .is_string()
+        );
+        assert!(e.create_or_update_scheduled_task(
+            &json!({"name":"Bad", "permissionMode":"bypassPermissions"})
+        )["error"]
+            .is_string());
+        drop(e);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn blocked_manual_retry_preserves_next_occurrence_and_persists_reason() {
+        let (e, root) = isolated_engine();
+        let task = e.create_or_update_scheduled_task(&json!({"name":"Manual retry", "cwd":""}));
+        let id = task["id"].as_str().unwrap();
+        let before = task["nextRunAt"].clone();
+        // A removed folder deterministically blocks without sending a provider request.
+        e.scheduled_tasks.write().get_mut(id).unwrap()["cwd"] = json!(root.join("removed-folder"));
+        assert!(e.run_scheduled_task(id)["error"].is_string());
+        let after = e.scheduled_tasks.read()[id].clone();
+        assert_eq!(after["nextRunAt"], before);
+        assert_eq!(after["lastRunStatus"], "blocked");
+        let disk: Value = serde_json::from_slice(
+            &fs::read(root.join("scheduled_tasks").join(format!("{id}.json"))).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(disk["lastRunStatus"], "blocked");
+        assert!(e.agent_sessions.read().is_empty());
+        drop(e);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn schedule_run_state_distinguishes_approval_failure_and_interruption() {
+        let (e, root) = isolated_engine();
+        let task = e.create_or_update_scheduled_task(&json!({"name":"State", "cwd":""}));
+        let id = task["id"].as_str().unwrap();
+        let sid = e.start_agent_session(&json!({"cwd":"", "userSelectedFolders":[], "message":""}));
+        {
+            let mut tasks = e.scheduled_tasks.write();
+            let t = tasks.get_mut(id).unwrap();
+            t["lastSessionId"] = json!(sid);
+            t["lastRunStatus"] = json!("started");
+        }
+        {
+            let mut sessions = e.agent_sessions.write();
+            let s = sessions.get_mut(&sid).unwrap();
+            s.is_running = true;
+            s.pending_tool_permissions = vec![json!({"tool":"Write"})];
+        }
+        assert_eq!(
+            e.scheduled_task_list()[0]["lastRunStatus"],
+            "waiting_approval"
+        );
+        {
+            let mut sessions = e.agent_sessions.write();
+            let s = sessions.get_mut(&sid).unwrap();
+            s.is_running = false;
+            s.error = Some("Provider unavailable".into());
+        }
+        assert_eq!(e.scheduled_task_list()[0]["lastRunStatus"], "failed");
+        e.scheduled_tasks.write().get_mut(id).unwrap()["lastRunStatus"] = json!("started");
+        e.agent_sessions.write().get_mut(&sid).unwrap().error = None;
+        assert_eq!(e.scheduled_task_list()[0]["lastRunStatus"], "interrupted");
+        drop(e);
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn cron_validation_and_next_occurrence() {
         let t = Utc::now().timestamp_millis();

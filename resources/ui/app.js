@@ -177,15 +177,15 @@
     return s?._kind === "code" ? !!s.turnRunning : !!s?.isRunning;
   }
   function draftKey() {
-    return state.id || "new";
+    return state.page === "chat" ? state.id : "new:" + (state.project || "personal");
   }
   function saveDraft() {
-    state.attachmentDrafts.set(draftKey(), state.attachments.slice());
-    const value = document.getElementById("prompt")?.value;
-    if (value !== undefined) {
-      state.drafts.set(draftKey(), value);
-      sessionStorage.setItem("quixi.draft." + draftKey(), value);
-    }
+    const input=document.getElementById("prompt");
+    if(!input)return;
+    const key=input.dataset.draftKey || draftKey();
+    state.attachmentDrafts.set(key,state.attachments.slice());
+    state.drafts.set(key,input.value);
+    sessionStorage.setItem("quixi.draft."+key,input.value);
   }
   function getDraft() {
     return (
@@ -196,10 +196,11 @@
   }
   function currentFolder() {
     return (
-      session()?.cwd || state.folder || project()?.folders?.[0]?.path || ""
+      session() ? (session().userSelectedFolders?.[0] ?? session().cwd ?? "") : (state.folder || "")
     );
   }
   function dialog(title, body, { wide = false } = {}) {
+    const opener = document.activeElement;
     const d = el("dialog", { class: wide ? "wide" : "" });
     d.append(
       el(
@@ -210,7 +211,7 @@
       ),
       el("div", { class: "dialog-body" }, body),
     );
-    d.addEventListener("close", () => d.remove());
+    d.addEventListener("close", () => { d.remove(); if(opener?.isConnected) opener.focus(); });
     d.addEventListener("click", (e) => {
       if (e.target === d) {
         const r = d.getBoundingClientRect();
@@ -294,6 +295,7 @@
     );
     body.addEventListener("submit", async (e) => {
       e.preventDefault();
+      if (saveButton.disabled) return;
       error.textContent = "";
       saveButton.disabled = true;
       try {
@@ -332,6 +334,7 @@
   }
   function navigate(page, id = null, { replace = false } = {}) {
     saveDraft();
+    capabilityUI?.stopAudio();
     page = String(page).replace(/^\//, "");
     if (page.startsWith("chat/")) {
       id = page.slice(5);
@@ -341,12 +344,14 @@
       id = page.slice(7);
       page = "chat";
     }
+    if (page.startsWith("project/")) { id = decodeURIComponent(page.slice(8)); page = "project"; }
     if (page.startsWith("settings/")) page = "settings";
     const pages = [
       "new",
       "chat",
       "search",
       "projects",
+      "project",
       "artifacts",
       "schedules",
       "tools",
@@ -356,19 +361,20 @@
     if (page !== "tools") clearTimeout(toolsPollTimer);
     state.page = page;
     state.id = id;
+    if (page === "project") { state.project=id; state.folder=state.projects.find(p=>p.id===id)?.folders?.[0]?.path||""; }
     if (page === "chat") {
       const opened = session();
       state.project = opened?.spaceId || null;
-      state.folder = opened?.cwd || "";
+      state.folder = opened?.userSelectedFolders?.[0] ?? opened?.cwd ?? "";
     }
     state.attachments = state.attachmentDrafts.get(draftKey())?.slice() || [];
     const path =
-      page === "chat" ? "/chat/" + encodeURIComponent(id) : "/" + page;
+      page === "chat" || page === "project" ? "/" + page + "/" + encodeURIComponent(id) : "/" + page;
     if (location.pathname !== path)
       history[replace ? "replaceState" : "pushState"]({}, "", path);
     render();
     if (page === "chat") openTranscript().catch((e) => toast(e.message, true));
-    else if (page === "projects")
+    else if (page === "projects" || page === "project")
       loadProjects()
         .then(() => renderPage())
         .catch((e) => toast(e.message, true));
@@ -468,6 +474,7 @@
             new: "Your workspace",
             search: "Search",
             projects: "Projects",
+            project: project()?.name || "Project",
             artifacts: "Private artifacts",
             schedules: "Schedules",
             tools: "Tools & skills",
@@ -561,11 +568,12 @@
     const handlers = {
       new: chatPage,
       chat: chatPage,
-      search: searchPage,
-      projects: projectsPage,
-      artifacts: artifactsPage,
+      search: workspaceUI.searchPage,
+      projects: workspaceUI.projectsPage,
+      project: workspaceUI.projectPage,
+      artifacts: workspaceUI.artifactsPage,
       schedules: schedulesPage,
-      tools: toolsPage,
+      tools: capabilityUI.renderTools,
       settings: settingsPage,
     };
     handlers[state.page]?.(host);
@@ -642,8 +650,10 @@
             "span",
             { class: "context-label" },
             icon("folder", 14),
-            currentFolder().split(/[\\/]/).filter(Boolean).pop() || "Workspace",
+            currentFolder().split(/[\\/]/).filter(Boolean).pop() || "No folder selected",
           ),
+          project() ? button(project().name, () => navigate("project", project().id), "quiet project-chip", "projects") : null,
+          s.forkedFrom ? button("Original conversation",()=>navigate("chat",s.forkedFrom.sessionId),"quiet") : null,
           button("Find in conversation", () => openConversationFind(), "quiet", "search"),
           button("Files & context", () => contextDrawer(), "quiet"),
           ib("Task actions", "more", () => sessionMenu(s)),
@@ -724,6 +734,8 @@
     const s = session();
     const ta = el("textarea", {
       id: "prompt",
+      "data-draft-key": draftKey(),
+      disabled: pendingSubmissions.has(draftKey()),
       placeholder: running(s)
         ? "Write a follow-up while this task runs…"
         : "Write your prompt to QuixiDesk",
@@ -742,24 +754,16 @@
       type: "file",
       multiple: true,
       id: "attachment-input",
+      disabled: pendingSubmissions.has(draftKey()),
       class: "hidden",
-      accept:
-        ".txt,.md,.json,.csv,.log,.html,.js,.ts,.tsx,.jsx,.rs,.py,.css,.toml,.yaml,.yml,.xml,.sql,.sh",
-      onChange: async (e) => {
-        for (const file of e.target.files) {
-          if (file.size > 1_000_000) {
-            toast(file.name + " exceeds the 1 MB attachment limit.", true);
-            continue;
-          }
-          const text = await file.text();
-          if (text.includes("\u0000")) {
-            toast(file.name + " is not a supported text attachment.", true);
-            continue;
-          }
-          state.attachments.push({ name: file.name, text });
-        }
-        renderChips();
-        e.target.value = "";
+      accept: window.QuixiChat.accept,
+      onChange: (e) => {
+        const key = draftKey();
+        const items = window.QuixiChat.queueFiles(e.target.files, () => {
+          if (draftKey() === key) renderChips();
+        });
+        state.attachments.push(...items);
+        saveDraft(); renderChips(); e.target.value = "";
       },
     });
     const mode = select(
@@ -804,14 +808,15 @@
         el(
           "div",
           { class: "composer-tools" },
-          ib("Attach text files", "plus", () => fileInput.click()),
+          ib("Attach images or text files", "plus", () => fileInput.click()),
+          capabilityUI.dictationControl(ta),
           ib("Add MCP context", "tools", () => mcpContextPicker()),
           button(
             [
               icon("folder", 14),
               currentFolder()
                 ? currentFolder().split(/[\\/]/).filter(Boolean).pop()
-                : "Workspace",
+                : "Choose folder",
             ],
             () => folderDialog(),
             "workspace-switch",
@@ -836,14 +841,18 @@
         el(
           "span",
           { class: "chip" },
-          icon("file", 12),
+          f.preview ? el("img", {src:f.preview,alt:"",class:"attachment-thumbnail"}) : icon("file", 12),
           f.name,
+          f.status === "loading" ? " · Loading…" : null,
+          f.status === "error" ? el("span",{role:"alert"},f.error) : null,
+          f.status === "error" ? button("Retry",()=>window.QuixiChat.retryAttachment(f,renderChips),"quiet") : null,
           f.mcp?.kind === "resource" ? button(f.mcp.subscribed ? "Stop following" : "Follow changes", () => followMcpResource(f, !f.mcp.subscribed), "quiet") : null,
           f.mcp?.stale ? button("Review update", () => refreshMcpAttachment(f), "quiet mcp-stale-context") : null,
           button(
             "×",
             async () => {
               if (f.mcp?.subscribed) await followMcpResource(f, false);
+              window.QuixiChat.cancelAttachment(f);
               const index=state.attachments.indexOf(f);
               if(index>=0)state.attachments.splice(index, 1);
               saveDraft();renderChips();
@@ -855,6 +864,7 @@
     );
   }
   async function folderDialog() {
+    const anchor=document.querySelector(".workspace-switch")?.getBoundingClientRect();
     const current = currentFolder();
     const input = el("input", {
       value: current,
@@ -877,8 +887,11 @@
         {},
         "Tasks can inspect this folder. In Manual mode, QuixiDesk asks before changing files or running commands.",
       ),
-      field("Folder path", input),
       browse,
+      current ? button("Use without a folder",async()=>{
+        const s=session();if(s){const result=await rpc(service(s),"updateSession",[s.sessionId,{userSelectedFolders:[],cwd:"",spaceId:state.project}]);if(result?.error)throw new Error(result.error);await loadSessions();}state.folder="";d.close();renderPage();
+      },"quiet") : null,
+      field("Or enter a folder path", input),
       error,
       el(
         "div",
@@ -895,10 +908,6 @@
               if (!checked.exists)
                 throw new Error("Choose an existing folder.");
               state.folder = checked.path;
-              state.project =
-                state.projects.find((p) =>
-                  p.folders.some((f) => f.path === state.folder),
-                )?.id || null;
               const s = session();
               if (s) {
                 await rpc(service(s), "updateSession", [
@@ -920,12 +929,14 @@
         ),
       ),
     ]);
+    positionPopover(d,anchor);
   }
+  const pendingSubmissions=new Set();
   async function sendPrompt() {
     const input = document.getElementById("prompt");
     if (!input) return;
     const text = input.value.trim();
-    if (!text) return;
+    if (!text && !state.attachments.length) return;
     if (!state.providers?.hasConfiguredProvider) {
       providerDirectory();
       toast("Connect a provider before sending a task.");
@@ -939,58 +950,61 @@
     if (running(session())) return;
     if (state.attachments.some(file => file.mcp?.stale)) { toast("Review the updated MCP context before sending this message.", true); return; }
     const b = document.getElementById("send-button");
+    if (b?.disabled || pendingSubmissions.has(draftKey())) return;
     if (b) b.disabled = true;
+    const originKey=draftKey();
+    const attached=state.attachments.slice();
+    pendingSubmissions.add(originKey);
+    input.disabled=true;
     try {
+      capabilityUI.stopAudio();
+      const attachments=window.QuixiChat.attachmentsForSend(attached);
       let s = session();
-      let message = text;
-      if (state.attachments.length)
-        message +=
-          "\n\nAttached text files:\n" +
-          state.attachments
-            .map((f) => `\n--- ${f.name} ---\n${f.text}`)
-            .join("\n");
       if (!s) {
         const opts = {
-          title: Array.from(text).slice(0, 80).join(""),
+          title: Array.from(text || attached[0]?.name || "New task").slice(0, 80).join(""),
           permissionMode: state.permission,
           spaceId: state.project,
-          userSelectedFolders: currentFolder() ? [currentFolder()] : undefined,
-          cwd: currentFolder() || undefined,
+          userSelectedFolders: currentFolder() ? [currentFolder()] : [],
+          cwd: currentFolder() || "",
         };
         s = await rpc("LocalAgentModeSessions", "start", [opts]);
+        if(!s?.sessionId)throw new Error(s?.error||"Conversation could not be created.");
         s._kind = "task";
         state.sessions.unshift(s);
-        state.id = s.sessionId;
-        state.page = "chat";
-        history.pushState({}, "", "/chat/" + encodeURIComponent(state.id));
       }
       state.stopped.delete(s.sessionId);
       const uuid = crypto.randomUUID();
-      await rpc(service(s), "sendMessage", [
-        s.sessionId,
-        message,
-        null,
-        null,
-        uuid,
-      ]);
-      state.drafts.delete(draftKey());
-      sessionStorage.removeItem("quixi.draft." + draftKey());
-      sessionStorage.removeItem("quixi.draft.new");
-      state.drafts.delete("new");
-      for(const file of state.attachments)if(file.mcp?.subscribed)mcpRequest("subscribeResource",[file.mcp.server,file.mcp.uri,file.mcp.cwd,false]).catch(error=>toast(error.message,true));
-      state.attachments = [];
-      state.attachmentDrafts.delete("new");
-      state.attachmentDrafts.delete(draftKey());
+      await rpc(service(s), "sendMessageV2", [s.sessionId, {text, attachments, messageUuid:uuid}]);
+      const stillHere=document.getElementById("prompt") && draftKey()===originKey;
+      for (const key of [originKey]) {
+        state.drafts.delete(key);state.attachmentDrafts.delete(key);
+        sessionStorage.removeItem("quixi.draft."+key);
+      }
+      for(const file of attached)if(file.mcp?.subscribed)mcpRequest("subscribeResource",[file.mcp.server,file.mcp.uri,file.mcp.cwd,false]).catch(error=>toast(error.message,true));
+      if(stillHere){state.attachments=[];document.getElementById("prompt").value="";}
       s.isRunning = true;
       state.streams.set(s.sessionId, { text: "", thinking: "" });
       await refreshSession(s.sessionId);
-      render();
-      document.getElementById("prompt")?.focus();
+      if(document.getElementById("prompt") && draftKey()===originKey){pendingSubmissions.delete(originKey);navigate("chat",s.sessionId);document.getElementById("prompt")?.focus();}
     } catch (e) {
       toast(e.message, true);
     } finally {
+      pendingSubmissions.delete(originKey);input.disabled=false;
+      if(draftKey()===originKey){const current=document.getElementById("prompt");if(current)current.disabled=false;const file=document.getElementById("attachment-input");if(file)file.disabled=false;}
       if (b) b.disabled = false;
     }
+  }
+  async function forkMessage(s,message,text) {
+    if(running(s)){toast("Stop the current task before creating a branch.",true);return;}
+    const branch=await rpc(service(s),"forkMessage",[s.sessionId,{messageUuid:message.uuid,...(text!==undefined?{text}: {})}]);
+    if(!branch?.sessionId)throw new Error(branch?.error||"Could not create conversation branch.");
+    branch._kind=s._kind;state.sessions.unshift(branch);navigate("chat",branch.sessionId);toast("Created a new branch. Your original conversation is preserved.");
+  }
+  function editMessage(s,message) {
+    formDialog("Edit in a new branch",[{name:"text",label:"Message",multiline:true,value:window.QuixiChat.editableText(message),hint:"The original conversation stays intact. Existing attachments are kept.",required:true}],async(values)=>{
+      if(!values.text.trim())throw new Error("Enter a message.");await forkMessage(s,message,values.text.trim());
+    },{submit:"Send edited message"});
   }
   async function stopTask() {
     const s = session();
@@ -1436,18 +1450,19 @@
       if (id) seen.add(id);
       const blocks = textBlocks(message);
       const texts = blocks
-        .filter((b) => b.type === "text")
+        .filter((b) => b.type === "text" && !b.attachment)
         .map((b) => b.text || "")
         .join("\n");
       const role = message.type === "user" ? "user" : "assistant";
       const tools = blocks.filter(
         (b) => b.type === "tool_use" || b.type === "tool_result",
       );
-      if (texts && role === "user") {
+      if ((texts || window.QuixiChat.transcriptAttachments(message).length) && role === "user") {
         group = null;
         turnKey = id || "message-" + messageIndex;
       }
-      if (texts) {
+      const attachedFiles=window.QuixiChat.transcriptAttachments(message);
+      if (texts || attachedFiles.length) {
         const article = el(
           "article",
           { class: "message " + role },
@@ -1461,6 +1476,7 @@
                 : "QuixiDesk",
           ),
           plainBody(texts),
+          attachedFiles.length ? el("div",{class:"transcript-attachments"},...attachedFiles.map(f=>el("div",{class:"chip"},f.preview?el("img",{src:f.preview,alt:f.name,class:"transcript-image"}):icon("file",14),f.name))) : null,
           el(
             "div",
             { class: "message-actions" },
@@ -1472,6 +1488,9 @@
               },
               "quiet",
             ),
+            role === "assistant" ? capabilityUI.readAloudControl(texts) : null,
+            role === "user" && id ? button("Edit",()=>editMessage(s,message),"quiet") : null,
+            id ? button("Retry",()=>forkMessage(s,message),"quiet") : null,
           ),
         );
         result.push(article);
@@ -1657,149 +1676,6 @@
       action,
     );
   }
-  function searchPage(host) {
-    const input = el("input", {
-      id: "search-input",
-      type: "search",
-      placeholder: "Search conversation titles and contents",
-      "aria-label": "Search conversations",
-    });
-    const results = el("div", { id: "search-results" });
-    const filter = select(
-      [
-        ["all", "All conversations"],
-        ["active", "Active"],
-        ["archived", "Archived"],
-        ["pinned", "Pinned"],
-      ],
-      "all",
-      () => search(),
-    );
-    let timer,
-      sequence = 0;
-    const search = async () => {
-      const q = input.value.trim(),
-        token = ++sequence;
-      let matches = [];
-      try {
-        if (q) {
-          const found = await rpc("LocalAgentModeSessions", "searchSessions", [
-            q,
-            100,
-          ]);
-          matches = state.sessions
-            .filter(
-              (s) =>
-                (found || []).some((r) => r.sessionId === s.sessionId) ||
-                s.title.toLowerCase().includes(q.toLowerCase()),
-            )
-            .map((s) => ({
-              ...s,
-              snippet:
-                (found || []).find((r) => r.sessionId === s.sessionId)
-                  ?.snippet || "",
-            }));
-        } else matches = state.sessions;
-        matches = matches.filter(
-          (s) =>
-            filter.value === "all" ||
-            (filter.value === "archived" && s.isArchived) ||
-            (filter.value === "active" && !s.isArchived) ||
-            (filter.value === "pinned" && s.isStarred),
-        );
-        if (token !== sequence) return;
-        results.replaceChildren(
-          el(
-            "p",
-            { class: "result-count" },
-            `${matches.length} conversation${matches.length === 1 ? "" : "s"}`,
-          ),
-          ...matches.map((s) =>
-            el(
-              "div",
-              { class: "list-row search-result" },
-              el(
-                "div",
-                { class: "grow" },
-                button(
-                  s.title || "Untitled",
-                  () => navigate("chat", s.sessionId),
-                  "subtle-link",
-                ),
-                s.snippet ? el("p", { class: "snippet" }, s.snippet) : null,
-              ),
-              el("small", {}, date(s.lastActivityAt)),
-              ib("Task actions", "more", () => sessionMenu(s)),
-            ),
-          ),
-        );
-        if (!matches.length)
-          results.append(
-            empty("No matches", "Try a different phrase or filter."),
-          );
-      } catch (e) {
-        if (token === sequence)
-          results.replaceChildren(el("p", { class: "error-text" }, e.message));
-      }
-    };
-    input.addEventListener("input", () => {
-      clearTimeout(timer);
-      timer = setTimeout(search, 160);
-    });
-    host.replaceChildren(
-      header(
-        "Find your work",
-        "Search local conversation titles and message text.",
-      ),
-      el("div", { class: "toolbar" }, input, filter),
-      results,
-    );
-    search();
-  }
-  function projectsPage(host) {
-    host.replaceChildren(
-      header(
-        "Projects",
-        "Group related work, folders, and instructions.",
-        button("New project", () => projectEditor(), "primary", "plus"),
-      ),
-    );
-    const cards = el("div", { class: "cards" });
-    for (const p of state.projects)
-      cards.append(
-        el(
-          "article",
-          { class: "card project-card" },
-          el("div", { class: "card-symbol" }, icon("projects", 21)),
-          el("h3", { style: "margin-top:16px" }, p.name),
-          el(
-            "p",
-            {},
-            p.description || "A workspace for related conversations.",
-          ),
-          el(
-            "small",
-            {},
-            `${p.folders?.length || 0} ${p.folders?.length === 1 ? "folder" : "folders"} · ${state.sessions.filter((s) => s.spaceId === p.id).length} ${state.sessions.filter((s) => s.spaceId === p.id).length === 1 ? "conversation" : "conversations"}`,
-          ),
-          el(
-            "div",
-            { class: "card-actions" },
-            button("Open project", () => projectDetail(p)),
-            button("Edit", () => projectEditor(p), "quiet"),
-          ),
-        ),
-      );
-    host.append(
-      state.projects.length
-        ? cards
-        : empty(
-            "A place for your next project",
-            "Add instructions and folders once, then reuse them across tasks.",
-            button("Create project", () => projectEditor(), "primary"),
-          ),
-    );
-  }
   function projectEditor(p) {
     formDialog(
       p ? "Edit project" : "New project",
@@ -1816,17 +1692,19 @@
       ],
       async (values) => {
         if (!values.name.trim()) throw new Error("Enter a project name.");
-        await rpc(
+        const saved = await rpc(
           "CoworkSpaces",
           p ? "updateSpace" : "createSpace",
           p ? [p.id, values] : [values],
         );
+        if (saved?.error || !saved?.id) throw Error(saved?.error || "Project could not be saved.");
         await loadProjects();
-        renderPage();
+        navigate("project", saved.id);
       },
     );
   }
-  function projectDetail(p) {
+  function projectDetail(p) { navigate("project", p.id); }
+  function manageProjectFolders(p) {
     const folderError = el("p", { class: "form-error", role: "alert" });
     const addFolder = async (path) => {
       const check = await api("/api/quixi/workspace/inspect", { path });
@@ -1834,10 +1712,10 @@
       if (p.folders?.some((folder) => folder.path === check.path))
         throw new Error("This folder is already in the project.");
       const added = await rpc("CoworkSpaces", "addFolderToSpace", [p.id, check.path]);
-      if (!added) throw new Error("The folder could not be added. Try again.");
+      if (!added || added.error) throw new Error(added?.error || "The folder could not be added. Try again.");
       await loadProjects();
       d.close();
-      projectDetail(state.projects.find((x) => x.id === p.id));
+      manageProjectFolders(state.projects.find((x) => x.id === p.id));
     };
     const rows = el(
       "div",
@@ -1857,7 +1735,7 @@
               ]);
               await loadProjects();
               d.close();
-              projectDetail(state.projects.find((x) => x.id === p.id));
+              manageProjectFolders(state.projects.find((x) => x.id === p.id));
             },
             "quiet",
           ),
@@ -1909,7 +1787,8 @@
               "Delete project?",
               `Remove “${p.name}”? Conversations and files remain on disk.`,
               async () => {
-                await rpc("CoworkSpaces", "deleteSpace", [p.id]);
+                const result=await rpc("CoworkSpaces", "deleteSpace", [p.id]);
+                if(!result || result.error)throw new Error(result?.error || "Project could not be removed.");
                 if (state.project === p.id) state.project = null;
                 await loadProjects();
                 renderPage();
@@ -1966,115 +1845,7 @@
     } else preview.append(icon("artifacts", 36));
     return preview;
   }
-  function artifactsPage(host) {
-    host.replaceChildren(
-      header(
-        "Private artifacts",
-        "Local HTML previews created during your tasks.",
-      ),
-    );
-    const cards = el("div", { class: "cards" });
-    for (const a of state.artifacts)
-      cards.append(
-        el(
-          "article",
-          { class: "card artifact-card" },
-          artifactThumbnail(a),
-          el("h3", { style: "margin-top:16px" }, a.name || a.title),
-          el("p", {}, a.description || "Private local artifact"),
-          el("small", {}, date(a.updatedAt)),
-          el(
-            "div",
-            { class: "card-actions" },
-            button("Open preview", () => openArtifact(a.id)),
-            button(
-              "Rename",
-              () =>
-                formDialog(
-                  "Rename artifact",
-                  [
-                    {
-                      name: "name",
-                      label: "Name",
-                      value: a.name || a.title,
-                      required: true,
-                    },
-                  ],
-                  async (v) => {
-                    if (
-                      !(await rpc("CoworkArtifacts", "setArtifactName", [
-                        a.id,
-                        v.name,
-                      ]))
-                    )
-                      throw new Error("Rename failed.");
-                    await loadArtifacts();
-                  },
-                ),
-              "quiet",
-            ),
-            button(
-              "Delete",
-              () =>
-                confirmDialog(
-                  "Delete artifact?",
-                  `Permanently remove “${a.name || a.title}”?`,
-                  async () => {
-                    if (
-                      !(await rpc("CoworkArtifacts", "deleteArtifact", [a.id]))
-                    )
-                      throw new Error("Deletion failed.");
-                    await loadArtifacts();
-                  },
-                ),
-              "quiet danger",
-            ),
-          ),
-        ),
-      );
-    host.append(
-      state.artifacts.length
-        ? cards
-        : empty(
-            "Your ideas, made tangible",
-            "Interactive pages and tools you create in a conversation will appear here.",
-            button(
-              "Create your first artifact",
-              () => {
-                navigate("new");
-                document.getElementById("prompt").value =
-                  "Help me create an interactive HTML artifact. Ask me what I would like to build.";
-                saveDraft();
-                document.getElementById("prompt").focus();
-              },
-              "primary",
-              "plus",
-            ),
-          ),
-    );
-  }
-  async function openArtifact(id) {
-    const a = await api("/api/quixi/artifacts/" + encodeURIComponent(id));
-    const frame = el("iframe", {
-      class: "preview-frame",
-      sandbox: "allow-scripts allow-forms",
-      referrerpolicy: "no-referrer",
-      title: a.name || a.title || "Artifact preview",
-    });
-    frame.srcdoc = a.html || "";
-    dialog(
-      a.name || a.title || "Artifact",
-      [
-        el(
-          "p",
-          {},
-          "Private local preview · isolated from the application and its APIs.",
-        ),
-        frame,
-      ],
-      { wide: true },
-    );
-  }
+  async function openArtifact(id) { return workspaceUI.openArtifact(id); }
   async function loadSchedules() {
     try {
       state.schedules =
@@ -2108,8 +1879,9 @@
             "div",
             { class: "grow" },
             el("h3", {}, t.displayName || t.name),
-            el("p", {}, t.cronExpression || t.cron),
-            el("small", { class: "schedule-detail" }, t.enabled && t.dispatchVersion === 1 ? "Next: " + new Date(t.nextRunAt).toLocaleString([], {month:"short",day:"numeric",hour:"numeric",minute:"2-digit"}) : t.enabled ? "Save to activate" : "Paused"),
+            el("p", {}, window.QuixiSchedules.describe(t)),
+            el("small", { class: "schedule-detail" }, window.QuixiSchedules.nextRunLabel(t)),
+            el("small", { class: "schedule-detail" }, window.QuixiSchedules.runStatus(t)),
             t.lastRunMessage ? el("small", { class: "schedule-detail" }, t.lastRunMessage) : null,
           ),
           t.lastSessionId ? button("View last run", async()=>{await loadSessions();navigate("chat",t.lastSessionId);},"quiet") : null,
@@ -2161,44 +1933,7 @@
           ),
     );
   }
-  function scheduleEditor(t) {
-    formDialog(
-      t ? "Edit schedule" : "New schedule",
-      [
-        { name: "name", label: "Name", value: t?.displayName, required: true },
-        {
-          name: "prompt",
-          label: "Prompt",
-          value: t?.prompt,
-          multiline: true,
-          required: true,
-        },
-        {
-          name: "cronExpression",
-          label: "Cron expression",
-          value: t?.cronExpression || "0 9 * * *",
-          hint: "Five cron fields: minute, hour, day, month, weekday (0–7 or SUN–SAT). Uses this computer’s local time.",
-        },
-        {
-          name: "cwd",
-          label: "Workspace folder",
-          value: t?.cwd || currentFolder(),
-          hint: "Leave blank to use the default workspace. Home shortcuts such as ~/Projects are accepted.",
-        },
-      ],
-      async (v) => {
-        if (v.cronExpression.trim().split(/\s+/).length !== 5)
-          throw new Error("Enter a five-field cron expression.");
-        const result = await rpc(
-          "CoworkScheduledTasks",
-          t ? "updateScheduledTask" : "createScheduledTask",
-          [{ ...v, id: t?.id, enabled: t?.enabled ?? true }],
-        );
-        if (result.error) throw new Error(result.error);
-        await loadSchedules();
-      },
-    );
-  }
+  function scheduleEditor(t) { return window.QuixiSchedules.createEditor(workflowContext, t); }
   // Server-originated requests stay outside the transcript until the user acts.
   let mcpInteractionTimer = null, mcpInteractionLoading = false;
   let mcpInteractionRows = [], mcpInteractionDialog = null;
@@ -2640,6 +2375,7 @@
     }
     for (const row of current.values()) row.remove();
     if (!toolsData.servers.length) list.append(el("p", { class: "muted", "data-server": "" }, "No MCP servers are configured."));
+    capabilityUI?.enhanceConnections();
   }
   function showMcpCatalog(name) {
     const search = el("input", { type: "search", placeholder: "Search tool names and descriptions", "aria-label": `Search tools for ${name}` });
@@ -2675,96 +2411,6 @@
     mcpCatalogDialog = view;
     modal.addEventListener("close", () => { if (mcpCatalogDialog === view) mcpCatalogDialog = null; });
     view.update();
-  }
-  function toolsPage(host) {
-    host.replaceChildren(
-      header(
-        "Tools & skills",
-        "Inspect the instructions and tool connections available to your tasks.",
-      ),
-    );
-    host.append(el("h2", {}, "Skills"));
-    const skills = el("div", { class: "cards" });
-    const skillNames = {
-      docx: "Word documents",
-      pdf: "PDF editing",
-      "pdf-reading": "Read PDFs",
-      pptx: "Presentations",
-      xlsx: "Spreadsheets",
-      "frontend-design": "Interface design",
-    };
-    for (const skill of toolsData.skills)
-      skills.append(
-        el(
-          "article",
-          { class: "card skill-card" },
-          el(
-            "div",
-            { class: "skill-heading" },
-            el(
-              "span",
-              { class: "skill-symbol" },
-              icon(skill.name === "frontend-design" ? "code" : "file", 18),
-            ),
-            el(
-              "h3",
-              {},
-              skillNames[skill.name] || skill.displayName || skill.name,
-            ),
-          ),
-          el("p", {}, skill.description),
-          button(
-            "Read instructions",
-            async () => {
-              const files = await rpc(
-                "LocalAgentModeSessions",
-                "getLocalSkillFiles",
-                [skill.skillId],
-              );
-              dialog(
-                skillNames[skill.skillId] || skill.name,
-                (files || []).map((f) =>
-                  el(
-                    "details",
-                    { open: f.path === "SKILL.md" },
-                    el("summary", {}, f.path),
-                    f.path === "SKILL.md"
-                      ? plainBody(
-                          (f.content || "").replace(
-                            /^---\r?\n[\s\S]*?\r?\n---\r?\n/,
-                            "",
-                          ),
-                        )
-                      : el("pre", {}, f.content || ""),
-                  ),
-                ),
-                { wide: true },
-              );
-            },
-            "quiet",
-          ),
-        ),
-      );
-    host.append(
-      skills,
-      el("hr"),
-      el(
-        "div",
-        { class: "row" },
-        el("h2", { class: "grow" }, "MCP connections"),
-        button("Configure connections", () => mcpEditor(), "quiet"),
-      ),
-      el(
-        "p",
-        { class: "muted" },
-        "Ready means the server initialized successfully and its tool catalog was discovered. Connection failures and stale catalogs remain visible.",
-      ),
-    );
-    host.append(
-      el("p", { id: "mcp-load-error", class: "error-text", role: "alert", hidden: !toolsData.error }, toolsData.error),
-      el("div", { id: "mcp-connections", class: "mcp-connections" }),
-    );
-    updateMcpConnections();
   }
   async function mcpEditor() {
     const config = await rpc(
@@ -2908,6 +2554,7 @@
           "Language: English. Use ⌘/Ctrl+N for a new task, ⌘/Ctrl+K to search, and ⌘/Ctrl+, for settings.",
         ),
       );
+      capabilityUI.renderDesktopStatus(content);
     } else if (state.settingsTab === "providers") {
       content.append(
         el("h2", {}, "Model providers"),
@@ -3373,6 +3020,7 @@
       } catch (e) { catalogStatus.textContent = e.message; }
       finally { refresh.disabled = false; }
     }, "quiet");
+    const anchor=document.querySelector(".model-picker-trigger")?.getBoundingClientRect();
     const d = dialog("Choose model", [
       field("Provider", ps),
       query,
@@ -3381,6 +3029,7 @@
       models,
       additions,
     ]);
+    positionPopover(d, anchor);
     function draw() {
       const p = providers.find((x) => x.id === selected) || providers[0];
       models.replaceChildren(
@@ -3768,11 +3417,7 @@
         : "linux";
     try {
       await Promise.all([loadSessions(), loadProjects(), loadProviders()]);
-      const defaults = await rpc(
-        "LocalAgentModeSessions",
-        "getDefaultWorkspaceFolders",
-      );
-      state.folder = defaults?.[0] || "";
+      state.folder = ""; // A new conversation has no implicit access to the source checkout.
       const path = decodeURIComponent(location.pathname.slice(1));
       navigate(path || "new", null, { replace: true });
       pollMcpInteractions();
@@ -3798,7 +3443,7 @@
       e.preventDefault(); stepConversationFind(e.shiftKey ? -1 : 1);
     } else if (command && e.key.toLowerCase() === "n") {
       e.preventDefault();
-      navigate("new");
+      saveDraft();state.project=null;state.folder="";navigate("new");
     } else if (command && e.key.toLowerCase() === "k") {
       e.preventDefault();
       navigate("search");
@@ -3819,5 +3464,21 @@
         })
         .catch(() => {});
   });
+  function positionPopover(d, anchor) {
+    d.classList.add("workflow-popover");
+    function place() {
+      const width=Math.min(450,innerWidth-32),height=d.getBoundingClientRect().height;
+      d.style.left=Math.max(16,Math.min(anchor?.left ?? innerWidth/2-width/2,innerWidth-width-16))+"px";
+      d.style.top=Math.max(16,Math.min(anchor?anchor.top-height-10:80,innerHeight-height-16))+"px";
+    }
+    place();requestAnimationFrame(place);
+    const observer=typeof ResizeObserver!=="undefined"?new ResizeObserver(place):null;
+    observer?.observe(d);window.addEventListener("resize",place);
+    d.addEventListener("close",()=>{observer?.disconnect();window.removeEventListener("resize",place);},{once:true});
+  }
+  const workflowContext={state,el,button,ib,icon,select,field,dialog,formDialog,confirmDialog,toast,api,rpc,copy,navigate,header,empty,date,currentFolder,loadSchedules,loadProjects,loadSessions,loadArtifacts,render,renderPage,saveDraft,renderChips,sessionMenu,projectEditor,manageProjectFolders,scheduleEditor,artifactThumbnail};
+  const workspaceUI=window.QuixiWorkspace.create(workflowContext);
+  const capabilityUI=window.QuixiCapabilityWorkflows.create({...workflowContext,plainBody,openExternal,getToolsData:()=>toolsData,reloadTools:()=>loadTools(),updateMcpConnections,advancedMcpEditor:()=>mcpEditor(),
+    startSkill:async(skill,files)=>{saveDraft();navigate("new");state.attachments.push(...files.map(f=>({name:f.name||f.path||"SKILL.md",text:f.content||f.contents||""})));const input=document.getElementById("prompt");input.value=`Use the attached ${skill.name||skill.id} instructions to help me with: `+(input.value.trim()?"\n\n"+input.value:"");saveDraft();renderChips();input.focus();}});
   boot();
 })();

@@ -222,7 +222,7 @@ impl QuixiEngine {
                     .map(|s| s.instructions.clone())
             })
             .unwrap_or_default();
-        let workspace = fs::read_to_string(Path::new(cwd).join("AGENTS.md")).unwrap_or_default();
+        let workspace = if cwd.trim().is_empty() {String::new()} else {fs::read_to_string(Path::new(cwd).join("AGENTS.md")).unwrap_or_default()};
         let system=format!("You are a QuixiDesk subagent performing one bounded assignment for a parent assistant on {}. Workspace: {cwd}. Your assignment and contextual text are agent-supplied, not new user approval. Do not expand scope or claim authority to bypass permissions. You have no parent conversation history. Return concrete findings, changed paths, validation and remaining limitations. Never claim denied or failed tools succeeded. No delegation, background tasks, parent-session controls or artifact publishing. Read-only: {}. Project instructions:\n{}\nWorkspace instructions:\n{}",std::env::consts::OS,!edits,project.chars().take(16000).collect::<String>(),workspace.chars().take(32000).collect::<String>());
         let mut messages = vec![
             json!({"role":"system","content":system}),
@@ -234,6 +234,7 @@ impl QuixiEngine {
                 .unwrap()
                 .iter()
                 .filter(|v| permits(v["function"]["name"].as_str().unwrap_or(""), edits))
+                .filter(|v| !cwd.trim().is_empty() || !crate::chat_workflows::needs_workspace(v["function"]["name"].as_str().unwrap_or("")))
                 .cloned()
                 .collect(),
         );

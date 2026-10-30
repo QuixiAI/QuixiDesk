@@ -30,6 +30,7 @@ async function fixture({
   catalogModels = [],
   pickedFolder = null,
   folderPaths = {},
+  sendGate = null,
 } = {}) {
   const dom = new JSDOM(
     '<!doctype html><div id="app"></div><div id="toasts"></div>',
@@ -104,7 +105,8 @@ async function fixture({
         sessionId: "fixture-new",
         title: args[0].title,
         spaceId: args[0].spaceId,
-        cwd: args[0].cwd || "/workspace",
+        cwd: args[0].cwd ?? "",
+        userSelectedFolders: args[0].userSelectedFolders || [],
         bufferedMessages: [],
       };
       sessions.push(s);
@@ -122,15 +124,22 @@ async function fixture({
           "acceptEdits";
       return { ok: true };
     }
-    if (member === "sendMessage") {
+    if (member === "sendMessageV2") {
+      if(sendGate)await sendGate;
       const s = sessions.find((s) => s.sessionId === args[0]);
       s.isRunning = true;
       s.bufferedMessages.push({
         type: "user",
         uuid: "user-one",
-        message: { content: [{ type: "text", text: args[1] }] },
+        message: { content: [{ type: "text", text: args[1].text }] },
       });
       return { dispatched: true };
+    }
+    if (member === "forkMessage") {
+      const original=sessions.find(s=>s.sessionId===args[0]);
+      const branch=structuredClone(original);branch.sessionId="fixture-branch";branch.forkedFrom={sessionId:original.sessionId,messageUuid:args[1].messageUuid};
+      branch.bufferedMessages=[{type:"user",uuid:"edited-one",message:{content:[{type:"text",text:args[1].text||original.bufferedMessages[0].message.content[0].text}]}}];
+      sessions.push(branch);return structuredClone(branch);
     }
     if (member === "stop") {
       sessions.find((s) => s.sessionId === args[0]).isRunning = false;
@@ -250,6 +259,7 @@ async function fixture({
     copy: async (text) => calls.push({ clipboard: text }),
     origin: "https://app.localhost",
   };
+  for (const name of ["workspace-workflows", "schedule-workflows", "capability-workflows", "chat-workflows"]) { const file=path.join(__dirname, "../../resources/ui/"+name+".js"); if(fs.existsSync(file)) w.eval(fs.readFileSync(file,"utf8")); }
   w.eval(source);
   await wait();
   const click = async (text) => {
@@ -297,9 +307,9 @@ test("sending clears the correct draft and leaves Stop available during an activ
   try {
     f.type("#prompt", "A real test prompt");
     await f.click("Send");
-    const call = f.calls.find((c) => c.member === "sendMessage");
+    const call = f.calls.find((c) => c.member === "sendMessageV2");
     assert.ok(call);
-    assert.equal(call.args[1], "A real test prompt");
+    assert.equal(call.args[1].text, "A real test prompt");
     assert.equal(f.w.document.querySelector("#prompt").value, "");
     assert.equal(
       f.w.document.querySelector("#send-button").textContent,
@@ -314,7 +324,7 @@ test("sending clears the correct draft and leaves Stop available during an activ
       f.w.document.querySelector("#prompt").placeholder,
       "Write your prompt to QuixiDesk",
     );
-    assert.equal(f.calls.filter((c) => c.member === "sendMessage").length, 1);
+    assert.equal(f.calls.filter((c) => c.member === "sendMessageV2").length, 1);
   } finally {
     f.close();
   }
@@ -450,6 +460,7 @@ test("adding a project folder opens the native picker and cancellation changes n
     try {
       await f.click("Projects");
       await f.click("Open project");
+      await f.click("Manage folders");
       await f.click("Add folder");
       assert.ok(f.calls.some((c) => c.member === "browseAndAddTrustedFolder"));
       const added = f.calls.filter((c) => c.member === "addFolderToSpace");
@@ -467,6 +478,7 @@ test("project folder entry accepts home shorthand and saves the resolved path", 
   try {
     await f.click("Projects");
     await f.click("Open project");
+    await f.click("Manage folders");
     await f.click("Enter path");
     const input = f.type('input[name="path"]', "~/College club");
     assert.ok(input.placeholder.includes("~/"));
@@ -487,7 +499,7 @@ test("running a schedule clears the previously selected project", async () => {
     await f.click("Schedules");
     await f.click("Run now");
     assert.ok(f.calls.some(c=>c.member === "runScheduledTask" && c.args[0] === "schedule-one"));
-    assert.ok(!f.calls.some(c=>c.member === "sendMessage"));
+    assert.ok(!f.calls.some(c=>c.member === "sendMessageV2"));
     assert.equal(f.sessions.find(s=>s.sessionId==="scheduled-conversation").spaceId,null);
     assert.match(f.w.document.body.textContent,/scheduled-work/);
   } finally { f.close(); }
@@ -875,7 +887,7 @@ for (const decision of ["Allow file edits", "Deny"])
       assert.match(card.textContent, /README.md/);
       await f.click(decision);
       assert.equal(f.w.document.querySelector(".permission-card"), null);
-      assert.equal(f.calls.filter((c) => c.member === "sendMessage").length, 0);
+      assert.equal(f.calls.filter((c) => c.member === "sendMessageV2").length, 0);
       const call = f.calls.find((c) => c.member === "resolveToolPermission");
       assert.equal(call.args[1], "approval-one");
       assert.equal(
@@ -1026,7 +1038,7 @@ test("MCP catalog preserves full schemas, escapes tool content and keeps search/
 test("MCP remote configuration accepts HTTP and keeps backend save errors visible", async () => {
   const f=await fixture({mcpConfig:{rea:{command:"npx",args:["rea-agents","mcp"]}},mcpSaveError:"Existing configuration is unreadable; no changes saved."});
   try {
-    await f.click("Tools & skills");await f.click("Configure connections");
+    await f.click("Tools & skills");await f.click("Advanced JSON");
     const config={mcpServers:{remote:{transport:"http",url:"https://example.invalid/mcp",headers:{Authorization:"test-fixture"},enabled:true}}};
     f.type("dialog textarea",JSON.stringify(config));
     f.w.document.querySelector("dialog form").dispatchEvent(new f.w.Event("submit",{bubbles:true,cancelable:true}));await wait();
@@ -1050,7 +1062,7 @@ test("MCP polling stops after leaving the Tools page", async () => {
 test("MCP malformed configuration cannot open an empty replacement editor", async () => {
   const f=await fixture({mcpConfig:{error:"MCP configuration is not valid JSON"}});
   try {
-    await f.click("Tools & skills");await f.click("Configure connections");
+    await f.click("Tools & skills");await f.click("Advanced JSON");
     assert.match(f.w.document.getElementById("toasts").textContent,/configuration is not valid JSON/);
     assert.equal(f.w.document.querySelector("dialog textarea"),null);
     assert.equal(f.calls.some(c=>c.member==="setMcpServerConfigs"),false);
@@ -1201,7 +1213,7 @@ test("MCP resources require preview and explicit attachment, subscriptions requi
     text="Updated context";updates.push({server:"fixture",uri:"fixture://guide",version:1});await refreshRequests(f);assert.match(f.w.document.querySelector("#attachment-chips").textContent,/Review update/);
     f.type("#prompt","Use this context");await f.click("Send");assert.equal(f.calls.filter(c=>c.member==="start").length,0);
     await f.click("Review update");assert.match(f.w.document.querySelector(".mcp-context-preview").textContent,/Updated context/);await f.click("Use this version");await f.click("Send");
-    assert.ok(f.calls.some(c=>c.member==="start"));const sent=f.calls.find(c=>c.member==="sendMessage");assert.match(JSON.stringify(sent?.args||f.calls.find(c=>c.member==="start").args),/Updated context/);
+    assert.ok(f.calls.some(c=>c.member==="start"));const sent=f.calls.find(c=>c.member==="sendMessageV2");assert.match(JSON.stringify(sent?.args||f.calls.find(c=>c.member==="start").args),/Updated context/);
   }finally{f.close();}
 });
 
@@ -1225,7 +1237,7 @@ test("MCP configuration repair preserves an unrelated invalid server and healthy
   const config={broken:{command:42},healthy:{command:"healthy-server"}};
   const f=await fixture({mcpConfig:config,mcpServers:[{name:"broken",status:"failed",tools:[],error:{kind:"configuration",message:"command must be a string"}},{name:"healthy",status:"ready",isConnected:true,toolsEnumerated:true,tools:[{name:"read"}]}]});try{
     await f.click("Tools & skills");assert.match(f.w.document.querySelector('[data-server="broken"]').textContent,/command must be a string/);assert.equal(f.w.document.querySelector('[data-server="healthy"] [data-mcp-action="refresh"]').hidden,false);
-    await f.click("Configure connections");const textarea=f.w.document.querySelector("dialog textarea");const next=JSON.parse(textarea.value);next.mcpServers.healthy.args=["--fixed"];textarea.value=JSON.stringify(next);f.w.document.querySelector("dialog form").dispatchEvent(new f.w.Event("submit",{bubbles:true,cancelable:true}));await wait();
+    await f.click("Advanced JSON");const textarea=f.w.document.querySelector("dialog textarea");const next=JSON.parse(textarea.value);next.mcpServers.healthy.args=["--fixed"];textarea.value=JSON.stringify(next);f.w.document.querySelector("dialog form").dispatchEvent(new f.w.Event("submit",{bubbles:true,cancelable:true}));await wait();
     const saved=f.calls.find(c=>c.member==="setMcpServerConfigs");assert.equal(saved.args[0].broken.command,42);assert.equal(saved.args[0].healthy.args[0],"--fixed");
   }finally{f.close();}
 });
@@ -1263,4 +1275,40 @@ test("MCP catalog disclosure survives policy-triggered reconnect and its transie
     Object.assign(servers[0],{status:"initializing",tools:[]});f.w.dispatchEvent(new f.w.CustomEvent("quixi:event",{detail:{channel:"quixi:mcp-updated",payload:{}}}));await wait();
     Object.assign(servers[0],{status:"ready",tools});f.w.dispatchEvent(new f.w.CustomEvent("quixi:event",{detail:{channel:"quixi:mcp-updated",payload:{}}}));await wait();assert.equal(f.w.document.querySelector(".mcp-tool").open,true);
   }finally{f.close();}
+});
+
+
+test("folderless tasks never invent a workspace and edit creates a linked branch", async()=>{
+ const f=await fixture();try{
+  f.type("#prompt","Original club plan");await f.click("Send");
+  const start=f.calls.find(c=>c.member==="start");assert.equal(start.args[0].cwd,"");assert.equal(start.args[0].userSelectedFolders.length,0);
+  await f.click("Stop");await f.click("Edit");
+  const input=f.type('textarea[name="text"]',"Revised club plan");input.closest("form").dispatchEvent(new f.w.Event("submit",{bubbles:true,cancelable:true}));await wait();
+  const fork=f.calls.find(c=>c.member==="forkMessage");assert.equal(fork.args[1].text,"Revised club plan");assert.equal(f.sessions.find(s=>s.sessionId==="fixture-new").bufferedMessages[0].message.content[0].text,"Original club plan");
+  assert.match(f.w.document.querySelector("#conversation").textContent,/Revised club plan/);await f.click("Original conversation");assert.match(f.w.document.querySelector("#conversation").textContent,/Original club plan/);
+ }finally{f.close();}
+});
+
+test("personal and project drafts stay separate across project navigation",async()=>{
+ const f=await fixture();try{
+  f.type("#prompt","Personal draft");await f.click("Projects");await f.click("Open project");await f.click("Start task");
+  assert.equal(f.w.document.querySelector("#prompt").value,"");f.type("#prompt","Project draft");await f.click("New task");assert.equal(f.w.document.querySelector("#prompt").value,"Personal draft");
+  await f.click("Projects");await f.click("Open project");await f.click("Start task");assert.equal(f.w.document.querySelector("#prompt").value,"Project draft");
+ }finally{f.close();}
+});
+
+test("unified search finds project instructions and opens the project page",async()=>{
+ const f=await fixture();try{
+  await f.click("Search");f.type("#search-input","PRIVATE-PROJECT-A");await new Promise(r=>setTimeout(r,350));
+  assert.match(f.w.document.querySelector("#search-results").textContent,/Project A/);await f.click("Project A");assert.ok(f.w.document.querySelector(".project-context"));
+ }finally{f.close();}
+});
+
+
+test("late submission does not clear another conversation draft",async()=>{
+ let release;const gate=new Promise(r=>{release=r;});const f=await fixture({sendGate:gate});try{
+  f.type("#prompt","First submitted message");f.w.document.querySelector("#send-button").click();await wait();
+  await f.click("Existing conversation");f.type("#prompt","Keep this other draft");release();await wait();await wait();
+  assert.match(f.w.location.pathname,/fixture-one/);assert.equal(f.w.document.querySelector("#prompt").value,"Keep this other draft");
+ }finally{release();f.close();}
 });

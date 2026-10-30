@@ -214,6 +214,18 @@ impl ProviderManager {
 mod responses_tool_tests {
     use super::*;
     #[test]
+    fn attached_image_formats_survive_both_native_adapters() {
+        for mime in ["image/png","image/jpeg","image/gif","image/webp"] {
+            let url=format!("data:{mime};base64,YQ==");
+            let messages=vec![json!({"role":"user","content":[{"type":"text","text":"Describe"},{"type":"image_url","image_url":{"url":url}}]})];
+            let response=responses_tool_payload(&messages,&json!([]),"fixture");
+            assert_eq!(response["input"][0]["content"][1]["image_url"],url);
+            let native=anthropic_payload(&messages,&json!([]),"fixture").unwrap();
+            assert_eq!(native["messages"][0]["content"][1]["source"]["media_type"],mime);
+            assert_eq!(native["messages"][0]["content"][1]["source"]["data"],"YQ==");
+        }
+    }
+    #[test]
     fn retains_reasoning_and_matches_call_results() {
         let reasoning = json!({"type":"reasoning","id":"r1","encrypted_content":"opaque"});
         let call = json!({"type":"function_call","call_id":"c1","name":"Read","arguments":"{\"file_path\":\"a\"}"});

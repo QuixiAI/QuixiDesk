@@ -14,9 +14,12 @@ brand = re.compile(r"anthropic|claude", re.IGNORECASE)
 # identifiers. They are not application names or frontend artwork.
 provider_files = {
     "crates/quixi-engine/src/providers.rs",
+    "crates/quixi-engine/src/provider_tool_anthropic.rs",
     "crates/quixi-netstack/src/lib.rs",
 }
 provider_patterns = {
+    "crates/quixi-engine/src/provider_tool_responses.rs": re.compile(r"anthropic_payload"),
+    "crates/quixi-engine/src/mcp_integration_tests.rs": re.compile(r'"anthropic"|anthropic_'),
     "crates/quixi-engine/src/lib.rs": re.compile(
         r"claude-sonnet-4-6|anthropic-version"
     ),
@@ -37,7 +40,7 @@ for directory in ("resources", "crates", "bins"):
             errors.append(
                 f"{relative}: redistribute no private font bundle; use system fonts"
             )
-        if brand.search(relative):
+        if brand.search(relative) and relative not in provider_files:
             errors.append(f"{relative}: branded product filename")
         if path.suffix == ".skill":
             with ZipFile(path) as archive:
