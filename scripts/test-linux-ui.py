@@ -203,15 +203,10 @@ try:
         ev("document.querySelectorAll('.browser-panel').length===1"),
     )
     click("Close browser")
-    for label, marker in [
-        ("Projects", "Group related work"),
-        ("Artifacts", "Artifacts"),
-        ("Schedules", "Schedules"),
-        ("Tools & skills", "Tools & skills"),
-        ("Settings", "Settings"),
-    ]:
+    for label in ["Projects", "Artifacts", "Schedules", "Tools & skills", "Settings"]:
         click(label)
-        wait("document.body.innerText.includes(" + json.dumps(marker) + ")")
+        # Headings identify the screen; descriptive marketing copy may change.
+        wait("[...document.querySelectorAll('h1')].some(h=>h.textContent.trim()===" + json.dumps(label) + ")")
         check(label + " page renders in native WebKit", True)
     print(json.dumps(results, indent=2))
 finally:
