@@ -512,6 +512,10 @@ summary {
   align-items: center;
   min-width: 0;
 }
+/* Author button display rules must not override the composer running-state gate. */
+.composer-tools button[hidden] {
+  display: none;
+}
 .composer-tools .spacer {
   flex: 1;
 }

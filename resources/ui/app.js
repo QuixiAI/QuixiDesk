@@ -746,6 +746,39 @@
   }
   function composer() {
     const s = session();
+    // Navigation belongs to this composer, never another conversation's draft.
+    let history = null, historyIndex = 0, historyDraft = "";
+    const resetHistory = () => { history = null; };
+    const recallPrompt = (e) => {
+      if (!["ArrowUp", "ArrowDown"].includes(e.key) || e.isComposing ||
+          e.shiftKey || e.ctrlKey || e.altKey || e.metaKey || ta.disabled ||
+          ta.selectionStart !== ta.selectionEnd) return false;
+      const up = e.key === "ArrowUp";
+      if (up ? ta.value.slice(0, ta.selectionStart).includes("\n")
+             : ta.value.slice(ta.selectionEnd).includes("\n")) return false;
+      if (!history) {
+        if (!up) return false;
+        const current = session();
+        const messages = current?._kind === "code"
+          ? state.transcripts.get(current.sessionId) || []
+          : current?.bufferedMessages || [];
+        history = messages.filter(m => m.type === "user").map(m =>
+          textBlocks(m).filter(b => b.type === "text" && !b.attachment)
+            .map(b => b.text || "").join("\n")).filter(text => text.trim());
+        history.push(...(state.pendingMessages.get(current?.sessionId) || [])
+          .map(m => m.text || "").filter(text => text.trim()));
+        historyIndex = history.length;
+        historyDraft = ta.value;
+      }
+      if (!history.length) { resetHistory(); return false; }
+      e.preventDefault();
+      historyIndex = Math.max(0, Math.min(history.length, historyIndex + (up ? -1 : 1)));
+      ta.value = historyIndex === history.length ? historyDraft : history[historyIndex];
+      const caret = up ? 0 : ta.value.length;
+      ta.setSelectionRange(caret, caret);
+      saveDraft();
+      return true;
+    };
     const ta = el("textarea", {
       id: "prompt",
       "data-draft-key": draftKey(),
@@ -756,13 +789,14 @@
       "aria-label": "Write your prompt to QuixiDesk",
       rows: 3,
       value: getDraft(),
-      onInput: () => saveDraft(),
+      onInput: () => { resetHistory(); saveDraft(); },
       onPaste: (event) => {
         if (pendingSubmissions.has(draftKey())) return;
         const clipboard = event.clipboardData;
         const files = window.QuixiChat.clipboardImages(clipboard);
         if (!files.length) return; // Leave ordinary text paste to the browser.
         event.preventDefault();
+        resetHistory();
         const key = draftKey();
         const items = window.QuixiChat.queueFiles(files, () => { if (draftKey() === key) renderChips(); });
         state.attachments.push(...items);
@@ -771,6 +805,7 @@
         saveDraft(); renderChips();
       },
       onKeydown: (e) => {
+        if (recallPrompt(e)) return;
         if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
           e.preventDefault();
           sendPrompt("queue");

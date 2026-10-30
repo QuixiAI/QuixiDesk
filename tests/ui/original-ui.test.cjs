@@ -301,6 +301,45 @@ async function fixture({
   return { w, sessions, projects, calls, click, type, close: () => dom.window.close() };
 }
 
+test("composer arrows recall prompts and restore drafts without stealing editing keys", async () => {
+  const f = await fixture();
+  try {
+    f.sessions[0].bufferedMessages = [
+      {type:"user",message:{content:[{type:"text",text:"First prompt"}]}},
+      {type:"assistant",message:{content:[{type:"text",text:"Not history"}]}},
+      {type:"user",message:{content:[{type:"text",text:"Second prompt"}]}},
+    ];
+    await f.click("Existing conversation");
+    const input = f.w.document.querySelector("#prompt");
+    const key = (name, options={}) => {
+      const e = new f.w.KeyboardEvent("keydown", {key:name,bubbles:true,cancelable:true,...options});
+      input.dispatchEvent(e); return e.defaultPrevented;
+    };
+    f.type("#prompt", "Unsent draft");
+    assert.equal(key("ArrowUp"),true);
+    assert.equal(input.value,"Second prompt");
+    key("ArrowUp"); assert.equal(input.value,"First prompt");
+    key("ArrowUp"); assert.equal(input.value,"First prompt");
+    key("ArrowDown"); assert.equal(input.value,"Second prompt");
+    key("ArrowDown"); assert.equal(input.value,"Unsent draft");
+    f.type("#prompt", "line one\nline two");
+    input.setSelectionRange(input.value.length,input.value.length);
+    assert.equal(key("ArrowUp"),false);
+    input.setSelectionRange(0,0);
+    assert.equal(key("ArrowUp",{isComposing:true}),false);
+    assert.equal(key("ArrowUp",{shiftKey:true}),false);
+    input.setSelectionRange(0,4);
+    assert.equal(key("ArrowUp"),false);
+    input.setSelectionRange(0,0);
+    key("ArrowUp"); assert.equal(input.value,"Second prompt");
+    key("ArrowDown"); assert.equal(input.value,"line one\nline two");
+    await f.click("New task");
+    const fresh = f.w.document.querySelector("#prompt");
+    fresh.dispatchEvent(new f.w.KeyboardEvent("keydown",{key:"ArrowUp",bubbles:true}));
+    assert.equal(fresh.value,"");
+  } finally { f.close(); }
+});
+
 test("unsent drafts survive navigation and provider names are not application branding", async () => {
   const f = await fixture();
   try {
@@ -1377,6 +1416,55 @@ test("search results and open conversations expose direct delete controls", asyn
     await f.click("Delete");
     assert.equal(f.w.document.body.dataset.page, "new");
     assert.equal(f.sessions.length, 0);
+  } finally { f.close(); }
+});
+
+test("composer follow-up controls are visually hidden when idle and track only the selected session", async () => {
+  const f = await fixture();
+  try {
+    // Load real author styles: checking .hidden alone misses button display overrides.
+    const style = f.w.document.createElement("style");
+    style.textContent = fs.readFileSync(path.join(__dirname, "../../resources/ui/app.css"), "utf8");
+    f.w.document.head.append(style);
+    const assertControls = (active) => {
+      for (const id of ["steer-button", "queue-button"]) {
+        const control = f.w.document.getElementById(id);
+        assert.ok(control, id);
+        assert.equal(control.hidden, !active, id + " hidden state");
+        assert.equal(f.w.getComputedStyle(control).display === "none", !active, id + " computed visibility");
+      }
+      assert.equal(f.w.document.getElementById("send-button").textContent, active ? "Stop" : "Send");
+    };
+    const notify = async (session, active, type) => {
+      session.isRunning = active;
+      f.w.dispatchEvent(new f.w.CustomEvent("quixi:event", {
+        detail: {channel: "LocalAgentModeSessions", payload: {sessionId: session.sessionId, type}},
+      }));
+      await new Promise(resolve => setTimeout(resolve, 100));
+    };
+    assertControls(false); // New task.
+    await f.click("Existing conversation");
+    assertControls(false); // Existing idle session.
+    f.type("#prompt", "Start work");
+    await f.click("Send");
+    assertControls(true);
+    await f.click("New task");
+    assertControls(false); // Another session is still running.
+    await notify(f.sessions[0], true, "update");
+    assertControls(false); // Background updates must not expose controls.
+    await f.click("Existing conversation");
+    assertControls(true);
+    await notify(f.sessions[0], false, "close");
+    assertControls(false); // Natural completion without a full composer render.
+    await notify(f.sessions[0], true, "update");
+    assertControls(true);
+    await notify(f.sessions[0], false, "error");
+    assertControls(false);
+    f.type("#prompt", "Restart work");
+    await f.click("Send");
+    assertControls(true);
+    await f.click("Stop");
+    assertControls(false);
   } finally { f.close(); }
 });
 

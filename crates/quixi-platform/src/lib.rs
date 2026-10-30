@@ -327,12 +327,57 @@ impl ComputerUse {
         }]
     }
 
+    /// Query access for this process without prompting or performing a capture.
+    /// A negative preflight cannot distinguish denied from not-yet-requested.
+    /// Automation is target-specific, not a single global permission.
     pub fn get_tcc_permissions() -> TccPermissionsState {
-        TccPermissionsState {
-            accessibility: "granted".to_string(),
-            screen_recording: "granted".to_string(),
-            microphone: "granted".to_string(),
-            automation: "granted".to_string(),
+        let mut state = TccPermissionsState {
+            accessibility: "unknown".to_string(),
+            screen_recording: "unknown".to_string(),
+            microphone: "unknown".to_string(),
+            automation: "unknown".to_string(),
+        };
+        #[cfg(target_os = "macos")]
+        {
+            state.accessibility = Self::preflight_status(unsafe { AXIsProcessTrusted() });
+            state.screen_recording =
+                Self::preflight_status(unsafe { CGPreflightScreenCaptureAccess() });
+        }
+        state
+    }
+
+    fn preflight_status(granted: bool) -> String {
+        if granted { "granted" } else { "not_granted" }.to_string()
+    }
+
+    /// Open the relevant native settings pane only after an explicit request.
+    /// Opening Settings is not consent: return a fresh check, never assumed success.
+    pub fn request_tcc_permission(permission: &str) -> Result<String> {
+        let pane = match permission {
+            "accessibility" => "Privacy_Accessibility",
+            "screen_recording" => "Privacy_ScreenCapture",
+            "microphone" => "Privacy_Microphone",
+            _ => anyhow::bail!("Unsupported permission: {permission}"),
+        };
+        #[cfg(target_os = "macos")]
+        {
+            let status = Command::new("/usr/bin/open")
+                .arg(format!("x-apple.systempreferences:com.apple.preference.security?{pane}"))
+                .status()?;
+            if !status.success() {
+                anyhow::bail!("Could not open macOS privacy settings: {status}");
+            }
+            let state = Self::get_tcc_permissions();
+            Ok(match permission {
+                "accessibility" => state.accessibility,
+                "screen_recording" => state.screen_recording,
+                _ => state.microphone,
+            })
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = pane;
+            anyhow::bail!("Native permission settings are unsupported on this platform")
         }
     }
 
@@ -2059,8 +2104,13 @@ mod tests {
         assert!(status.success());
 
         let tcc = ComputerUse::get_tcc_permissions();
-        assert_eq!(tcc.accessibility, "granted");
-        assert_eq!(tcc.microphone, "granted");
+        assert!(["granted", "not_granted", "unknown"].contains(&tcc.accessibility.as_str()));
+        assert!(["granted", "not_granted", "unknown"].contains(&tcc.screen_recording.as_str()));
+        assert_eq!(tcc.microphone, "unknown");
+        assert_eq!(tcc.automation, "unknown");
+        assert_eq!(ComputerUse::preflight_status(true), "granted");
+        assert_eq!(ComputerUse::preflight_status(false), "not_granted");
+        assert!(ComputerUse::request_tcc_permission("invalid").is_err());
         let displays = ComputerUse::list_displays();
         assert!(!displays.is_empty());
         let apps = ComputerUse::list_installed_apps();

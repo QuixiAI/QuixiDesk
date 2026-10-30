@@ -118,6 +118,13 @@ impl EipcRouter {
         if (parsed.service == "MCP" || parsed.member.contains("Mcp") || matches!(parsed.member.as_str(),"sendMessage"|"sendMessageV2"|"forkMessage")) && raw_res["error"].is_string() {
             return EipcReplyPayload::err(raw_res["error"].as_str().unwrap().to_owned());
         }
+        // Chrome extension failures must reject invoke(), not resolve with a
+        // truthy error object (or be filled in by an exact success schema).
+        if matches!(parsed.service.as_str(), "ChromeExtension" | "ComputerUseTcc") {
+            if let Some(error) = raw_res["error"].as_str() {
+                return EipcReplyPayload::err(error.to_owned());
+            }
+        }
         let dot_key = format!("{}.{}", parsed.service, parsed.member);
         let preserve_null = raw_res.is_null()
             && (!req.args.is_empty()
@@ -2397,24 +2404,38 @@ impl EipcRouter {
             }
             ("ComputerUseTcc", "requestAccessibility")
             | ("ComputerUseTcc", "requestScreenRecording")
-            | ("ComputerUseTcc", "requestMicrophone") => json!("granted"),
-            ("ComputerUseTcc", _) => json!(quixi_platform::ComputerUse::get_tcc_permissions()),
-            ("ChromeExtension", "isInstalled")
-            | ("ChromeExtension", "launchBrowser")
-            | ("ChromeExtension", "restartChrome") => json!(true),
-            ("ChromeExtension", "installExtension") => json!({ "status": "succeeded" }),
-            ("ChromeExtension", "getConnectedExtensions") => {
-                json!(
-                    quixi_platform::browser_state()
-                        .lock()
-                        .unwrap()
-                        .connected_browsers
-                )
+            | ("ComputerUseTcc", "requestMicrophone") => {
+                let permission = match member {
+                    "requestAccessibility" => "accessibility",
+                    "requestScreenRecording" => "screen_recording",
+                    _ => "microphone",
+                };
+                match quixi_platform::ComputerUse::request_tcc_permission(permission) {
+                    Ok(status) => json!(status),
+                    Err(error) => json!({ "error": error.to_string() }),
+                }
             }
-            ("ChromeExtension", "getBrowserActivity") => {
-                quixi_platform::BrowserUse::tabs_context(false)["tabs"].clone()
-            }
-            ("ChromeExtension", _) => json!({ "installed": true, "connected": true }),
+            ("ComputerUseTcc", _) => json!({
+                "error": format!("Unsupported ComputerUseTcc method: {member}")
+            }),
+            // BrowserSessionManager tracks the built-in browser and seeds a
+            // local "Chrome Bridge" entry. Neither that entry nor its tabs are
+            // evidence of an installed/connected external Chrome extension.
+            ("ChromeExtension", "isInstalled") => json!({
+                "error": "ChromeExtension.isInstalled is unsupported: Chrome extension installation detection is not implemented."
+            }),
+            ("ChromeExtension", "launchBrowser")
+            | ("ChromeExtension", "restartChrome")
+            | ("ChromeExtension", "installExtension") => json!({
+                "error": format!("ChromeExtension.{member} is unsupported: external browser and extension lifecycle management is not implemented.")
+            }),
+            ("ChromeExtension", "getConnectedExtensions")
+            | ("ChromeExtension", "getBrowserActivity") => json!({
+                "error": format!("ChromeExtension.{member} is unsupported: no verified Chrome extension connection or activity tracking is available.")
+            }),
+            ("ChromeExtension", _) => json!({
+                "error": format!("Unsupported ChromeExtension method: {member}")
+            }),
 
             // --- LocalPlugins & CustomPlugins ---
             ("LocalPlugins", "getPlugins") => json!(*self.engine.plugins.read()),
@@ -2640,6 +2661,36 @@ mod tests {
         }
         let router = EipcRouter::new(engine.clone());
         (engine, router)
+    }
+
+    #[test]
+    fn native_setup_never_fabricates_success() {
+        let (_engine, router) = make_router();
+        for (service, member) in [
+            ("ChromeExtension", "isInstalled"),
+            ("ChromeExtension", "launchBrowser"),
+            ("ChromeExtension", "restartChrome"),
+            ("ChromeExtension", "installExtension"),
+            ("ChromeExtension", "getConnectedExtensions"),
+            ("ChromeExtension", "getBrowserActivity"),
+            ("ChromeExtension", "unknownMethod"),
+            ("ComputerUseTcc", "unknownMethod"),
+        ] {
+            let reply = router.dispatch(&EipcInvokePayload {
+                channel: format!("$eipc_message$_{}_$_quixi.settings_$_{}_$_{}", EIPC_UUID_MAIN, service, member),
+                args: vec![],
+            });
+            assert!(reply.error.is_some(), "{service}.{member}: {reply:?}");
+            assert!(reply.result.is_none());
+        }
+        let reply = router.dispatch(&EipcInvokePayload {
+            channel: format!("$eipc_message$_{}_$_quixi.settings_$_ComputerUseTcc_$_getState", EIPC_UUID_MAIN),
+            args: vec![],
+        });
+        let state = reply.result.unwrap();
+        assert_eq!(state["microphone"], "unknown");
+        assert_eq!(state["automation"], "unknown");
+        assert!(["granted", "not_granted", "unknown"].contains(&state["accessibility"].as_str().unwrap()));
     }
 
     #[test]
