@@ -94,7 +94,7 @@ echo "[3/5] Copying compiled Rust binaries into Contents/MacOS and Contents/Help
 cp "$TARGET_DIR/QuixiDesk" "$CONTENTS/MacOS/QuixiDesk"
 chmod +x "$CONTENTS/MacOS/QuixiDesk"
 
-for helper in quixi-disclaimer quixi-chrome-native-host quixi-ssh-askpass quixi-guest-daemon quixi-mcp-builtin; do
+for helper in quixi-disclaimer quixi-chrome-native-host quixi-ssh-askpass quixi-guest-daemon quixi-mcp-builtin quixi-mcp-worker; do
     if [ -f "$TARGET_DIR/$helper" ]; then
         cp "$TARGET_DIR/$helper" "$CONTENTS/Helpers/$helper"
         chmod +x "$CONTENTS/Helpers/$helper"
@@ -133,7 +133,7 @@ copy_res() { # copy_res <relative-path>
 
 for res in quixi.icns quixi-logo.svg quixi-mark.svg \
            ui bootstrap bundled-skills \
-           bundled-skills-extracted artifact-libs; do
+           bundled-skills-extracted artifact-libs licenses; do
     copy_res "$res"
 done
 
