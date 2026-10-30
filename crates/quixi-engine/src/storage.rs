@@ -189,6 +189,7 @@ impl QuixiEngine {
             return Err("Invalid conversation ID".into());
         }
         self.cancel_turn(id);
+        self.delete_subagents(id)?;
         let mut agents = self.agent_sessions.write();
         let mut codes = self.code_sessions.write();
         let _writer = self.storage.writer.lock();

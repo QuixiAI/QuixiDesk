@@ -837,8 +837,8 @@ impl ProviderManager {
             onboarding_completed: false,
             active_provider: "openrouter".to_string(),
             active_model: "anthropic/claude-sonnet-4.6".to_string(),
-            subagent_provider: "openrouter".to_string(),
-            subagent_model: "anthropic/claude-sonnet-4.6".to_string(),
+            subagent_provider: String::new(),
+            subagent_model: String::new(),
             providers,
         }
     }
@@ -2995,6 +2995,22 @@ impl ProviderManager {
     where
         F: FnMut(StreamChunk),
     {
+        self.complete_turn_with_tools_for_provider(messages, tools, model_override, None, &mut on_chunk)
+    }
+
+    pub(crate) fn subagent_selection(&self, parent_model: &str) -> (String, Option<String>) {
+        let st = self.state.read();
+        if let Some(p) = st.providers.iter().find(|p| p.id == st.subagent_provider && p.configured && (p.api_format == "openai" || (p.id == "openai" && p.auth_mode == "oauth"))) {
+            if !st.subagent_model.is_empty() && (p.selected_model == st.subagent_model || p.models.iter().any(|m|m.id == st.subagent_model && Self::is_model_available_for_provider(p,m))) {
+                return (st.subagent_model.clone(), Some(p.id.clone()));
+            }
+        }
+        (parent_model.into(), None)
+    }
+
+    pub(crate) fn complete_turn_with_tools_for_provider<F>(
+        &self, messages: &[Value], tools: &Value, model_override: Option<&str>, provider_override: Option<&str>, mut on_chunk: F,
+    ) -> Option<ProviderToolTurn> where F: FnMut(StreamChunk) {
         use std::io::BufReader;
 
         let prepared = crate::tool_media::provider_messages(messages);
@@ -3002,7 +3018,9 @@ impl ProviderManager {
         let resolved_model = self.resolve_connected_model(model_override);
         let (provider_id, provider_name, model_id, base_url, api_format, auth_mode, credential) = {
             let st = self.state.read();
-            let entry = st
+            let entry = if let Some(id) = provider_override {
+                st.providers.iter().find(|p|p.configured && p.id == id)?
+            } else { st
                 .providers
                 .iter()
                 .find(|p| {
@@ -3017,7 +3035,7 @@ impl ProviderManager {
                         .iter()
                         .find(|p| p.id == st.active_provider && p.configured)
                 })
-                .or_else(|| st.providers.iter().find(|p| p.configured))?;
+                .or_else(|| st.providers.iter().find(|p| p.configured))? };
 
             let cred = if entry.auth_mode == "oauth" && !entry.oauth_access_token.is_empty() {
                 entry.oauth_access_token.clone()

@@ -12,6 +12,7 @@ const wait = () => new Promise((resolve) => setTimeout(resolve, 40));
 
 async function fixture({
   artifacts = [],
+  subagents = [],
   providerId = "custom",
   permissions = [],
   schedules = [],
@@ -97,6 +98,8 @@ async function fixture({
       sessions.push(s);
       return structuredClone(s);
     }
+    if (member === "listSubagents") return structuredClone(subagents.map(({messages,prompt,...row}) => row));
+    if (member === "getSubagent") return structuredClone(subagents.find(c=>c.agentId===args[1]));
     if (member === "getToolPermissions") return structuredClone(permissions);
     if (member === "resolveToolPermission") {
       const index = permissions.findIndex((p) => p.requestId === args[1]);
@@ -879,4 +882,25 @@ test("conversation find highlights, navigates, closes and preserves text", async
     await f.click("Next match");assert.match(f.w.document.querySelector('#conversation-find [role=status]').textContent,/2 of 2/);
     await f.click("Close find");assert.equal(f.w.document.querySelectorAll('mark[data-find]').length,0);assert.match(f.w.document.querySelector('#conversation').textContent,/Alpha needle beta needle gamma/);
   }finally{f.close();}
+});
+
+
+test("subagent activity stays collapsed and separate from the parent transcript", async () => {
+  const f = await fixture({subagents:[{agentId:"child-one", title:"Review README", status:"completed", readOnly:true, model:"fixture-model", toolCalls:1, prompt:"Inspect README", messages:[{role:"assistant",content:"PRIVATE CHILD OUTPUT <script>window.owned=true</script>"},{role:"tool",content:"Read token 42"}]}]});
+  try {
+    await f.click("Existing conversation");
+    const panel = f.w.document.querySelector(".subagent-panel");
+    assert.ok(panel);
+    assert.equal(panel.open, false);
+    assert.match(panel.textContent, /completed · Read-only/);
+    assert.doesNotMatch(f.w.document.querySelector("main").textContent, /PRIVATE CHILD OUTPUT/);
+    panel.open = true;
+    await f.click("View activity");
+    const history = f.w.document.querySelector(".subagent-history");
+    assert.match(history.textContent, /PRIVATE CHILD OUTPUT/);
+    assert.match(history.textContent, /Assignment and recorded activity/);
+    assert.equal(history.querySelectorAll("script").length, 0);
+    assert.equal(f.w.owned, undefined);
+    assert.ok(f.calls.some(c=>c.member==="getSubagent" && c.args[0]==="fixture-one" && c.args[1]==="child-one"));
+  } finally { f.close(); }
 });

@@ -24,6 +24,7 @@
     attachmentDrafts: new Map(),
     stopped: new Set(),
     approvals: new Map(),
+    subagents: new Map(),
     collapsed: localStorage.getItem("quixi.sidebar") === "closed",
     settingsTab: "general",
   };
@@ -1020,6 +1021,8 @@
         id,
         (await rpc(service(old), "getToolPermissions", [id])) || [],
       );
+      const children = await rpc(service(old), "listSubagents", [id]);
+      state.subagents.set(id, Array.isArray(children) ? children : []);
       if (old._kind === "code")
         state.transcripts.set(
           id,
@@ -1202,6 +1205,7 @@
     const card = el(
       "section",
       { class: "permission-card", "aria-label": "Permission requested" },
+      request.subagent ? el("p", {class:"hint"}, "Subagent: " + request.subagent.title + " · Approval applies to this conversation") : null,
       el("h3", {}, request.outsideWorkspace ? "Allow access outside this workspace?" : edit ? "Allow file changes?" : "Allow this action?"),
       el(
         "p",
@@ -1519,6 +1523,26 @@
           "Working…",
         ),
       );
+    }
+    const children = state.subagents.get(s.sessionId) || [];
+    if (children.length) {
+      const panel = el("details", {class:"subagent-panel", "data-disclosure":"subagents", open:opened.has("subagents")},
+        el("summary", {}, "Subagents · " + children.length + (children.some(c=>c.status==="running") ? " · Working" : children.some(c=>["failed", "interrupted"].includes(c.status) || c.failedToolCalls > 0) ? " · Needs attention" : children.some(c=>c.status==="cancelled") ? " · Stopped" : " · Complete")));
+      for (const child of children) panel.append(el("div", {class:"subagent-row"},
+        el("div", {class:"grow"}, el("strong", {}, child.title),
+          el("p", {class:"hint"}, [child.status, child.readOnly ? "Read-only" : "Workspace tools", child.model, `${child.toolCalls || 0} tool call${child.toolCalls === 1 ? "" : "s"}`, child.failedToolCalls ? `${child.failedToolCalls} failed` : ""].filter(Boolean).join(" · ")),
+          child.error ? el("p", {class:"error-text"}, child.error) : null),
+        button("View activity", async()=>{
+          const task = await rpc(service(s), "getSubagent", [s.sessionId, child.agentId]);
+          if (!task) throw new Error("Subagent activity is unavailable.");
+          const body = el("div", {class:"subagent-history"}, el("p", {class:"hint"}, "Assignment and recorded activity"), plainBody(task.prompt || ""));
+          for (const message of task.messages || []) {
+            if (message.content) body.append(el("details", {}, el("summary", {}, message.role === "tool" ? (message.is_error ? "Tool failed" : "Tool result") : "Subagent response"), el("pre", {}, typeof message.content === "string" ? message.content : JSON.stringify(message.content))));
+            for (const call of message.tool_calls || []) body.append(el("details", {}, el("summary", {}, call.function.name), el("pre", {}, call.function.arguments)));
+          }
+          dialog(task.title, body);
+        }, "quiet")));
+      result.push(panel);
     }
     for (const request of state.approvals.get(s.sessionId) || [])
       result.push(permissionCard(request, s));

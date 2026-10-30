@@ -326,7 +326,9 @@ fn looks_destructive(command: &str) -> bool {
 /// Validate required arguments before any side effect, including truncated model output.
 pub fn validate_input(name: &str, input: &Value) -> Result<(), String> {
     let schemas = tool_schemas();
+    let task_schema = crate::subagents::schema();
     let schema = schemas.as_array().unwrap().iter()
+        .chain(std::iter::once(&task_schema))
         .find(|s| s["function"]["name"] == name)
         .ok_or_else(|| format!("Unknown tool `{name}`."))?;
     let object = input.as_object().ok_or("Tool arguments must be an object.")?;
@@ -367,6 +369,9 @@ impl ToolResults {
     pub fn is_file_mutation(name: &str) -> bool {
         matches!(name, TOOL_WRITE | TOOL_EDIT)
     }
+    pub fn changes_workspace(name: &str, output: &str, is_error: bool) -> bool {
+        (Self::is_file_mutation(name) && !is_error) || (name == "Task" && serde_json::from_str::<Value>(output).is_ok_and(|v|v["workspaceMayHaveChanged"]==true))
+    }
     fn cacheable(name: &str, input: &Value) -> bool {
         !repeatable_observation(name, input)
     }
@@ -385,7 +390,7 @@ impl ToolResults {
         let out = action();
         // A successful file edit/write changes workspace state, so clear earlier cached Bash/Edit checks
         // while recording this exact mutation so an immediate duplicate in the same batch won't re-run.
-        if Self::is_file_mutation(name) && !out.1 {
+        if Self::changes_workspace(name, &out.0, out.1) {
             self.0.clear();
         }
         self.0.insert(key, out.clone());
@@ -723,6 +728,15 @@ mod regression_tests {
         assert_eq!(results.run("Bash", &check, || panic!("same state must reuse cached result")), ("compile error".into(), true));
         assert!(!results.run("Edit", &json!({"file_path":"src/lib.rs","old_string":"a","new_string":"b"}), || ("Edited src/lib.rs".into(), false)).1);
         assert_eq!(results.run("Bash", &check, || ("compiled cleanly".into(), false)), ("compiled cleanly".into(), false));
+    }
+    #[test]
+    fn failed_child_that_changed_files_invalidates_parent_command_cache() {
+        let mut results = ToolResults::default();
+        let check = json!({"command":"cargo check"});
+        results.run("Bash", &check, || ("old failure".into(), true));
+        results.run("Task", &json!({"title":"Fix build","prompt":"Fix compile errors","allow_edits":true}),
+            || (json!({"status":"failed","workspaceMayHaveChanged":true,"error":"budget reached"}).to_string(), true));
+        assert_eq!(results.run("Bash", &check, || ("fresh check".into(), false)).0, "fresh check");
     }
     #[test]
     fn invalid_arguments_are_rejected_before_execution() {

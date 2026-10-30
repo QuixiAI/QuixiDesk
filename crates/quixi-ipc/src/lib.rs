@@ -458,6 +458,8 @@ impl EipcRouter {
             }
             ("SessionPopouts", "takeRestorablePopouts") => json!([]),
 
+            ("LocalAgentModeSessions" | "LocalSessions", "listSubagents") => self.engine.list_subagents(args.first().and_then(Value::as_str).unwrap_or("")),
+            ("LocalAgentModeSessions" | "LocalSessions", "getSubagent") => self.engine.get_subagent(args.first().and_then(Value::as_str).unwrap_or(""),args.get(1).and_then(Value::as_str).unwrap_or("")),
             // --- LocalAgentModeSessions (Cowork, Skills & 3P Chat) ---
             ("LocalAgentModeSessions", "getAll") => {
                 let mut list: Vec<_> = self

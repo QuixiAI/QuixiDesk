@@ -85,7 +85,7 @@ impl QuixiEngine {
         let signal=Arc::new(AtomicU8::new(0));
         self.pending_approvals.write().insert(request_id.clone(),PendingToolApproval {
             session_id:session_id.into(), decision:signal.clone(),
-            request:json!({"requestId":request_id,"sessionId":session_id,"toolCallId":call_id,"toolName":name,"input":input,"cwd":cwd,"outsideWorkspace":outside}),
+            request:json!({"requestId":request_id,"sessionId":session_id,"toolCallId":call_id,"toolName":name,"input":input,"cwd":cwd,"outsideWorkspace":outside,"subagent":self.subagent_for_call(session_id,call_id)}),
         });
         self.permission_event(session_id,"tool_permission_requested");
         let start=Instant::now();
