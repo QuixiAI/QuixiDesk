@@ -72,11 +72,14 @@ impl QuixiEngine {
 
     pub(crate) fn execute_tool_with_approval(&self, session_id: &str, call_id: &str, name: &str,
         input: &Value, cwd: &str, fallback_mode: &str, cancelled: &AtomicBool) -> (String,bool) {
+        self.execute_tool_with_approval_and_mcp_identity(session_id,call_id,name,input,cwd,fallback_mode,cancelled,None)
+    }
+    pub(crate) fn execute_tool_with_approval_and_mcp_identity(&self, session_id:&str,call_id:&str,name:&str,input:&Value,cwd:&str,fallback_mode:&str,cancelled:&AtomicBool,expected:Option<&str>)->(String,bool){
         if let Err(error)=agent_tools::validate_input(name,input) {return (error,true);}
         if cancelled.load(Ordering::SeqCst) {return ("Task stopped. No action performed.".into(),true);}
         let mcp_identity=if name==agent_tools::TOOL_MCP_CALL {
             match self.mcp_host.server_identity(input["server"].as_str().unwrap_or_default()) {
-                Ok(identity)=>Some(identity),Err(error)=>return(format!("MCP server is unavailable: {error}"),true),
+                Ok(identity)=>{if expected.is_some_and(|v|v!=identity){return ("MCP server configuration changed after the tool was advertised. Discover it again before requesting execution.".into(),true);}Some(identity)},Err(error)=>return(format!("MCP server is unavailable: {error}"),true),
             }
         }else{None};
         let outside=file_access_outside_workspace(name,input,cwd);

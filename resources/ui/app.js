@@ -805,6 +805,7 @@
           "div",
           { class: "composer-tools" },
           ib("Attach text files", "plus", () => fileInput.click()),
+          ib("Add MCP context", "tools", () => mcpContextPicker()),
           button(
             [
               icon("folder", 14),
@@ -837,11 +838,15 @@
           { class: "chip" },
           icon("file", 12),
           f.name,
+          f.mcp?.kind === "resource" ? button(f.mcp.subscribed ? "Stop following" : "Follow changes", () => followMcpResource(f, !f.mcp.subscribed), "quiet") : null,
+          f.mcp?.stale ? button("Review update", () => refreshMcpAttachment(f), "quiet mcp-stale-context") : null,
           button(
             "×",
-            () => {
-              state.attachments.splice(i, 1);
-              renderChips();
+            async () => {
+              if (f.mcp?.subscribed) await followMcpResource(f, false);
+              const index=state.attachments.indexOf(f);
+              if(index>=0)state.attachments.splice(index, 1);
+              saveDraft();renderChips();
             },
             "quiet",
           ),
@@ -932,6 +937,7 @@
       return;
     }
     if (running(session())) return;
+    if (state.attachments.some(file => file.mcp?.stale)) { toast("Review the updated MCP context before sending this message.", true); return; }
     const b = document.getElementById("send-button");
     if (b) b.disabled = true;
     try {
@@ -971,6 +977,7 @@
       sessionStorage.removeItem("quixi.draft." + draftKey());
       sessionStorage.removeItem("quixi.draft.new");
       state.drafts.delete("new");
+      for(const file of state.attachments)if(file.mcp?.subscribed)mcpRequest("subscribeResource",[file.mcp.server,file.mcp.uri,file.mcp.cwd,false]).catch(error=>toast(error.message,true));
       state.attachments = [];
       state.attachmentDrafts.delete("new");
       state.attachmentDrafts.delete(draftKey());
@@ -2192,6 +2199,272 @@
       },
     );
   }
+  // Server-originated requests stay outside the transcript until the user acts.
+  let mcpInteractionTimer = null, mcpInteractionLoading = false;
+  let mcpInteractionRows = [], mcpInteractionDialog = null;
+  const mcpInteractionBusy = new Set();
+  function safeMcpUrl(value) {
+    let url;
+    try { url = new URL(value); } catch { throw new Error("The server supplied an invalid URL."); }
+    if (!["https:", "http:"].includes(url.protocol) || url.username || url.password) throw new Error("Only HTTP or HTTPS links without embedded credentials can be opened.");
+    return url;
+  }
+  function interactionActive(item) { return item.status !== "completed" && Number(item.expiresAt || Infinity) > Date.now(); }
+  async function pollMcpInteractions() {
+    if (mcpInteractionLoading) return;
+    mcpInteractionLoading = true;
+    clearTimeout(mcpInteractionTimer);
+    try {
+      const result = await rpc("MCP", "pendingInteractions", [], "quixi.settings");
+      if (result?.error) throw new Error(result.error);
+      if (Array.isArray(result)) mcpInteractionRows = result;
+      renderMcpInteractions();
+      if (state.attachments.some(f => f.mcp?.subscribed)) await checkMcpResourceUpdates();
+    } catch (error) {
+      const notice = document.getElementById("mcp-interaction-status");
+      if (notice) notice.textContent = "Could not refresh server requests. Retrying…";
+    } finally {
+      mcpInteractionLoading = false;
+      mcpInteractionTimer = setTimeout(pollMcpInteractions, 1500);
+    }
+  }
+  function renderMcpInteractions() {
+    let tray = document.getElementById("mcp-interactions");
+    const active = mcpInteractionRows.filter(interactionActive);
+    const notices=mcpInteractionRows.filter(item=>interactionActive(item)||item.status==="completed");
+    if (!tray && notices.length) {
+      tray = el("aside", { id: "mcp-interactions", class: "mcp-interactions", "aria-label": "MCP server requests" }, el("p", {id:"mcp-interaction-status", role:"status", class:"hint"}));
+      document.body.append(tray);
+    }
+    if (tray) {
+      tray.querySelector("#mcp-interaction-status").textContent = "";
+      const existing = new Map(Array.from(tray.querySelectorAll("[data-request]")).map(n => [n.dataset.request,n]));
+      for (const request of notices) {
+        let row = existing.get(request.id);
+        if (!row) {
+          row = el("section", { class: "mcp-interaction-notice", "data-request": request.id },
+            el("strong", { class: "mcp-request-title" }), el("p", { class: "mcp-request-description" }),
+            button("Review request", () => showMcpInteraction(request.id), "primary"));
+          tray.append(row);
+        }
+        existing.delete(request.id);
+        row.querySelector("strong").textContent = request.server;
+        row.querySelector("button").hidden=request.status==="completed";
+        row.querySelector("p").textContent = request.status === "completed" ? "External step completed. Retry your original action when ready." : request.status === "waiting_external" ? "Waiting for the external step to finish." : "Needs your response to continue.";
+      }
+      for (const row of existing.values()) row.remove();
+      if (!notices.length) { tray.remove(); tray = null; }
+    }
+    if (mcpInteractionDialog) {
+      const current = active.find(item => item.id === mcpInteractionDialog.id);
+      if (!current) { mcpInteractionDialog.ended = true; mcpInteractionDialog.modal.close(); }
+      else mcpInteractionDialog.update(current);
+    }
+  }
+  function interactionFields(schema = {}) {
+    const fields = el("div", { class: "mcp-interaction-fields" });
+    const controls = [];
+    for (const [name, definition] of Object.entries(schema.properties || {})) {
+      const required = (schema.required || []).includes(name);
+      const label = definition.title || name;
+      const choices = definition.enum?.map(value=>({value,label:String(value)})) || definition.oneOf?.map(option=>({value:option.const,label:option.title||String(option.const)}));
+      const multiChoices = definition.items?.enum?.map(value=>({value,label:String(value)})) || definition.items?.anyOf?.map(option=>({value:option.const,label:option.title||String(option.const)}));
+      let input, read;
+      if (definition.type === "boolean") {
+        input = el("input", { type: "checkbox", checked: definition.default === true });
+        read = () => input.checked;
+        fields.append(el("label", { class: "mcp-checkbox" }, input, label));
+      } else if (definition.type === "array" && Array.isArray(multiChoices)) {
+        const options = multiChoices.map(({value,label}) => ({value,label,control:el("input",{type:"checkbox",checked:definition.default?.includes(value)})}));
+        input = el("fieldset", {}, el("legend", {}, label + (required ? " (required)" : "")), options.map(({label,control})=>el("label",{class:"mcp-checkbox"},control,label)));
+        read = () => options.filter(option=>option.control.checked).map(option=>option.value);
+        fields.append(input);
+      } else if (Array.isArray(choices)) {
+        const selected = choices.findIndex(option=>option.value===definition.default);
+        input = select([["", "Choose…"], ...choices.map((option,index)=>[String(index),option.label])], selected>=0?String(selected):"", null, {required});
+        read = () => input.value === "" ? undefined : choices[Number(input.value)].value;
+        fields.append(field(label + (required?" (required)":""),input,definition.description));
+      } else if (["number", "integer"].includes(definition.type)) {
+        input = el("input", { type: "number", step: definition.type === "integer" ? "1" : "any", min: definition.minimum, max: definition.maximum, required, value: definition.default ?? "" });
+        read = () => input.value === "" ? undefined : Number(input.value);
+        fields.append(field(label + (required?" (required)":""),input,definition.description));
+      } else if (definition.type === "string") {
+        input = el("input", {type:"text",required,value:definition.default || "",minlength:definition.minLength,maxlength:definition.maxLength,autocomplete:"off"});
+        read = () => input.value === "" && !required ? undefined : input.value;
+        fields.append(field(label + (required?" (required)":""),input,definition.description));
+      } else { throw new Error(`Unsupported form field “${name}”. Decline the request and contact the server owner.`); }
+      controls.push({name,definition,input,read,required});
+    }
+    return {fields, read: () => {
+      const values = Object.create(null);
+      for (const {name,definition,input,read,required} of controls) {
+        const value=read();
+        if (input.checkValidity && !input.checkValidity()) throw new Error(`Check the value for ${definition.title||name}.`);
+        if (required && (value===undefined || value==="" || (Array.isArray(value)&&!value.length))) throw new Error(`${definition.title||name} is required.`);
+        if (typeof value==="number" && (!Number.isFinite(value)||(definition.type==="integer"&&!Number.isInteger(value)))) throw new Error(`${name} must be a valid ${definition.type}.`);
+        if (value!==undefined) values[name]=value;
+      }
+      return values;
+    }};
+  }
+  function showMcpInteraction(id) {
+    const request = mcpInteractionRows.find(item => item.id === id && interactionActive(item));
+    if (!request) { toast("This server request has ended."); return; }
+    if (mcpInteractionDialog?.id === id) { mcpInteractionDialog.modal.focus(); return; }
+    if (mcpInteractionDialog) { mcpInteractionDialog.modal.focus(); toast("Finish the open server request first."); return; }
+    const error = el("p", {class:"error-text",role:"alert"});
+    const status = el("p", {class:"hint",role:"status"});
+    let form = null, offeredUrl = null;
+    const body = [el("p",{class:"mcp-request-message"},request.message || "The server needs your response.")];
+    try {
+      if (request.mode === "url") {
+        offeredUrl=safeMcpUrl(request.url);
+        body.push(el("div",{class:"mcp-external-destination"},el("strong",{},offeredUrl.host),el("p",{class:"path"},offeredUrl.href)),el("p",{class:"hint"},"Opening this page lets this server continue an external interaction. Check the destination before proceeding."));
+      } else { form=interactionFields(request.requestedSchema);body.push(form.fields); }
+    } catch (problem) { error.textContent=problem.message; }
+    const invalidRequest=!!error.textContent;
+    const view={id,modal:null,ended:false,answered:false,update:current=>{
+      const waiting=current.status==="waiting_external";
+      status.textContent=waiting?"Waiting for the server to confirm the external step. You can dismiss this notice; doing so does not cancel the external action.":`Expires ${new Date(current.expiresAt).toLocaleTimeString()}`;
+      accept.hidden=waiting;decline.hidden=waiting;cancel.textContent=waiting?"Dismiss request":"Cancel";
+    }};
+    async function respond(action) {
+      if (mcpInteractionBusy.has(id)) return;
+      const current=mcpInteractionRows.find(item=>item.id===id&&interactionActive(item));
+      if (!current) { error.textContent="This request has ended. No response was sent.";return; }
+      try {
+        const content=action==="accept" && form?form.read():null;
+        if (action==="accept" && !form && !offeredUrl) throw new Error("This request cannot be accepted.");
+        mcpInteractionBusy.add(id);view.modal.querySelectorAll("button").forEach(b=>b.disabled=true);error.textContent="";
+        const result=await rpc("MCP","respondInteraction",[id,action,content],"quixi.settings");
+        if (result?.error || result?.ok!==true) throw new Error(result?.error || "The server did not accept this response.");
+        view.answered=true;
+        if (action==="accept"&&offeredUrl) {
+          const accepted=safeMcpUrl(result.url);
+          if (accepted.href!==offeredUrl.href) throw new Error("The server destination changed. Review a new request before opening it.");
+          await openExternal(accepted.href);
+        }
+        view.modal.close();await pollMcpInteractions();
+      } catch(problem) {error.textContent=problem.message;if(view.answered){accept.hidden=true;decline.hidden=true;}} finally {mcpInteractionBusy.delete(id);view.modal?.querySelectorAll("button").forEach(b=>b.disabled=false);accept.disabled=invalidRequest;}
+    }
+    const accept=button(request.mode==="url"?"Open external page":"Send response",()=>respond("accept"),"primary");
+    accept.disabled=!!error.textContent;
+    const decline=button("Decline",()=>respond("decline"),"quiet");
+    const cancel=button("Cancel",()=>respond("cancel"),"quiet");
+    body.push(status,error,el("div",{class:"dialog-actions"},cancel,decline,accept));
+    const modal=dialog(`Request from ${request.server}`,body);
+    modal.classList.add("mcp-interaction-dialog");view.modal=modal;mcpInteractionDialog=view;view.update(request);
+    modal.addEventListener("cancel",event=>{if(mcpInteractionBusy.has(id))event.preventDefault();});
+    modal.addEventListener("click",event=>{if(event.target===modal&&mcpInteractionBusy.has(id))event.stopImmediatePropagation();},true);
+    modal.addEventListener("close",()=>{
+      if(mcpInteractionDialog===view)mcpInteractionDialog=null;
+      if(!view.ended&&!view.answered&&!mcpInteractionBusy.has(id)&&request.status!=="waiting_external")mcpRequest("respondInteraction",[id,"cancel",null]).then(result=>{if(result?.ok!==true)throw new Error("The server did not confirm cancellation.");return pollMcpInteractions();}).catch(error=>{toast(error.message,true);pollMcpInteractions();});
+    });
+  }
+  async function mcpRequest(member,args=[]) {
+    const result=await rpc("MCP",member,args,"quixi.settings");
+    if(result?.error)throw new Error(typeof result.error==="string"?result.error:result.error.message);
+    return result;
+  }
+  async function toggleMcpTool(server,tool,enabled) {
+    const result=await mcpRequest("setToolEnabled",[server,tool,enabled]);
+    if(result?.ok!==true)throw new Error("The tool setting could not be saved.");
+    await loadTools({poll:true});
+  }
+  function mcpText(result,kind) {
+    const parts=[];
+    const blocks=kind==="prompt"?(result.messages||[]).map(message=>({role:message.role,...message.content})):result.contents||[];
+    for(const block of blocks){if(typeof block.text==="string")parts.push(`${block.role?block.role+": ":""}${block.text}`);}
+    if(!parts.length)throw new Error("This item has no text content to attach. Binary resources are not supported as text attachments.");
+    const text=parts.join("\n\n");
+    if(text.includes("\u0000")||new TextEncoder().encode(text).length>1000000)throw new Error("This item exceeds the 1 MB text attachment limit or contains binary data.");
+    return text;
+  }
+  function attachMcpContext(item) {
+    const key=draftKey();
+    const attachment={id:crypto.randomUUID(),name:item.name,text:item.text,mcp:{server:item.server,uri:item.uri,cwd:item.cwd,subscribed:false,version:item.version||0,kind:item.kind}};
+    state.attachments.push(attachment);saveDraft();renderChips();
+    toast(`Added ${item.name} to ${key==="new"?"the new task":"this task"}. It is sent only when you send your message.`);
+  }
+  async function previewMcpContext(server,item,kind,args={},onAttach=()=>{},isCurrent=()=>true) {
+    const cwd=currentFolder(), origin=draftKey();
+    let uri=item.uri;
+    if(kind==="template") {const expanded=await mcpRequest("expandResourceTemplate",[server,item.uriTemplate,args,cwd]);uri=expanded?.uri;if(!uri)throw new Error("The resource template did not produce a URI.");}
+    const result=kind==="prompt"?await mcpRequest("getPrompt",[server,item.name,args,cwd]):await mcpRequest("readResource",[server,uri,cwd]);
+    if(!isCurrent())return;
+    if(draftKey()!==origin)throw new Error("The active conversation changed. Open the context picker again.");
+    const text=mcpText(result,kind);
+    const name=item.title||item.name||uri;
+    const preview=dialog(name,[el("p",{class:"hint"},`${server}${uri?" · "+uri:" · Prompt"}`),el("pre",{class:"code-preview mcp-context-preview"},text),el("p",{class:"hint"},"Review this server's content before adding it. It will become context for your next message."),el("div",{class:"dialog-actions"},button("Add to message",()=>{if(!isCurrent())throw new Error("This context picker was closed. Open it again to add context.");if(draftKey()!==origin)throw new Error("The active conversation changed. Open this context again for the current conversation.");attachMcpContext({name:`${server}: ${name}`,server,uri,cwd,text:`Source: ${server}${uri?" ("+uri+")":""}\n\n${text}`,kind:kind==="prompt"?"prompt":"resource"});preview.close();onAttach();},"primary"))],{wide:true});
+  }
+  async function mcpContextPicker(initialServer=null) {
+    const list=await rpc("LocalAgentModeSessions","getLocalMcpServers");
+    if(!Array.isArray(list))throw new Error("MCP servers could not be loaded.");
+    const servers=list.filter(s=>!s.builtin);
+    const options=[["","Choose a server"],...servers.map(s=>[s.name,s.name])];
+    const selector=select(options,initialServer||"",()=>load(),{"aria-label":"MCP context server"});
+    const search=el("input",{type:"search",placeholder:"Search resources and prompts","aria-label":"Search MCP context"});
+    const status=el("p",{class:"hint",role:"status"}),error=el("p",{class:"error-text",role:"alert"}),results=el("div",{class:"mcp-context-results"});
+    const refresh=button("Refresh",()=>load(),"quiet");
+    let catalog=null,generation=0,closed=false,contextLimit=50;
+    function render(){
+      results.replaceChildren();if(!catalog)return;
+      const query=search.value.trim().toLowerCase();
+      for(const [label,kind,items] of [["Resources","resource",catalog.resources],["Resource templates","template",catalog.resourceTemplates],["Prompts","prompt",catalog.prompts]]){
+        const matches=(items||[]).filter(item=>`${item.name||""} ${item.title||""} ${item.description||""} ${item.uri||item.uriTemplate||""}`.toLowerCase().includes(query));
+        if(!matches.length)continue;
+        results.append(el("h3",{},label));
+        for(const item of matches.slice(0,contextLimit)){
+          const title=item.title||item.name||item.uri||item.uriTemplate, server=selector.value;
+          results.append(el("article",{class:"mcp-context-item"},el("div",{class:"grow"},el("strong",{},title),item.description?el("p",{class:"muted"},item.description):null),button("Preview",async()=>{
+            const fields=kind==="prompt"?(item.arguments||[]).map(arg=>({name:arg.name,label:arg.title||arg.name,required:arg.required,hint:arg.description})):kind==="template"?Array.from(new Set(Array.from(item.uriTemplate.matchAll(/\{([^}]+)\}/g)).flatMap(match=>match[1].replace(/^[+#./;?&]/,"").split(",").map(v=>v.replace(/[:*].*$/,""))))).map(name=>({name,label:name,required:true})):[];
+            if(fields.length)formDialog(title,fields,args=>previewMcpContext(server,item,kind,args,()=>modal.close(),()=>!closed),{submit:"Preview"});
+            else await previewMcpContext(server,item,kind,{},()=>modal.close(),()=>!closed);
+          },"quiet")));
+        }
+        if(matches.length>contextLimit)results.append(button(`Show more ${label.toLowerCase()} (${matches.length-contextLimit} remaining)`,()=>{contextLimit+=50;render();},"quiet"));
+      }
+      if(!results.childElementCount)results.append(el("p",{class:"muted"},query?"No context matches this search.":"This server has no resources, templates, or prompts."));
+    }
+    async function load(){
+      const mine=++generation;catalog=null;contextLimit=50;results.replaceChildren();error.textContent="";
+      if(!selector.value){status.textContent=servers.length?"Choose a server to browse its context.":"Configure an MCP server in Tools & skills to add external context.";return;}
+      status.textContent="Loading resources and prompts…";refresh.disabled=true;
+      try {const result=await mcpRequest("browseResources",[selector.value,currentFolder()]);if(mine!==generation||closed)return;catalog=result;status.textContent="Choose an item to preview before adding it to your message.";render();}
+      catch(problem){if(mine===generation&&!closed){error.textContent=problem.message;status.textContent="Context is unavailable. Fix the connection and retry.";}}
+      finally{if(mine===generation)refresh.disabled=false;}
+    }
+    search.addEventListener("input",()=>{contextLimit=50;render();});
+    const modal=dialog("Add MCP context",[field("Server",selector),el("div",{class:"mcp-context-toolbar"},search,refresh),status,error,results],{wide:true});
+    modal.addEventListener("close",()=>{closed=true;generation++;});
+    await load();
+  }
+  async function checkMcpResourceUpdates(){
+    const updates=await mcpRequest("resourceUpdates");if(!Array.isArray(updates))return;
+    let changed=false;
+    for(const file of state.attachments){if(!file.mcp?.subscribed)continue;const update=updates.find(u=>u.server===file.mcp.server&&u.uri===file.mcp.uri&&(!u.cwd||u.cwd===file.mcp.cwd));
+      if(update&&Number(update.version||update.updatedAt||0)>Number(file.mcp.version||0)){file.mcp.availableVersion=Number(update.version||update.updatedAt);file.mcp.stale=true;changed=true;}}
+    if(changed){renderChips();saveDraft();}
+  }
+  async function followMcpResource(file,enabled){
+    const result=await mcpRequest("subscribeResource",[file.mcp.server,file.mcp.uri,file.mcp.cwd,enabled]);
+    if(result?.ok!==true)throw new Error("Resource subscription was not accepted.");file.mcp.subscribed=enabled;saveDraft();renderChips();
+  }
+  async function refreshMcpAttachment(file){
+    const version=file.mcp.availableVersion||file.mcp.version;
+    const result=await mcpRequest("readResource",[file.mcp.server,file.mcp.uri,file.mcp.cwd]);
+    const text=mcpText(result,"resource");
+    const preview=dialog("Review updated context",[el("p",{class:"hint"},`${file.mcp.server} · ${file.mcp.uri}`),el("pre",{class:"code-preview mcp-context-preview"},text),el("div",{class:"dialog-actions"},button("Use this version",()=>{file.text=`Source: ${file.mcp.server} (${file.mcp.uri})\n\n${text}`;file.mcp.version=version;file.mcp.stale=(file.mcp.availableVersion||0)>version;saveDraft();renderChips();preview.close();},"primary"))],{wide:true});
+  }
+  async function mcpRootsEditor(name){
+    const cwd=currentFolder();
+    const catalog=await mcpRequest("browseResources",[name,cwd]);
+    const paths=(catalog.roots||[]).map(root=>root.path||(()=>{try{return decodeURIComponent(new URL(root.uri).pathname);}catch{return "";}})()).filter(Boolean);
+    const list=el("div",{class:"mcp-root-list"}),error=el("p",{class:"error-text",role:"alert"});
+    const render=()=>list.replaceChildren(...paths.map((path,index)=>el("div",{class:"row"},el("span",{class:"path grow"},path),button("Remove",()=>{paths.splice(index,1);render();},"quiet"))));
+    render();
+    const modal=dialog(`Folders shared with ${name}`,[el("p",{class:"hint"},"These folders are advertised to this server as workspace roots. Changing roots does not grant permission to execute tools."),list,button("Add folder",async()=>{const path=await rpc("FileSystem","browseFolder",["Choose a folder for this MCP server"]);const value=typeof path==="string"?path:path?.path;if(value&&!paths.includes(value)){paths.push(value);render();}},"quiet"),error,el("div",{class:"dialog-actions"},button("Save folders",async()=>{try{const result=await mcpRequest("setRoots",[name,cwd,paths]);if(result?.ok!==true)throw new Error("Folders could not be updated.");modal.close();await loadTools({poll:true});}catch(problem){error.textContent=problem.message;}},"primary"))]);
+  }
   let toolsData = { skills: [], servers: [], error: "" };
   let toolsPollTimer = null;
   let toolsLoadInFlight = null;
@@ -2277,10 +2550,13 @@
     catalog.dataset.mcpAction = "catalog";
     catalog.setAttribute("aria-label", `View tools for ${server.name}`);
     controls.append(catalog);
+    const context=button("Browse context",()=>mcpContextPicker(server.name),"quiet");context.dataset.mcpAction="context";context.setAttribute("aria-label",`Browse context for ${server.name}`);controls.append(context);
+    const roots=button("Workspace folders",()=>mcpRootsEditor(server.name),"quiet");roots.dataset.mcpAction="roots";roots.setAttribute("aria-label",`Workspace folders for ${server.name}`);controls.append(roots);
     row.append(
       el("div", { class: "mcp-heading" }, icon("tools"), el("h3", { class: "grow" }, server.name), el("span", { class: "tag mcp-state", role: "status" })),
       el("p", { class: "muted mcp-catalog-count" }),
       el("p", { class: "hint mcp-last-success" }),
+      el("p", { class: "hint mcp-retry-status", role: "status" }),
       el("p", { class: "hint mcp-auth-hint", role: "status" }),
       el("p", { class: "error-text mcp-error", role: "alert" }), controls,
       el("details", { class: "mcp-diagnostics" }, el("summary", {}, "Connection details"), el("pre", { class: "mcp-diagnostics-content" })),
@@ -2325,8 +2601,12 @@
       const date = timestamp ? new Date(timestamp) : null;
       last.textContent = date && !Number.isNaN(date.getTime()) ? "Last discovery: " + date.toLocaleString() : "";
       last.hidden = !last.textContent;
+      const retry=row.querySelector(".mcp-retry-status");
+      retry.textContent=server.circuitOpen?"Automatic retries paused after repeated failures. Reconnect when ready.":Number(server.nextRetryAt)>Date.now()?`Retrying in ${Math.max(1,Math.ceil((server.nextRetryAt-Date.now())/1000))}s · attempt ${Math.min(3,Number(server.retryAttempt||0)+1)}`:"";
+      retry.hidden=!retry.textContent;
       const problem = row.querySelector(".mcp-error");
-      problem.textContent = mcpError(server);
+      const rawError=mcpError(server);
+      problem.textContent = status==="needs_auth" && /(?:auth(?:orization)? required|HTTP 401)/i.test(rawError) ? "This server requires sign-in before its tools can be used." : rawError;
       problem.hidden = !problem.textContent;
       const diagnostics = row.querySelector(".mcp-diagnostics-content");
       diagnostics.textContent = [
@@ -2334,15 +2614,20 @@
         server.cwd ? `Workspace: ${server.cwd}` : "",
         server.serverInfo?.name ? `Server: ${server.serverInfo.name}${server.serverInfo.version ? " " + server.serverInfo.version : ""}` : "",
         server.error?.kind ? `Failure: ${server.error.kind}` : "",
+        rawError ? `Error: ${rawError}` : "",
         server.generation != null ? `Catalog generation: ${server.generation}` : "",
         server.stderr ? `Recent server output:\n${server.stderr}` : "",
       ].filter(Boolean).join("\n");
       row.querySelector(".mcp-diagnostics").hidden = !diagnostics.textContent;
       for (const control of row.querySelectorAll("[data-mcp-action]")) {
         const action = control.dataset.mcpAction;
+        if(action==="reconnect"){control.textContent=server.circuitOpen?"Reconnect":"Retry";control.setAttribute("aria-label",`${server.circuitOpen?"Reconnect":"Retry"} ${server.name}`);}
         control.hidden = server.builtin && action !== "catalog" ? true
-          : action === "connect" ? !["configured", "disconnected"].includes(status)
-          : action === "reconnect" ? status !== "failed"
+          : server.error?.kind === "configuration" && action !== "catalog" ? true
+          : action === "context" ? status !== "ready"
+          : action === "roots" ? status !== "ready"
+          : action === "connect" ? server.circuitOpen || !["configured", "disconnected"].includes(status)
+          : action === "reconnect" ? status !== "failed" && !server.circuitOpen
           : action === "authenticate" ? status !== "needs_auth"
           : action === "cancelAuthentication" ? status !== "authenticating"
           : action === "openAuth" ? status !== "authenticating" || !mcpAuthUrls.has(server.name)
@@ -2361,10 +2646,12 @@
     const status = el("p", { class: "hint", role: "status" });
     const results = el("div", { class: "mcp-tool-results" });
     let limit = 50, signature = "";
+    const rememberedOpen = new Set();
     const render = () => {
       const server = toolsData.servers.find((server) => server.name === name);
       if (!server) { status.textContent = "This connection was removed."; results.replaceChildren(); return; }
-      const open = new Set(Array.from(results.querySelectorAll("details[open]")).map((d) => d.dataset.tool));
+      for(const node of results.querySelectorAll("details")){if(node.open)rememberedOpen.add(node.dataset.tool);else rememberedOpen.delete(node.dataset.tool);}
+      const open = rememberedOpen;
       const query = search.value.trim().toLowerCase();
       const tools = (server.tools || []).filter((tool) => `${tool.name} ${tool.description || ""}`.toLowerCase().includes(query));
       status.textContent = `${mcpStatusLabels[server.status] || "Not connected"} · ${tools.length} matching ${tools.length === 1 ? "tool" : "tools"}${server.catalogStale || !server.isConnected ? " · Last-known catalog; execution may be unavailable" : ""}`;
@@ -2372,6 +2659,7 @@
       for (const tool of tools.slice(0, limit)) {
         results.append(el("details", { class: "mcp-tool", "data-tool": tool.name, open: open.has(tool.name) },
           el("summary", {}, tool.name), tool.description ? el("p", {}, tool.description) : null,
+          !server.builtin ? el("div",{class:"mcp-tool-policy"},el("label",{class:"mcp-checkbox"},el("input",{type:"checkbox",checked:tool.enabled!==false,"aria-label":`Enable ${tool.name} on ${name}`,onChange:async event=>{const control=event.target;control.disabled=true;try{await toggleMcpTool(name,tool.name,control.checked);}catch(problem){control.checked=!control.checked;toast(problem.message,true);}finally{control.disabled=false;}}}),"Enabled"),el("span",{class:"hint"},tool.enabled===false?"Disabled · unavailable to the model":tool.modelVisible===false||(Array.isArray(tool._meta?.ui?.visibility)&&tool._meta.ui.visibility.every(value=>value!=="model"))?"App only · hidden from the model":"Available to the model")) : null,
           el("pre", { class: "mcp-schema" }, JSON.stringify(tool, null, 2))));
       }
       if (!tools.length) results.append(el("p", { class: "muted" }, "No tools match this search."));
@@ -2506,19 +2794,8 @@
           Array.isArray(parsed.mcpServers)
         )
           throw new Error("Provide a mcpServers object.");
-        for (const [name, entry] of Object.entries(parsed.mcpServers)) {
-          if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw new Error(`Invalid configuration for ${name}.`);
-          if (entry.transport === "http" || entry.transport === "sse" || entry.url) {
-            let url;
-            try { url = new URL(entry.url); } catch { throw new Error(`A valid server URL is required for ${name}.`); }
-            if (!["http:", "https:"].includes(url.protocol)) throw new Error(`Use an HTTP or HTTPS URL for ${name}.`);
-          } else if (typeof entry.command !== "string" || !entry.command.trim()) {
-            throw new Error(`A command is required for ${name}.`);
-          }
-          if (entry.args !== undefined && (!Array.isArray(entry.args) || entry.args.some(arg => typeof arg !== "string"))) throw new Error(`Arguments must be a list of strings for ${name}.`);
-          for (const key of ["env", "headers"]) if (entry[key] !== undefined && (!entry[key] || typeof entry[key] !== "object" || Array.isArray(entry[key]) || Object.values(entry[key]).some(value => typeof value !== "string"))) throw new Error(`${key} must contain string values for ${name}.`);
-          if (entry.enabled !== undefined && typeof entry.enabled !== "boolean") throw new Error(`enabled must be true or false for ${name}.`);
-        }
+        // The host validates changed entries independently, preserving an existing
+        // invalid entry while the user repairs another connection.
         const result = await rpc("MCP", "setMcpServerConfigs", [parsed.mcpServers], "quixi.settings");
         if (result?.error) throw new Error(typeof result.error === "string" ? result.error : result.error.message);
         if (result?.ok !== true) throw new Error("MCP configuration could not be saved.");
@@ -3412,6 +3689,7 @@
   const refreshTimers = new Map();
   addEventListener("quixi:event", ({ detail: { channel, payload } }) => {
     if (channel === "quixi:open-tools") { navigate("tools"); return; }
+    if (channel === "quixi:mcp-interaction") { pollMcpInteractions(); return; }
     if (channel === "quixi:mcp-updated") {
       if (state.page === "tools") loadTools({ poll: true });
       return;
@@ -3497,6 +3775,7 @@
       state.folder = defaults?.[0] || "";
       const path = decodeURIComponent(location.pathname.slice(1));
       navigate(path || "new", null, { replace: true });
+      pollMcpInteractions();
       if (!state.providers.hasConfiguredProvider)
         toast("Welcome. Connect a provider to start your first task.");
     } catch (e) {

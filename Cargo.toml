@@ -56,3 +56,7 @@ quixi-mcp = { path = "crates/quixi-mcp" }
 quixi-netstack = { path = "crates/quixi-netstack" }
 quixi-engine = { path = "crates/quixi-engine" }
 quixi-ipc = { path = "crates/quixi-ipc" }
+
+[patch.crates-io]
+# Preserve original elicitation schema constraints through the SDK transport.
+rmcp = { path = "vendor/rmcp" }

@@ -282,8 +282,8 @@ impl EipcRouter {
             ("Startup", "isMenuBarEnabled") | ("Startup", "isStartupOnLoginEnabled") => json!(true),
             ("GlobalShortcut", "getGlobalShortcut") => json!("Alt+Space"),
             ("WakeScheduler", "getStatus") => json!({ "enabled": false, "nextWakeAt": null }),
-            ("MCP", "getMcpServersConfig") => match self.engine.mcp_host.read_config_checked() {
-                Ok(cfg) => json!(cfg.mcp_servers),
+            ("MCP", "getMcpServersConfig") => match self.engine.mcp_host.read_config_value_checked() {
+                Ok(cfg) => cfg.get("mcpServers").cloned().unwrap_or_else(|| json!({})),
                 Err(error) => json!({"error":format!("{error:#}")}),
             },
             ("MCP", "setMcpServerConfigs") => {
@@ -296,14 +296,14 @@ impl EipcRouter {
                 }
             }
             ("MCP", "getMcpServersConfigWithStatus") => {
-                let cfg = match self.engine.mcp_host.read_config_checked() {
+                let cfg = match self.engine.mcp_host.read_config_value_checked() {
                     Ok(cfg) => cfg,
                     Err(error) => return json!({"error":format!("{error:#}")}),
                 };
                 let statuses = self.engine.mcp_host.list_local_mcp_servers();
                 let mut map = serde_json::Map::new();
-                for (name, entry) in cfg.mcp_servers {
-                    let mut value = serde_json::to_value(entry).unwrap_or_else(|_| json!({}));
+                for (name, entry) in cfg.get("mcpServers").and_then(Value::as_object).cloned().unwrap_or_default() {
+                    let mut value = if entry.is_object() { entry } else { json!({"invalidConfig":entry}) };
                     if let Some(status) = statuses.iter().find(|status| status["name"] == name) {
                         for key in ["status", "isConnected", "toolsEnumerated", "catalogStale", "error", "generation"] {
                             value[key] = status[key].clone();
@@ -318,6 +318,43 @@ impl EipcRouter {
                 Value::Object(map)
             }
             ("MCP", "connect" | "reconnect" | "refresh" | "disconnect" | "authenticate" | "cancelAuthentication" | "forgetAuthentication") => self.mcp_control(service, member, args),
+            ("MCP", "pendingInteractions") => json!(self.engine.mcp_host.pending_interactions()),
+            ("MCP", "resourceUpdates") => json!(self.engine.mcp_host.resource_updates()),
+            ("MCP", "respondInteraction" | "setToolEnabled" | "browseResources" | "readResource" | "getPrompt" | "expandResourceTemplate" | "subscribeResource" | "setRoots") => {
+                let result = (|| -> anyhow::Result<Value> {
+                    let string = |index: usize| -> anyhow::Result<&str> {
+                        args.get(index).and_then(Value::as_str).filter(|s| !s.trim().is_empty())
+                            .ok_or_else(|| anyhow::anyhow!("Missing or invalid MCP argument {}", index + 1))
+                    };
+                    let cwd = |index: usize| -> &Path { Path::new(args.get(index).and_then(Value::as_str).filter(|s| !s.is_empty()).unwrap_or(quixi_proto::paths::default_workspace_str())) };
+                    let host = &self.engine.mcp_host;
+                    match member {
+                        "respondInteraction" => host.respond_interaction(string(0)?, string(1)?, args.get(2).filter(|v| !v.is_null()).cloned()),
+                        "setToolEnabled" => {
+                            let enabled = args.get(2).and_then(Value::as_bool).ok_or_else(|| anyhow::anyhow!("Tool enabled must be a boolean"))?;
+                            host.set_tool_enabled(string(0)?, string(1)?, enabled)?; Ok(json!({"ok":true}))
+                        }
+                        "browseResources" => host.browse_resources(string(0)?, cwd(1)),
+                        "readResource" => host.read_resource_checked(string(0)?, string(1)?, cwd(2), &std::sync::atomic::AtomicBool::new(false)),
+                        "getPrompt" | "expandResourceTemplate" => {
+                            let parameters = args.get(2).filter(|v| v.is_object()).ok_or_else(|| anyhow::anyhow!("Context arguments must be an object"))?;
+                            if member == "getPrompt" { host.get_prompt(string(0)?, string(1)?, parameters, cwd(3), &std::sync::atomic::AtomicBool::new(false)) }
+                            else { host.expand_resource_template(string(0)?, string(1)?, parameters, cwd(3)) }
+                        }
+                        "subscribeResource" => {
+                            let enabled = args.get(3).and_then(Value::as_bool).ok_or_else(|| anyhow::anyhow!("Subscription enabled must be a boolean"))?;
+                            host.subscribe_resource(string(0)?, string(1)?, cwd(2), enabled)?; Ok(json!({"ok":true}))
+                        }
+                        "setRoots" => {
+                            let values = args.get(2).and_then(Value::as_array).ok_or_else(|| anyhow::anyhow!("Workspace roots must be an array"))?;
+                            let roots = values.iter().map(|value| value.as_str().filter(|path| !path.is_empty()).map(std::path::PathBuf::from).ok_or_else(|| anyhow::anyhow!("Each root must be a folder path"))).collect::<anyhow::Result<Vec<_>>>()?;
+                            host.set_roots(string(0)?, cwd(1), &roots)?; Ok(json!({"ok":true}))
+                        }
+                        _ => unreachable!(),
+                    }
+                })();
+                match result { Ok(value) => value, Err(error) => json!({"error":format!("{error:#}")}) }
+            }
             ("MCP", "isLocalDevMcpEnabled") => json!(true),
             ("Extensions", "getInstalledExtensionsWithState") => {
                 json!(self.engine.mcp_host.list_installed_extensions_with_state())
@@ -2587,6 +2624,10 @@ mod tests {
         let (_engine, router) = make_router();
         for (service, member, args) in [
             ("MCP", "connect", vec![]),
+            ("MCP", "respondInteraction", vec![json!("unknown"), json!("accept"), json!({})]),
+            ("MCP", "setToolEnabled", vec![json!("server"), json!("tool"), json!("true")]),
+            ("MCP", "setRoots", vec![json!("server"), json!("/tmp"), json!([null])]),
+            ("MCP", "getPrompt", vec![json!("server"), json!("prompt"), json!([])]),
             ("MCP", "setMcpServerConfigs", vec![]),
             ("MCP", "setMcpServerConfigs", vec![json!({"bad":{"command":""}})]),
             ("LocalAgentModeSessions", "authenticateMcpServer", vec![json!("missing")]),
@@ -2604,6 +2645,22 @@ mod tests {
             args: vec![],
         });
         assert_eq!(missing_tool.result.unwrap()["isError"], true);
+    }
+
+    #[test]
+    fn invalid_server_entries_remain_editable_without_hiding_healthy_servers() {
+        let (engine, router) = make_router();
+        let raw = json!({"mcpServers":{"invalid":{"command":9},"healthy":{"command":"example-server","args":[]}}});
+        std::fs::write(&engine.mcp_host.config_path, serde_json::to_vec(&raw).unwrap()).unwrap();
+        let read = |member: &str| router.dispatch(&EipcInvokePayload {
+            channel: format!("$eipc_message$_{}_$_quixi.settings_$_MCP_$_{}", EIPC_UUID_MAIN, member), args: vec![],
+        });
+        assert_eq!(read("getMcpServersConfig").result.unwrap(), raw["mcpServers"]);
+        let statuses = read("getMcpServersConfigWithStatus").result.unwrap();
+        assert_eq!(statuses["invalid"]["command"], 9);
+        assert_eq!(statuses["invalid"]["status"], "failed");
+        assert_eq!(statuses["healthy"]["status"], "configured");
+        assert_eq!(engine.mcp_host.read_config_checked().unwrap().mcp_servers.len(), 1);
     }
 
     #[test]

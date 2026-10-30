@@ -15,6 +15,11 @@ async function fixture({
   subagents = [],
   mcpServers = [],
   mcpConfig = {},
+  mcpInteractions = [],
+  interactionError = null,
+  resourceCatalog = {resources:[],resourceTemplates:[],prompts:[],roots:[]},
+  resourceText = "Resource fixture text",
+  resourceUpdates = [],
   mcpActionError = null,
   mcpSaveError = null,
   mcpAuthUrl = "https://example.invalid/oauth/authorize?state=fixture",
@@ -35,6 +40,7 @@ async function fixture({
     },
   );
   const w = dom.window;
+  w.TextEncoder = TextEncoder;
   w.fetch = async () => ({
     text: async () => "<p>Isolated browser fixture</p>",
   });
@@ -141,6 +147,26 @@ async function fixture({
       sessions.push({sessionId:id,title:task.displayName,cwd:task.cwd,spaceId:null,permissionMode:"default",isRunning:true,bufferedMessages:[]});
       return {sessionId:id};
     }
+    if (member === "browseFolder") return pickedFolder;
+    if (member === "pendingInteractions") return structuredClone(mcpInteractions);
+    if (member === "respondInteraction") {
+      if (interactionError) return {error:interactionError};
+      const index=mcpInteractions.findIndex(item=>item.id===args[0]);
+      if(index<0)return {error:"Request expired"};
+      const item=mcpInteractions[index];
+      if(item.mode==="url"&&args[1]==="accept"){item.status="waiting_external";return {ok:true,url:item.url};}
+      mcpInteractions.splice(index,1);return {ok:true};
+    }
+    if (member === "setToolEnabled") {
+      if(mcpActionError)return {error:mcpActionError};
+      mcpServers.find(s=>s.name===args[0]).tools.find(t=>t.name===args[1]).enabled=args[2];return {ok:true};
+    }
+    if(member==="browseResources")return structuredClone(resourceCatalog);
+    if(member==="readResource")return {contents:[{uri:args[1],text:typeof resourceText==="function"?resourceText():resourceText}]};
+    if(member==="getPrompt")return {messages:[{role:"user",content:{type:"text",text:"Prompt for "+args[2].topic}}]};
+    if(member==="expandResourceTemplate")return {uri:args[1].replace("{name}",encodeURIComponent(args[2].name))};
+    if(member==="resourceUpdates")return structuredClone(resourceUpdates);
+    if(["subscribeResource","setRoots"].includes(member))return {ok:true};
     if (member === "getLocalMcpServers") return structuredClone(mcpServers);
     if (member === "getMcpServersConfig") return structuredClone(mcpConfig);
     if (member === "setMcpServerConfigs") {
@@ -1110,4 +1136,131 @@ test("MCP forget-sign-in requires explicit confirmation and updates connection s
     assert.equal(row.querySelector(".mcp-state").textContent,"Disconnected");
     assert.equal(row.querySelector('[data-mcp-action="forgetAuthentication"]').hidden,true);
   } finally { f.close(); }
+});
+
+const pendingRequest = (overrides={}) => ({id:"request-1",server:"fixture",mode:"form",message:"Choose project details",status:"pending",expiresAt:Date.now()+60000,requestedSchema:{type:"object",properties:{name:{type:"string",title:"Club name"},seats:{type:"integer",minimum:1},active:{type:"boolean"}},required:["name"]},...overrides});
+const refreshRequests = async f => {f.w.dispatchEvent(new f.w.CustomEvent("quixi:event",{detail:{channel:"quixi:mcp-interaction",payload:{}}}));await wait();};
+
+test("MCP elicitation appears outside Tools, escapes content and preserves typed input during refresh",async()=>{
+  const requests=[pendingRequest({server:"<img src=x onerror=owned()>",message:"<script>owned()</script>"})];
+  const f=await fixture({mcpInteractions:requests});try{
+    assert.ok(f.w.document.querySelector("#mcp-interactions"));assert.equal(f.w.document.querySelector("#mcp-interactions img"),null);
+    await f.click("Review request");const modal=f.w.document.querySelector("dialog");assert.equal(modal.querySelector("script"),null);
+    await f.click("Send response");assert.equal(f.calls.filter(c=>c.member==="respondInteraction").length,0);
+    const input=modal.querySelector('input[type="text"]');input.value="Chess club";input.focus();
+    await refreshRequests(f);assert.equal(modal.querySelector('input[type="text"]'),input);assert.equal(input.value,"Chess club");assert.equal(f.w.document.activeElement,input);
+    modal.querySelector('input[type="number"]').value="4";modal.querySelector('input[type="checkbox"]').checked=true;
+    await f.click("Send response");const response=f.calls.find(c=>c.member==="respondInteraction");assert.equal(response.args[1],"accept");assert.deepEqual(JSON.parse(JSON.stringify(response.args[2])),{name:"Chess club",seats:4,active:true});
+    assert.equal(f.w.document.querySelector("dialog"),null);
+  }finally{f.close();}
+});
+
+for(const action of ["Decline","Cancel","Close"]){test(`MCP form ${action} never submits entered values`,async()=>{
+  const f=await fixture({mcpInteractions:[pendingRequest()]});try{
+    await f.click("Review request");f.w.document.querySelector('dialog input[type="text"]').value="Unsent details";
+    if(action==="Close")f.w.document.querySelector("dialog").close();else await f.click(action);
+    await wait();const response=f.calls.find(c=>c.member==="respondInteraction");assert.equal(response.args[1],action==="Decline"?"decline":"cancel");assert.equal(response.args[2],null);
+  }finally{f.close();}
+});}
+
+test("MCP external requests require explicit domain review and waiting controls remain hidden with real CSS",async()=>{
+  const requests=[pendingRequest({mode:"url",url:"https://accounts.example.invalid/consent",host:"accounts.example.invalid"})];
+  const f=await fixture({mcpInteractions:requests});try{
+    const style=f.w.document.createElement("style");style.textContent=fs.readFileSync(path.join(__dirname,"../../resources/ui/app.css"),"utf8");f.w.document.head.append(style);
+    assert.equal(f.calls.filter(c=>c.route==="/__eipc__/open-external").length,0);
+    await f.click("Review request");assert.match(f.w.document.querySelector(".mcp-external-destination strong").textContent,/accounts.example.invalid/);
+    assert.equal(f.calls.filter(c=>c.route==="/__eipc__/open-external").length,0);
+    await f.click("Open external page");assert.equal(f.calls.filter(c=>c.route==="/__eipc__/open-external").length,1);
+    assert.match(f.w.document.querySelector("#mcp-interactions").textContent,/Waiting for the external step/);
+    await f.click("Review request");const modal=f.w.document.querySelector("dialog");const accept=Array.from(modal.querySelectorAll("button")).find(b=>b.textContent==="Open external page");assert.equal(f.w.getComputedStyle(accept).display,"none");
+    await f.click("Dismiss request");assert.equal(f.calls.at(-2)?.args?.[1]==="accept",false);
+  }finally{f.close();}
+});
+
+test("MCP invalid URL requests cannot open external handlers and expiration closes an unanswered form",async()=>{
+  const requests=[pendingRequest({mode:"url",url:"file:///etc/passwd"})];const f=await fixture({mcpInteractions:requests});try{
+    await f.click("Review request");assert.match(f.w.document.querySelector('dialog [role="alert"]').textContent,/Only HTTP/);const accept=Array.from(f.w.document.querySelectorAll("dialog button")).find(b=>b.textContent==="Open external page");assert.equal(accept.disabled,true);
+    requests.splice(0);await refreshRequests(f);assert.equal(f.w.document.querySelector("dialog"),null);assert.equal(f.calls.filter(c=>c.member==="respondInteraction").length,0);
+    assert.equal(f.calls.filter(c=>c.route==="/__eipc__/open-external").length,0);
+  }finally{f.close();}
+});
+
+test("MCP tool policies expose app-only status and persist explicit toggles",async()=>{
+  const servers=[{name:"fixture",status:"ready",isConnected:true,toolsEnumerated:true,tools:[{name:"app_tool",enabled:true,modelVisible:false,inputSchema:{type:"object"}}]}];const f=await fixture({mcpServers:servers});try{
+    await f.click("Tools & skills");await f.click("View tools for fixture");assert.match(f.w.document.querySelector(".mcp-tool").textContent,/App only/);
+    const toggle=f.w.document.querySelector('[aria-label="Enable app_tool on fixture"]');toggle.click();await wait();assert.deepEqual(Array.from(f.calls.find(c=>c.member==="setToolEnabled").args),["fixture","app_tool",false]);assert.equal(servers[0].tools[0].enabled,false);
+  }finally{f.close();}
+});
+
+test("MCP resources require preview and explicit attachment, subscriptions require review before sending updates",async()=>{
+  let text="Original context";const updates=[];const f=await fixture({mcpServers:[{name:"fixture",status:"ready",tools:[]}],resourceCatalog:{resources:[{name:"Guide",uri:"fixture://guide",description:"<script>bad()</script>"}]},resourceText:()=>text,resourceUpdates:updates});try{
+    await f.click("Add MCP context");const selector=f.w.document.querySelector('[aria-label="MCP context server"]');selector.value="fixture";selector.dispatchEvent(new f.w.Event("change"));await wait();
+    assert.equal(f.w.document.querySelector(".mcp-context-results script"),null);await f.click("Preview");assert.equal(f.w.document.querySelector("#attachment-chips").textContent,"");
+    await f.click("Add to message");assert.match(f.w.document.querySelector("#attachment-chips").textContent,/fixture: Guide/);
+    await f.click("Follow changes");assert.equal(f.calls.find(c=>c.member==="subscribeResource").args[3],true);
+    text="Updated context";updates.push({server:"fixture",uri:"fixture://guide",version:1});await refreshRequests(f);assert.match(f.w.document.querySelector("#attachment-chips").textContent,/Review update/);
+    f.type("#prompt","Use this context");await f.click("Send");assert.equal(f.calls.filter(c=>c.member==="start").length,0);
+    await f.click("Review update");assert.match(f.w.document.querySelector(".mcp-context-preview").textContent,/Updated context/);await f.click("Use this version");await f.click("Send");
+    assert.ok(f.calls.some(c=>c.member==="start"));const sent=f.calls.find(c=>c.member==="sendMessage");assert.match(JSON.stringify(sent?.args||f.calls.find(c=>c.member==="start").args),/Updated context/);
+  }finally{f.close();}
+});
+
+test("MCP templates and prompt arguments are previewed without executing or sending a message",async()=>{
+  const f=await fixture({mcpServers:[{name:"fixture",status:"ready",tools:[]}],resourceCatalog:{resourceTemplates:[{name:"Member",uriTemplate:"fixture://members/{name}"}],prompts:[{name:"Brief",arguments:[{name:"topic",required:true}]}]}});try{
+    await f.click("Add MCP context");const select=f.w.document.querySelector('[aria-label="MCP context server"]');select.value="fixture";select.dispatchEvent(new f.w.Event("change"));await wait();
+    await f.click("Preview");f.type('dialog:last-of-type input',"Chess club");
+    // The parent picker also has Preview buttons, so submit the argument form directly.
+    const form=f.w.document.querySelector("dialog:last-of-type form");if(form){form.dispatchEvent(new f.w.Event("submit",{bubbles:true,cancelable:true}));await wait();}
+    assert.ok(f.calls.some(c=>c.member==="expandResourceTemplate"&&c.args[2].name==="Chess club"));assert.ok(f.calls.some(c=>c.member==="readResource"&&c.args[1]==="fixture://members/Chess%20club"));assert.equal(f.calls.filter(c=>c.member==="start").length,0);
+  }finally{f.close();}
+});
+
+test("MCP workspace roots are server-scoped and use the native folder picker",async()=>{
+  const f=await fixture({mcpServers:[{name:"fixture",status:"ready",isConnected:true,tools:[]}],resourceCatalog:{roots:[{uri:"file:///workspace",name:"workspace"}]},pickedFolder:"/second"});try{
+    await f.click("Tools & skills");await f.click("Workspace folders for fixture");await f.click("Add folder");await f.click("Save folders");const saved=f.calls.find(c=>c.member==="setRoots");assert.equal(saved.args[0],"fixture");assert.deepEqual(Array.from(saved.args[2]),["/workspace","/second"]);
+  }finally{f.close();}
+});
+
+test("MCP configuration repair preserves an unrelated invalid server and healthy controls remain usable",async()=>{
+  const config={broken:{command:42},healthy:{command:"healthy-server"}};
+  const f=await fixture({mcpConfig:config,mcpServers:[{name:"broken",status:"failed",tools:[],error:{kind:"configuration",message:"command must be a string"}},{name:"healthy",status:"ready",isConnected:true,toolsEnumerated:true,tools:[{name:"read"}]}]});try{
+    await f.click("Tools & skills");assert.match(f.w.document.querySelector('[data-server="broken"]').textContent,/command must be a string/);assert.equal(f.w.document.querySelector('[data-server="healthy"] [data-mcp-action="refresh"]').hidden,false);
+    await f.click("Configure connections");const textarea=f.w.document.querySelector("dialog textarea");const next=JSON.parse(textarea.value);next.mcpServers.healthy.args=["--fixed"];textarea.value=JSON.stringify(next);f.w.document.querySelector("dialog form").dispatchEvent(new f.w.Event("submit",{bubbles:true,cancelable:true}));await wait();
+    const saved=f.calls.find(c=>c.member==="setMcpServerConfigs");assert.equal(saved.args[0].broken.command,42);assert.equal(saved.args[0].healthy.args[0],"--fixed");
+  }finally{f.close();}
+});
+
+test("MCP disabled-tool save failures restore the checkbox and leave an actionable error",async()=>{
+  const f=await fixture({mcpServers:[{name:"fixture",status:"ready",isConnected:true,tools:[{name:"read",enabled:true}]}],mcpActionError:"Could not save tool policy"});try{
+    await f.click("Tools & skills");await f.click("View tools for fixture");const toggle=f.w.document.querySelector('[aria-label="Enable read on fixture"]');toggle.click();await wait();assert.equal(toggle.checked,true);assert.equal(toggle.disabled,false);assert.match(f.w.document.querySelector("#toasts").textContent,/Could not save tool policy/);
+  }finally{f.close();}
+});
+
+test("MCP server response failures keep form values and allow a deliberate retry",async()=>{
+  const f=await fixture({mcpInteractions:[pendingRequest()],interactionError:"The request expired on the server"});try{
+    await f.click("Review request");const input=f.w.document.querySelector('dialog input[type="text"]');input.value="Chess club";await f.click("Send response");assert.equal(input.value,"Chess club");assert.match(f.w.document.querySelector('dialog [role="alert"]').textContent,/expired/);assert.ok(f.w.document.querySelector("dialog"));
+  }finally{f.close();}
+});
+
+test("MCP titled enums and multiple choices submit their wire values, not display labels",async()=>{
+  const request=pendingRequest({requestedSchema:{type:"object",properties:{level:{type:"string",oneOf:[{const:"basic",title:"Getting started"},{const:"advanced",title:"Experienced"}]},topics:{type:"array",items:{anyOf:[{const:"chess",title:"Chess games"},{const:"go",title:"Go games"}]}}},required:["level","topics"]}});
+  const f=await fixture({mcpInteractions:[request]});try{
+    await f.click("Review request");const modal=f.w.document.querySelector("dialog");assert.match(modal.textContent,/Getting started/);modal.querySelector("select").value="1";modal.querySelector('fieldset input').checked=true;await f.click("Send response");const response=f.calls.find(c=>c.member==="respondInteraction");assert.deepEqual(JSON.parse(JSON.stringify(response.args[2])),{level:"advanced",topics:["chess"]});
+  }finally{f.close();}
+});
+
+test("MCP automatic retry countdown and exhausted circuit offer clear recovery",async()=>{
+  const servers=[{name:"fixture",status:"failed",isConnected:false,tools:[],retryAttempt:2,nextRetryAt:Date.now()+10000,error:{message:"Connection closed"}}];const f=await fixture({mcpServers:servers});try{
+    await f.click("Tools & skills");assert.match(f.w.document.querySelector(".mcp-retry-status").textContent,/Retrying in \d+s · attempt 3/);
+    Object.assign(servers[0],{status:"disconnected",nextRetryAt:0,circuitOpen:true});f.w.dispatchEvent(new f.w.CustomEvent("quixi:event",{detail:{channel:"quixi:mcp-updated",payload:{}}}));await wait();
+    assert.match(f.w.document.querySelector(".mcp-retry-status").textContent,/Automatic retries paused/);const reconnect=f.w.document.querySelector('[aria-label="Reconnect fixture"]');assert.equal(reconnect.hidden,false);await f.click("Reconnect fixture");assert.ok(f.calls.some(c=>c.member==="reconnect"));
+  }finally{f.close();}
+});
+
+test("MCP catalog disclosure survives policy-triggered reconnect and its transient empty catalog",async()=>{
+  const tools=[{name:"read",enabled:true}];const servers=[{name:"fixture",status:"ready",isConnected:true,tools}];const f=await fixture({mcpServers:servers});try{
+    await f.click("Tools & skills");await f.click("View tools for fixture");f.w.document.querySelector(".mcp-tool").open=true;
+    Object.assign(servers[0],{status:"initializing",tools:[]});f.w.dispatchEvent(new f.w.CustomEvent("quixi:event",{detail:{channel:"quixi:mcp-updated",payload:{}}}));await wait();
+    Object.assign(servers[0],{status:"ready",tools});f.w.dispatchEvent(new f.w.CustomEvent("quixi:event",{detail:{channel:"quixi:mcp-updated",payload:{}}}));await wait();assert.equal(f.w.document.querySelector(".mcp-tool").open,true);
+  }finally{f.close();}
 });

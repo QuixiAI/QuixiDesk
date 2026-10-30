@@ -1,4 +1,5 @@
 mod subagents;
+mod mcp_registry;
 mod scheduling;
 mod context;
 mod credentials;
@@ -2085,13 +2086,18 @@ impl QuixiEngine {
         let mut repeats = 0usize;
         let mut stream_retries = 0usize;
         let mut tool_results = agent_tools::ToolResults::default();
+        let mut defer_direct_mcp = false;
 
         for round in 0..MAX_ROUNDS {
             if cancelled.load(Ordering::SeqCst) { return (String::new(), final_model); }
             let mode = self.current_permission_mode(session_id, permission_mode);
             let mut tools = agent_tools::available_tool_schemas(&mode);
             tools.as_array_mut().unwrap().push(subagents::schema());
-            messages[0]["content"] = json!(format!("{system_prompt}\n\n{}", agent_tools::permission_context(&mode)));
+            let mut budget = self.provider_manager.mcp_tool_budget(&resolved_model);
+            if defer_direct_mcp { budget.enabled = false; }
+            let registry=mcp_registry::Registry::build(self.mcp_host.ready_tools(Path::new(cwd)),tools.as_array().unwrap(),budget);
+            tools.as_array_mut().unwrap().extend(registry.schemas.iter().cloned());
+            messages[0]["content"] = json!(format!("{system_prompt}\n\n{}\n\n{}", agent_tools::permission_context(&mode),registry.context()));
             if let Err(error)=self.compact_context(&mut messages,&resolved_model,prompt,cancelled) {
                 if !cancelled.load(Ordering::SeqCst) {on_chunk(StreamChunk::Text(error.clone()));}
                 return (error,final_model);
@@ -2131,6 +2137,16 @@ impl QuixiEngine {
             final_model = turn.model_id.clone();
 
             if let Some(ref err) = turn.stream_error {
+                let lower = err.to_lowercase();
+                if !defer_direct_mcp && !registry.schemas.is_empty() && !streamed_text
+                    && (err.contains("HTTP 400") || err.contains("HTTP 422"))
+                    && ["tool", "schema", "parameter"].iter().any(|word| lower.contains(word)) {
+                    // An unsuccessful provider request executed no tools. Retain complete
+                    // definitions through discovery rather than stripping schema keywords.
+                    defer_direct_mcp = true;
+                    messages.push(json!({"role":"user","content":"The provider rejected direct MCP tool definitions. Use McpDiscover to inspect their complete schemas and McpCall to invoke them for this turn; do not guess direct aliases."}));
+                    continue;
+                }
                 let recoverable = (err.contains("Invalid tool arguments")
                     || err.contains("Incomplete tool call")
                     || err.contains("finish_reason=Some(\"length\")"))
@@ -2181,7 +2197,7 @@ impl QuixiEngine {
             let mut displayed = std::collections::HashSet::new();
             let fresh_calls: Vec<bool> = turn.tool_calls.iter().map(|call| {
                 let input = serde_json::from_str::<Value>(&call.arguments).unwrap_or(Value::Null);
-                call.name == agent_tools::TOOL_MCP_CALL || agent_tools::repeatable_observation(&call.name,&input) ||
+                registry.route(&call.name).is_some() || call.name == agent_tools::TOOL_MCP_CALL || agent_tools::repeatable_observation(&call.name,&input) ||
                     (!tool_results.contains(&call.name, &input)
                     && displayed.insert(format!("{}|{}", call.name, input)))
             }).collect();
@@ -2196,8 +2212,8 @@ impl QuixiEngine {
                 content.push(json!({
                     "type": "tool_use",
                     "id": call.id,
-                    "name": call.name,
-                    "input": input
+                    "name": if registry.route(&call.name).is_some(){agent_tools::TOOL_MCP_CALL}else{&call.name},
+                    "input": registry.route(&call.name).map(|r|r.input(&input)).unwrap_or(input)
                 }));
             }
             let assistant_msg = json!({
@@ -2239,6 +2255,10 @@ impl QuixiEngine {
             for call in &turn.tool_calls {
                 if cancelled.load(Ordering::SeqCst) { return (String::new(), final_model); }
                 let (output, is_error) = match serde_json::from_str::<Value>(&call.arguments) {
+                    Ok(input) if registry.route(&call.name).is_some()=>{
+                        let route=registry.route(&call.name).unwrap();let input=route.input(&input);
+                        tool_results.run(agent_tools::TOOL_MCP_CALL,&input,||self.execute_tool_with_approval_and_mcp_identity(session_id,&call.id,agent_tools::TOOL_MCP_CALL,&input,cwd,permission_mode,cancelled,Some(&route.identity)))
+                    },
                     Ok(input) => tool_results.run(&call.name, &input, || {
                         if call.name == "Task" {
                             if delegated_tasks >= subagents::MAX_TASKS_PER_TURN {return ("This turn has reached its four-subagent limit. Continue in the parent or report remaining work.".into(), true);}
@@ -2285,6 +2305,7 @@ impl QuixiEngine {
                 messages.push(json!({
                     "role": "tool",
                     "tool_call_id": call.id,
+                    "is_error": block["is_error"].as_bool().unwrap_or(false),
                     "content": block.get("content").and_then(|v| v.as_str()).unwrap_or_default()
                 }));
             }

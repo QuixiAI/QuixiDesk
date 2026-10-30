@@ -107,7 +107,7 @@ fn parse_responses_tool_stream<R: std::io::BufRead, F: FnMut(StreamChunk)>(
                             .ok_or("Missing call ID")?;
                         let value = serde_json::from_str(arguments)
                             .map_err(|error| format!("Invalid tool arguments: {error}"))?;
-                        crate::agent_tools::validate_input(name, &value)?;
+                        crate::agent_tools::validate_provider_input(name, &value)?;
                         calls.push(ProviderToolCall {
                             id: id.into(),
                             name: name.into(),

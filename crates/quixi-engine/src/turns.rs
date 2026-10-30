@@ -26,7 +26,8 @@ pub(crate) fn provider_history(transcript: &[Value]) -> Vec<Value> {
                         Some(result) => if let Some(text) = result["content"].as_str() { text.to_owned() } else { result["content"].to_string() },
                         None => "Action interrupted. No result was recorded; do not assume it succeeded.".into(),
                     };
-                    messages.push(json!({"role":"tool","tool_call_id":id,"content":output}));
+                    let is_error = results.get(id).map_or(true, |result| result["is_error"].as_bool().unwrap_or(false));
+                    messages.push(json!({"role":"tool","tool_call_id":id,"content":output,"is_error":is_error}));
                 }
             }
         } else if message["type"] == "user" && !text.trim().is_empty() {
@@ -83,8 +84,19 @@ mod tests {
         assert_eq!(messages[1]["tool_calls"][0]["function"]["name"], "Edit");
         assert_eq!(messages[2]["role"], "tool");
         assert_eq!(messages[2]["content"], "Successfully edited README.md");
+        assert_eq!(messages[2]["is_error"], false);
+        assert_eq!(messages[4]["is_error"], true);
         assert!(messages[4]["content"].as_str().unwrap().contains("interrupted"));
         assert_eq!(messages[5]["content"], "What changed?");
+    }
+    #[test]
+    fn followups_preserve_denied_tool_error_status() {
+        let messages=provider_history(&[
+            json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"denied","name":"McpCall","input":{}}]}}),
+            json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"denied","content":"Permission denied","is_error":true}]}}),
+        ]);
+        assert_eq!(messages[1]["is_error"],true);
+        assert_eq!(messages[1]["content"],"Permission denied");
     }
     #[test]
     fn stopping_keeps_partial_text_after_restart_and_rejects_old_chunks() {

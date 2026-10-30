@@ -1,7 +1,10 @@
 use anyhow::{bail, Context, Result};
 mod client;
+mod interactions;
 mod oauth;
+mod resources;
 mod sse;
+mod worker;
 use quixi_platform::{BrowserUse, ComputerUse};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -12,6 +15,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+pub use worker::main as transport_worker_main;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", default)]
@@ -25,6 +29,7 @@ pub struct McpServerConfigEntry {
     pub headers: HashMap<String, String>,
     pub cwd: Option<String>,
     pub enabled: bool,
+    pub disabled_tools: Vec<String>,
     pub connect_timeout_ms: u64,
     pub discovery_timeout_ms: u64,
     pub request_timeout_ms: u64,
@@ -46,6 +51,7 @@ impl Default for McpServerConfigEntry {
             headers: HashMap::new(),
             cwd: None,
             enabled: true,
+            disabled_tools: vec![],
             connect_timeout_ms: 15000,
             discovery_timeout_ms: 60000,
             request_timeout_ms: 120000,
@@ -65,6 +71,27 @@ impl McpServerConfigEntry {
     fn validate(&self) -> Result<()> {
         if !["initialize", "auto", "discover"].contains(&self.lifecycle.as_str()) {
             bail!("Unsupported MCP lifecycle mode");
+        }
+        if let Some(roots) = self.extra.get("roots") {
+            let roots = roots.as_array().context("MCP roots must be an array")?;
+            if roots.len() > 32 {
+                bail!("At most 32 MCP roots are supported");
+            }
+            for root in roots {
+                let uri = root["uri"]
+                    .as_str()
+                    .context("MCP root requires a file URI")?;
+                let parsed = url::Url::parse(uri)?;
+                if parsed.scheme() != "file"
+                    || parsed.query().is_some()
+                    || parsed.fragment().is_some()
+                {
+                    bail!("MCP roots must use file URIs without query or fragment");
+                }
+                if root.get("name").is_some_and(|n| !n.is_string()) {
+                    bail!("MCP root name must be a string");
+                }
+            }
         }
         match self.transport_kind() {
             "stdio" => {
@@ -112,16 +139,30 @@ impl McpServerConfigEntry {
 #[serde(rename_all = "camelCase")]
 pub struct DesktopMcpConfigFile {
     pub mcp_servers: HashMap<String, McpServerConfigEntry>,
+    #[serde(skip)]
+    pub invalid_servers: HashMap<String, String>,
     #[serde(flatten)]
     pub extra: HashMap<String, Value>,
 }
 pub struct McpHost {
     pub config_path: PathBuf,
     manager: client::Manager,
+    interactions: Arc<interactions::InteractionBroker>,
     config_lock: parking_lot::Mutex<()>,
 }
 
 impl McpHost {
+    pub fn pending_interactions(&self) -> Vec<Value> {
+        self.interactions.pending()
+    }
+    pub fn respond_interaction(
+        &self,
+        id: &str,
+        action: &str,
+        content: Option<Value>,
+    ) -> Result<Value> {
+        self.interactions.respond(id, action, content)
+    }
     pub fn shutdown(&self) {
         self.manager.shutdown();
     }
@@ -242,9 +283,11 @@ impl McpHost {
                 }
             }
         }
+        let interactions = Arc::new(interactions::InteractionBroker::default());
         Self {
             config_path,
-            manager: client::Manager::new(quixi_dir),
+            manager: client::Manager::new(quixi_dir, interactions.clone()),
+            interactions,
             config_lock: parking_lot::Mutex::new(()),
         }
     }
@@ -253,18 +296,46 @@ impl McpHost {
         let _guard = self.config_lock.lock();
         self.read_config_unlocked()
     }
-    fn read_config_unlocked(&self) -> Result<DesktopMcpConfigFile> {
+    pub fn read_config_value_checked(&self) -> Result<Value> {
         let raw = fs::read(&self.config_path).context("Could not read MCP configuration")?;
-        let cfg: DesktopMcpConfigFile =
+        let value: Value =
             serde_json::from_slice(&raw).context("Invalid MCP configuration JSON")?;
-        for (name, entry) in &cfg.mcp_servers {
-            if name.trim().is_empty() {
-                bail!("MCP server name must not be empty");
-            }
-            entry
-                .validate()
-                .with_context(|| format!("Invalid MCP configuration for '{name}'"))?;
+        if !value["mcpServers"].is_object() {
+            bail!("mcpServers must be an object");
         }
+        Ok(value)
+    }
+    fn read_config_unlocked(&self) -> Result<DesktopMcpConfigFile> {
+        let value = self.read_config_value_checked()?;
+        let mut cfg = DesktopMcpConfigFile::default();
+        for (name, raw) in value["mcpServers"].as_object().unwrap() {
+            let entry = (|| {
+                if name.trim().is_empty() {
+                    bail!("Server name must not be empty");
+                }
+                let entry: McpServerConfigEntry = serde_json::from_value(raw.clone())?;
+                entry.validate()?;
+                Ok::<_, anyhow::Error>(entry)
+            })();
+            match entry {
+                Ok(entry) => {
+                    cfg.mcp_servers.insert(name.clone(), entry);
+                }
+                Err(error) => {
+                    cfg.invalid_servers.insert(
+                        name.clone(),
+                        format!("Invalid MCP configuration for '{name}': {error:#}"),
+                    );
+                }
+            }
+        }
+        cfg.extra = value
+            .as_object()
+            .unwrap()
+            .iter()
+            .filter(|(k, _)| k.as_str() != "mcpServers")
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         self.manager.reconcile(&cfg.mcp_servers);
         Ok(cfg)
     }
@@ -273,22 +344,41 @@ impl McpHost {
     }
     pub fn write_config(&self, mcp_servers: &Value) -> Result<()> {
         let _guard = self.config_lock.lock();
-        let entries: HashMap<String, McpServerConfigEntry> =
-            serde_json::from_value(mcp_servers.clone()).context("mcpServers must be an object")?;
-        for (name, entry) in &entries {
-            if name.trim().is_empty() {
-                bail!("MCP server name must not be empty");
-            }
-            entry
-                .validate()
-                .with_context(|| format!("Invalid MCP configuration for '{name}'"))?;
-        }
+        self.write_config_unlocked(mcp_servers)
+    }
+    fn write_config_unlocked(&self, mcp_servers: &Value) -> Result<()> {
         let mut wrapper: Value = if self.config_path.exists() {
             serde_json::from_slice(&fs::read(&self.config_path)?)
                 .context("Existing MCP configuration is invalid; repair it before saving")?
         } else {
             json!({})
         };
+        let map = mcp_servers
+            .as_object()
+            .context("mcpServers must be an object")?;
+        let mut entries = HashMap::new();
+        for (name, raw) in map {
+            let parsed = (|| {
+                if name.trim().is_empty() {
+                    bail!("Server name must not be empty");
+                }
+                let entry: McpServerConfigEntry = serde_json::from_value(raw.clone())?;
+                entry.validate()?;
+                Ok::<_, anyhow::Error>(entry)
+            })();
+            match parsed {
+                Ok(entry) => {
+                    entries.insert(name.clone(), entry);
+                }
+                Err(error) => {
+                    if wrapper["mcpServers"].get(name) != Some(raw) {
+                        return Err(
+                            error.context(format!("Invalid MCP configuration for '{name}'"))
+                        );
+                    }
+                }
+            }
+        }
         wrapper
             .as_object_mut()
             .context("MCP configuration must be an object")?
@@ -1276,6 +1366,9 @@ impl McpHost {
     }
     fn canonical_name(&self, name: &str) -> Result<String> {
         let cfg = self.read_config_checked()?;
+        if let Some(error) = cfg.invalid_servers.get(name) {
+            bail!("{error}");
+        }
         if cfg.mcp_servers.contains_key(name) {
             return Ok(name.into());
         }
@@ -1299,6 +1392,87 @@ impl McpHost {
             .and_then(|c| c.mcp_servers.get(&name).cloned())
             .is_some_and(|e| Self::entry_is_builtin(&name, &e))
     }
+    pub(crate) fn model_visible(tool: &Value) -> bool {
+        tool.pointer("/_meta/ui/visibility")
+            .and_then(Value::as_array)
+            .is_none_or(|values| values.iter().any(|v| v == "model"))
+    }
+    fn decorate_tools(status: &mut Value, config: &McpServerConfigEntry) {
+        for tool in status["tools"].as_array_mut().into_iter().flatten() {
+            tool["enabled"] = json!(!config.disabled_tools.iter().any(|n| tool["name"] == *n));
+            tool["modelVisible"] = json!(Self::model_visible(tool));
+        }
+    }
+    pub fn ready_tools(&self, cwd: &Path) -> Vec<Value> {
+        let _guard = self.config_lock.lock();
+        let Ok(cfg) = self.read_config_unlocked() else {
+            return vec![];
+        };
+        let canonical = cwd.canonicalize().unwrap_or_else(|_| cwd.into());
+        let statuses = self.manager.statuses_for(&canonical);
+        let mut tools = Vec::new();
+        for (name, config) in cfg.mcp_servers {
+            if !config.enabled || self.manager.is_disconnected(&name) {
+                continue;
+            }
+            let definitions = if Self::entry_is_builtin(&name, &config) {
+                Self::builtin_catalog(&name)
+            } else {
+                let Some(status) = statuses.get(&name) else {
+                    continue;
+                };
+                if status["status"] != "ready" || status["catalogStale"] == true {
+                    continue;
+                }
+                status["tools"].as_array().cloned().unwrap_or_default()
+            };
+            let Ok(identity) = Self::config_identity(&name, &config) else {
+                continue;
+            };
+            for mut tool in definitions {
+                if !Self::model_visible(&tool)
+                    || config.disabled_tools.iter().any(|t| tool["name"] == *t)
+                {
+                    continue;
+                }
+                tool["server"] = json!(name);
+                tool["serverIdentity"] = json!(identity);
+                tools.push(tool);
+            }
+        }
+        tools.sort_by_key(|t| format!("{}/{}", t["server"], t["name"]));
+        tools
+    }
+    pub fn set_tool_enabled(&self, server: &str, tool: &str, enabled: bool) -> Result<()> {
+        let name = self.canonical_name(server)?;
+        let status = self
+            .list_server_statuses()
+            .into_iter()
+            .find(|s| s["name"] == name);
+        let guard = self.config_lock.lock();
+        let mut raw = self.read_config_value_checked()?;
+        let mut disabled: Vec<String> = raw["mcpServers"][&name]["disabledTools"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|v| v.as_str().map(str::to_owned))
+            .collect();
+        disabled.retain(|t| t != tool);
+        if !enabled {
+            disabled.push(tool.into());
+        }
+        raw["mcpServers"][&name]["disabledTools"] = json!(disabled);
+        self.write_config_unlocked(&raw["mcpServers"])?;
+        drop(guard);
+        if let Some(status) = status {
+            if status["status"] == "ready" && status["builtin"] != true {
+                if let Some(cwd) = status["cwd"].as_str() {
+                    self.start_connection(&name, Path::new(cwd))?;
+                }
+            }
+        }
+        Ok(())
+    }
     pub fn list_internal_servers(&self) -> Vec<Value> {
         self.list_server_statuses()
             .into_iter()
@@ -1318,12 +1492,13 @@ impl McpHost {
             }
         };
         let mut statuses = self.manager.statuses();
-        let mut result = Vec::new();
+        let mut result:Vec<Value>=cfg.invalid_servers.iter().map(|(name,error)|json!({"name":name,"wireKey":name,"status":"failed","isConnected":false,"toolsEnumerated":false,"tools":[],"error":{"kind":"configuration","message":error}})).collect();
         for (name, entry) in cfg.mcp_servers {
             let builtin = Self::entry_is_builtin(&name, &entry);
             let disconnected = self.manager.is_disconnected(&name);
             if !builtin {
-                if let Some(s) = statuses.remove(&name) {
+                if let Some(mut s) = statuses.remove(&name) {
+                    Self::decorate_tools(&mut s, &entry);
                     result.push(s);
                     continue;
                 }
@@ -1331,6 +1506,17 @@ impl McpHost {
             let unsupported = builtin && Self::builtin_tools(&name).is_some_and(|t| t.is_empty());
             let ready = builtin && entry.enabled && !disconnected && !unsupported;
             result.push(json!({"name":name,"uuid":if builtin{Self::internal_server_uuid(&name).unwrap_or(&name)}else{&name},"wireKey":name,"builtin":builtin,"isInternal":builtin,"serverSource":"user_config","transport":entry.transport_kind(),"status":if !entry.enabled{"disabled"}else if disconnected{"disconnected"}else if unsupported{"failed"}else if ready{"ready"}else{"configured"},"isConnected":ready,"toolsEnumerated":ready,"catalogStale":false,"tools":if ready{Self::builtin_tools(&name).unwrap_or_default()}else{vec![]},"resources":[],"prompts":[],"error":if unsupported{json!({"kind":"unsupported","message":"This legacy built-in connector is not implemented. Configure a working external MCP server instead."})}else{Value::Null},"generation":0}));
+        }
+        for row in &mut result {
+            if row["builtin"] == true {
+                if let Some(config) = self.read_config_checked().ok().and_then(|c| {
+                    c.mcp_servers
+                        .get(row["name"].as_str().unwrap_or(""))
+                        .cloned()
+                }) {
+                    Self::decorate_tools(row, &config);
+                }
+            }
         }
         result.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
         result
@@ -1395,8 +1581,7 @@ impl McpHost {
             &name,
             url,
         ))?;
-        self.manager.reconnect(&name);
-        self.manager.disconnect(&name);
+        self.manager.signed_out(&name);
         Ok(())
     }
     pub fn cancel_authentication_server(&self, name: &str) -> Result<()> {
@@ -1421,7 +1606,9 @@ impl McpHost {
             if !self.is_builtin_server(name) {
                 let entry = self.external_entry(name, cwd)?;
                 client::block_on(client::Manager::discover(&entry, cancelled))?;
-                specific = Some(entry.status());
+                let mut status = entry.status();
+                Self::decorate_tools(&mut status, &entry.config);
+                specific = Some(status);
             }
         }
         let servers: Vec<_> = if let Some(s) = specific {
@@ -1447,6 +1634,9 @@ impl McpHost {
             }
             if let Some(ts) = s["tools"].as_array() {
                 for t in ts {
+                    if t["enabled"] == false || !Self::model_visible(t) {
+                        continue;
+                    }
                     if !needle.is_empty()
                         && !format!("{} {} {}", s["name"], t["name"], t["description"])
                             .to_lowercase()
@@ -1514,6 +1704,9 @@ impl McpHost {
         Self::config_identity(&name, &cfg.mcp_servers[&name])
     }
     fn resolve_config_name(cfg: &DesktopMcpConfigFile, name: &str) -> Result<String> {
+        if let Some(error) = cfg.invalid_servers.get(name) {
+            bail!("{error}");
+        }
         if cfg.mcp_servers.contains_key(name) {
             return Ok(name.into());
         }
@@ -1571,6 +1764,9 @@ impl McpHost {
         }
         if !config.enabled {
             bail!("MCP server '{name}' is disabled");
+        }
+        if config.disabled_tools.iter().any(|n| n == tool) {
+            bail!("MCP tool '{name}/{tool}' is disabled");
         }
         if self.manager.is_disconnected(&name) {
             bail!("MCP server '{name}' is disconnected");

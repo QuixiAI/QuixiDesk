@@ -30,3 +30,5 @@ aes-gcm = "0.10"
 base64.workspace = true
 keyring = { version = "3.6.3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust", "vendored"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+
+uritemplate-next = "0.2"

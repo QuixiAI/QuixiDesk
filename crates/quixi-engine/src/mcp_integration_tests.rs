@@ -99,6 +99,13 @@ fn tool(id: &str, name: &str, args: Value) -> Value {
 }
 
 fn provider(engine: &QuixiEngine, replies: Vec<Value>) -> std::thread::JoinHandle<Vec<Value>> {
+    provider_format(engine, replies, "openai")
+}
+fn provider_format(
+    engine: &QuixiEngine,
+    replies: Vec<Value>,
+    format: &'static str,
+) -> std::thread::JoinHandle<Vec<Value>> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     listener.set_nonblocking(true).unwrap();
@@ -114,7 +121,7 @@ fn provider(engine: &QuixiEngine, replies: Vec<Value>) -> std::thread::JoinHandl
         p.configured = true;
         p.selected_model = "mcp-fixture-model".into();
         p.base_url = format!("http://{addr}/v1");
-        p.api_format = "openai".into();
+        p.api_format = format.into();
         p.auth_mode = "local".into();
         p.models.clear();
     }
@@ -148,15 +155,36 @@ fn provider(engine: &QuixiEngine, replies: Vec<Value>) -> std::thread::JoinHandl
             let mut body = vec![0; length];
             reader.read_exact(&mut body).unwrap();
             requests.push(serde_json::from_slice(&body).unwrap());
+            if let Some(status) = reply["_httpStatus"].as_u64() {
+                let body = reply["error"].to_string();
+                write!(stream,"HTTP/1.1 {status} Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
+                continue;
+            }
             let finish = if reply.get("tool_calls").is_some() {
                 "tool_calls"
             } else {
                 "stop"
             };
-            let body = format!(
-                "data: {}\n\ndata: [DONE]\n\n",
-                json!({"choices":[{"delta":reply,"finish_reason":finish}]})
-            );
+            let body = if format == "anthropic" {
+                let block = if let Some(call) =
+                    reply["tool_calls"].as_array().and_then(|v| v.first())
+                {
+                    json!({"type":"tool_use","id":call["id"],"name":call["function"]["name"],"input":{}})
+                } else {
+                    json!({"type":"text","text":""})
+                };
+                let delta = if block["type"] == "tool_use" {
+                    json!({"type":"input_json_delta","partial_json":reply["tool_calls"][0]["function"]["arguments"]})
+                } else {
+                    json!({"type":"text_delta","text":reply["content"]})
+                };
+                [json!({"type":"message_start","message":{"role":"assistant","content":[]}}),json!({"type":"content_block_start","index":0,"content_block":block}),json!({"type":"content_block_delta","index":0,"delta":delta}),json!({"type":"content_block_stop","index":0}),json!({"type":"message_delta","delta":{"stop_reason":if finish=="tool_calls"{"tool_use"}else{"end_turn"}}}),json!({"type":"message_stop"})].iter().map(|event|format!("data: {event}\n\n")).collect::<String>()
+            } else {
+                format!(
+                    "data: {}\n\ndata: [DONE]\n\n",
+                    json!({"choices":[{"delta":reply,"finish_reason":finish}]})
+                )
+            };
             write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
         }
         requests
@@ -409,5 +437,291 @@ fn pending_approval_cannot_authorize_a_replacement_server_configuration() {
     assert!(
         fixture.events().is_empty(),
         "A replacement target must not launch under stale consent"
+    );
+}
+
+#[test]
+fn discovered_mcp_tools_are_native_functions_on_both_provider_protocols() {
+    for format in ["openai", "anthropic"] {
+        let fixture = Fixture::new("auto");
+        let name = crate::mcp_registry::alias("engine-fixture", "read_item");
+        let worker = provider_format(
+            &fixture.engine,
+            vec![
+                tool(
+                    "discover",
+                    "McpDiscover",
+                    json!({"server":"engine-fixture"}),
+                ),
+                tool("direct", &name, json!({"key":"token"})),
+                json!({"content":"Token 42 from the real server."}),
+            ],
+            format,
+        );
+        let (answer, _) = fixture.engine.generate_reply_with_tools_streaming(
+            "Inspect the fixture token.",
+            &fixture.cwd(),
+            &[],
+            Some("mcp-fixture-model"),
+            "auto",
+            &fixture.session,
+            &AtomicBool::new(false),
+            |_| {},
+            |_| {},
+        );
+        assert_eq!(answer, "Token 42 from the real server.");
+        let requests = worker.join().unwrap();
+        let lookup = |request: &Value| -> Option<Value> {
+            request["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| {
+                    if format == "anthropic" {
+                        t["name"] == name
+                    } else {
+                        t["function"]["name"] == name
+                    }
+                })
+                .cloned()
+        };
+        assert!(
+            lookup(&requests[0]).is_none(),
+            "Exposure must not start servers"
+        );
+        let exposed = lookup(&requests[1]).expect("Next round must refresh the catalog");
+        let schema = if format == "anthropic" {
+            &exposed["input_schema"]
+        } else {
+            &exposed["function"]["parameters"]
+        };
+        assert_eq!(schema["properties"]["key"]["enum"], json!(["token"]));
+        assert_eq!(schema["additionalProperties"], false);
+        assert!(requests[2].to_string().contains("PROJECT TOKEN 42"));
+        assert_eq!(
+            fixture
+                .events()
+                .lines()
+                .filter(|l| *l == "tools/call 1")
+                .count(),
+            1
+        );
+        if format == "anthropic" {
+            assert!(requests[2]["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m["content"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|b| b["type"] == "tool_result" && b["tool_use_id"] == "direct")));
+        }
+    }
+}
+
+#[test]
+fn disabling_an_advertised_tool_removes_it_and_blocks_both_routes() {
+    let fixture = Fixture::new("auto");
+    let discover = json!({"server":"engine-fixture"});
+    assert!(
+        !fixture
+            .engine
+            .execute_tool_with_approval(
+                &fixture.session,
+                "discover",
+                "McpDiscover",
+                &discover,
+                &fixture.cwd(),
+                "auto",
+                &AtomicBool::new(false)
+            )
+            .1
+    );
+    let registry = crate::mcp_registry::Registry::build(
+        fixture
+            .engine
+            .mcp_host
+            .ready_tools(Path::new(&fixture.cwd())),
+        &[],
+        Default::default(),
+    );
+    let alias = crate::mcp_registry::alias("engine-fixture", "read_item");
+    let route = registry.route(&alias).unwrap();
+    let mut config = fixture.engine.mcp_host.read_config_value_checked().unwrap();
+    config["mcpServers"]["engine-fixture"]["disabledTools"] = json!(["read_item"]);
+    fixture
+        .engine
+        .mcp_host
+        .write_config(&config["mcpServers"])
+        .unwrap();
+    let fresh = crate::mcp_registry::Registry::build(
+        fixture
+            .engine
+            .mcp_host
+            .ready_tools(Path::new(&fixture.cwd())),
+        &[],
+        Default::default(),
+    );
+    assert!(fresh.route(&alias).is_none());
+    let input = route.input(&json!({"key":"token"}));
+    assert!(
+        fixture
+            .engine
+            .execute_tool_with_approval_and_mcp_identity(
+                &fixture.session,
+                "direct",
+                "McpCall",
+                &input,
+                &fixture.cwd(),
+                "auto",
+                &AtomicBool::new(false),
+                Some(&route.identity)
+            )
+            .1
+    );
+    assert!(
+        fixture
+            .engine
+            .execute_tool_with_approval(
+                &fixture.session,
+                "generic",
+                "McpCall",
+                &input,
+                &fixture.cwd(),
+                "auto",
+                &AtomicBool::new(false)
+            )
+            .1
+    );
+    assert!(!fixture.events().contains("tools/call"));
+}
+
+#[test]
+fn colliding_display_names_route_to_distinct_real_server_processes() {
+    let fixture = Fixture::new("auto");
+    let config = fixture.engine.mcp_host.read_config_value_checked().unwrap();
+    let first = config["mcpServers"]["engine-fixture"].clone();
+    let mut second = first.clone();
+    second["args"][0] = json!(fixture.root.join("second.log"));
+    fixture
+        .engine
+        .mcp_host
+        .write_config(&json!({"a b":first,"a_b":second}))
+        .unwrap();
+    for server in ["a b", "a_b"] {
+        assert!(
+            !fixture
+                .engine
+                .execute_tool_with_approval(
+                    &fixture.session,
+                    server,
+                    "McpDiscover",
+                    &json!({"server":server}),
+                    &fixture.cwd(),
+                    "auto",
+                    &AtomicBool::new(false)
+                )
+                .1
+        );
+    }
+    let first = crate::mcp_registry::alias("a b", "read_item");
+    let second = crate::mcp_registry::alias("a_b", "read_item");
+    assert_ne!(first, second);
+    let worker = provider(
+        &fixture.engine,
+        vec![
+            tool("first", &first, json!({"key":"token"})),
+            tool("second", &second, json!({"key":"token"})),
+            json!({"content":"Both servers returned their own result."}),
+        ],
+    );
+    let (answer, _) = fixture.engine.generate_reply_with_tools_streaming(
+        "Read both tokens.",
+        &fixture.cwd(),
+        &[],
+        Some("mcp-fixture-model"),
+        "auto",
+        &fixture.session,
+        &AtomicBool::new(false),
+        |_| {},
+        |_| {},
+    );
+    assert_eq!(answer, "Both servers returned their own result.");
+    let requests = worker.join().unwrap();
+    for name in [&first, &second] {
+        assert!(requests[0]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["function"]["name"] == name.as_str()));
+    }
+    for log in [
+        fixture.events(),
+        fs::read_to_string(fixture.root.join("second.log")).unwrap(),
+    ] {
+        assert!(log.contains("tools/call 1"));
+        assert!(!log.contains("tools/call 2"));
+    }
+}
+
+#[test]
+fn provider_schema_rejection_defers_whole_catalog_without_losing_generic_tools() {
+    let fixture = Fixture::new("auto");
+    let worker = provider(
+        &fixture.engine,
+        vec![
+            tool(
+                "discover",
+                "McpDiscover",
+                json!({"server":"engine-fixture"}),
+            ),
+            json!({"_httpStatus":400,"error":{"message":"Unsupported tool schema keyword"}}),
+            tool(
+                "generic",
+                "McpCall",
+                json!({"server":"engine-fixture","tool":"read_item","arguments":{"key":"token"}}),
+            ),
+            json!({"content":"Recovered with the full schema."}),
+        ],
+    );
+    let (answer, _) = fixture.engine.generate_reply_with_tools_streaming(
+        "Read the fixture token.",
+        &fixture.cwd(),
+        &[],
+        Some("mcp-fixture-model"),
+        "auto",
+        &fixture.session,
+        &AtomicBool::new(false),
+        |_| {},
+        |_| {},
+    );
+    assert_eq!(answer, "Recovered with the full schema.");
+    let requests = worker.join().unwrap();
+    let alias = crate::mcp_registry::alias("engine-fixture", "read_item");
+    assert!(requests[1]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|t| t["function"]["name"] == alias));
+    assert!(!requests[2]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|t| t["function"]["name"] == alias));
+    for name in ["McpDiscover", "McpCall"] {
+        assert!(requests[2]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["function"]["name"] == name));
+    }
+    assert_eq!(
+        fixture
+            .events()
+            .lines()
+            .filter(|l| l.starts_with("tools/call"))
+            .count(),
+        1
     );
 }

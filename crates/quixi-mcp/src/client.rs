@@ -8,10 +8,7 @@ use rmcp::{
         ClientLifecycleMode, ClientServiceExt, NotificationContext, Peer, PeerRequestOptions,
         RequestContext,
     },
-    transport::{
-        streamable_http_client::StreamableHttpClientTransportConfig, StreamableHttpClientTransport,
-        TokioChildProcess,
-    },
+    transport::TokioChildProcess,
     ClientHandler, RoleClient,
 };
 use serde_json::{json, Value};
@@ -82,6 +79,7 @@ pub(crate) struct Snapshot {
     pub tools: Vec<Value>,
     pub resources: Vec<Value>,
     pub prompts: Vec<Value>,
+    pub resource_templates: Vec<Value>,
     pub capabilities: Value,
     pub server_info: Value,
     pub instructions: String,
@@ -94,6 +92,7 @@ pub(crate) struct Snapshot {
     pub updated: u128,
     pub auth_url: Option<String>,
     pub auth_attempt: Option<String>,
+    pub worker_pid: Option<u32>,
 }
 impl Default for Snapshot {
     fn default() -> Self {
@@ -102,6 +101,7 @@ impl Default for Snapshot {
             tools: vec![],
             resources: vec![],
             prompts: vec![],
+            resource_templates: vec![],
             capabilities: json!({}),
             server_info: Value::Null,
             instructions: String::new(),
@@ -114,14 +114,26 @@ impl Default for Snapshot {
             updated: now(),
             auth_url: None,
             auth_attempt: None,
+            worker_pid: None,
         }
     }
 }
 pub(crate) struct Entry {
+    pub broker: Arc<super::interactions::InteractionBroker>,
+    pub roots: Arc<Mutex<Vec<Value>>>,
+    roots_path: PathBuf,
+    pub resource_updates: Arc<Mutex<HashMap<String, Value>>>,
+    resource_version: Arc<AtomicU64>,
+    subscriptions: Arc<Mutex<HashSet<String>>>,
+    call_lock: tokio::sync::Mutex<()>,
+    active_parent: Mutex<Option<CancellationToken>>,
     pub profile: PathBuf,
     auth: Mutex<Option<CancellationToken>>,
     auth_challenge: Mutex<Option<String>>,
     active: AtomicUsize,
+    retry_attempt: AtomicUsize,
+    retry_at: AtomicU64,
+    retry_scheduled: AtomicBool,
     last_used: AtomicU64,
     connection: AtomicU64,
     connection_stop: Mutex<CancellationToken>,
@@ -139,6 +151,24 @@ pub(crate) struct Entry {
 impl Entry {
     fn remember_challenge(&self, error: &anyhow::Error) {
         for e in error.chain() {
+            let worker_error = match e.downcast_ref::<rmcp::service::ClientInitializeError>() {
+                Some(rmcp::service::ClientInitializeError::JsonRpcError(error)) => Some(error),
+                _ => match e.downcast_ref::<rmcp::service::ServiceError>() {
+                    Some(rmcp::service::ServiceError::McpError(error)) => Some(error),
+                    _ => None,
+                },
+            };
+            if let Some(error) = worker_error {
+                if error.code.0 == -32098 {
+                    if let Some(data) = &error.data {
+                        if data["quixiWorkerError"] == true {
+                            if let Some(challenge) = data["challenge"].as_str() {
+                                *self.auth_challenge.lock() = Some(challenge.into());
+                            }
+                        }
+                    }
+                }
+            }
             if let Some(e) = e.downcast_ref::<rmcp::service::ClientInitializeError>() {
                 if let Some(challenge) = e.auth_challenge() {
                     *self.auth_challenge.lock() = Some(challenge.into());
@@ -207,13 +237,22 @@ impl Entry {
     }
     pub fn status(&self) -> Value {
         let s = self.snapshot.lock();
-        json!({"name":self.name,"wireKey":self.name,"uuid":self.name,"transport":self.config.transport_kind(),"builtin":false,"isInternal":false,"serverSource":"user_config","status":s.status,"isConnected":matches!(s.status.as_str(),"ready"|"refreshing"),"toolsEnumerated":s.enumerated,"catalogStale":s.stale,"tools":s.tools,"resources":s.resources,"prompts":s.prompts,"capabilities":s.capabilities,"serverInfo":s.server_info,"instructions":s.instructions,"error":s.error,"lastSuccessAt":s.last_success,"generation":s.generation,"stderr":s.stderr,"cwd":self.cwd,"updatedAt":s.updated,"authorizationUrl":s.auth_url,"authAttempt":s.auth_attempt,"hasAuth":self.authenticated.load(Ordering::SeqCst)})
+        json!({"name":self.name,"wireKey":self.name,"uuid":self.name,"transport":self.config.transport_kind(),"builtin":false,"isInternal":false,"serverSource":"user_config","status":s.status,"isConnected":matches!(s.status.as_str(),"ready"|"refreshing"),"toolsEnumerated":s.enumerated,"catalogStale":s.stale,"tools":s.tools,"resources":s.resources,"prompts":s.prompts,"capabilities":s.capabilities,"serverInfo":s.server_info,"instructions":s.instructions,"error":s.error,"lastSuccessAt":s.last_success,"generation":s.generation,"stderr":s.stderr,"cwd":self.cwd,"updatedAt":s.updated,"authorizationUrl":s.auth_url,"authAttempt":s.auth_attempt,"hasAuth":self.authenticated.load(Ordering::SeqCst),"workerPid":s.worker_pid,"resourceTemplates":s.resource_templates,"roots":*self.roots.lock(),"retryAttempt":self.retry_attempt.load(Ordering::SeqCst),"nextRetryAt":self.retry_at.load(Ordering::SeqCst),"circuitOpen":self.retry_attempt.load(Ordering::SeqCst)>=3 && !self.retry_scheduled.load(Ordering::SeqCst) && s.status!="ready"})
     }
 }
+#[derive(Clone)]
+struct WorkspaceContext {
+    roots: Arc<Mutex<Vec<Value>>>,
+    subscriptions: Arc<Mutex<HashSet<String>>>,
+    updates: Arc<Mutex<HashMap<String, Value>>>,
+    version: Arc<AtomicU64>,
+}
 pub(crate) struct Manager {
+    broker: Arc<super::interactions::InteractionBroker>,
     profile: PathBuf,
     entries: Mutex<HashMap<(String, PathBuf), Arc<Entry>>>,
     disabled: Mutex<HashSet<String>>,
+    contexts: Mutex<HashMap<String, WorkspaceContext>>,
 }
 impl Drop for Manager {
     fn drop(&mut self) {
@@ -223,11 +262,13 @@ impl Drop for Manager {
     }
 }
 impl Manager {
-    pub fn new(profile: &Path) -> Self {
+    pub fn new(profile: &Path, broker: Arc<super::interactions::InteractionBroker>) -> Self {
         Self {
             profile: profile.into(),
+            broker,
             entries: Mutex::new(HashMap::new()),
             disabled: Mutex::new(HashSet::new()),
+            contexts: Mutex::new(HashMap::new()),
         }
     }
     pub fn cancel_auth(&self, name: &str) {
@@ -363,11 +404,42 @@ impl Manager {
             }
             old.retired.cancel();
         }
+        // Bind saved folder choices to this exact endpoint and workspace. Tool policy
+        // changes do not erase them; a changed endpoint cannot inherit old access.
+        let mut context_config = config.clone();
+        context_config.disabled_tools.clear();
+        context_config.enabled = true;
+        let identity = super::McpHost::config_identity(name, &context_config)?;
+        use sha2::{Digest, Sha256};
+        let context_key = format!(
+            "{:x}",
+            Sha256::digest(format!("{identity}\0{}", cwd.display()).as_bytes())
+        );
+        let roots_path = self
+            .profile
+            .join("mcp-roots")
+            .join(format!("{context_key}.json"));
+        let context = self.contexts.lock().entry(context_key).or_insert_with(|| {
+            let saved=std::fs::read(&roots_path).ok().filter(|b|b.len()<=65536).and_then(|b|serde_json::from_slice::<Vec<Value>>(&b).ok()).filter(|roots|valid_saved_roots(roots));
+            let roots=saved.or_else(||config.extra.get("roots").and_then(Value::as_array).cloned()).unwrap_or_else(||url::Url::from_directory_path(&cwd).ok().map(|uri|vec![json!({"uri":uri.as_str(),"name":"Selected workspace","path":cwd})]).unwrap_or_default());
+            WorkspaceContext { roots:Arc::new(Mutex::new(roots)),subscriptions:Arc::new(Mutex::new(HashSet::new())),updates:Arc::new(Mutex::new(HashMap::new())),version:Arc::new(AtomicU64::new(0)) }
+        }).clone();
         let entry = Arc::new(Entry {
+            broker: self.broker.clone(),
+            roots: context.roots,
+            roots_path,
+            resource_updates: context.updates,
+            resource_version: context.version,
+            subscriptions: context.subscriptions,
+            call_lock: tokio::sync::Mutex::new(()),
+            active_parent: Mutex::new(None),
             profile: self.profile.clone(),
             auth: Mutex::new(None),
             auth_challenge: Mutex::new(None),
             active: AtomicUsize::new(0),
+            retry_attempt: AtomicUsize::new(0),
+            retry_at: AtomicU64::new(0),
+            retry_scheduled: AtomicBool::new(false),
             last_used: AtomicU64::new(now() as u64),
             connection: AtomicU64::new(0),
             connection_stop: Mutex::new(CancellationToken::new()),
@@ -384,6 +456,74 @@ impl Manager {
         });
         entries.insert(key, entry.clone());
         Ok(entry)
+    }
+    pub fn resource_updates(&self) -> Vec<Value> {
+        self.entries
+            .lock()
+            .values()
+            .flat_map(|e| {
+                e.resource_updates
+                    .lock()
+                    .values()
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+    pub async fn set_roots(entry: &Arc<Entry>, roots: Vec<Value>) -> Result<()> {
+        let live = Self::ensure(entry, &AtomicBool::new(false)).await?;
+        let folder = entry
+            .roots_path
+            .parent()
+            .context("Missing roots directory")?;
+        std::fs::create_dir_all(folder)?;
+        let mut temp = tempfile::NamedTempFile::new_in(folder)?;
+        use std::io::Write;
+        temp.write_all(&serde_json::to_vec(&roots)?)?;
+        temp.as_file().sync_all()?;
+        temp.persist(&entry.roots_path)?;
+        *entry.roots.lock() = roots;
+        live.peer.notify_roots_list_changed().await?;
+        Ok(())
+    }
+    pub async fn subscribe(entry: &Arc<Entry>, uri: &str, enabled: bool) -> Result<()> {
+        let live = Self::ensure(entry, &AtomicBool::new(false)).await?;
+        if entry.snapshot.lock().capabilities["resources"]["subscribe"] != true {
+            bail!("This MCP server does not support resource subscriptions");
+        }
+        rpc(
+            &live.peer,
+            if enabled {
+                "resources/subscribe"
+            } else {
+                "resources/unsubscribe"
+            },
+            json!({"uri":uri}),
+            entry.config.request_timeout_ms,
+            &AtomicBool::new(false),
+            &entry.retired,
+        )
+        .await?;
+        if enabled {
+            entry.subscriptions.lock().insert(uri.into());
+        } else {
+            entry.subscriptions.lock().remove(uri);
+        }
+        Ok(())
+    }
+    pub fn statuses_for(&self, cwd: &Path) -> HashMap<String, Value> {
+        self.entries
+            .lock()
+            .iter()
+            .filter(|((_, work), e)| {
+                work == cwd
+                    || e.config
+                        .cwd
+                        .as_ref()
+                        .is_some_and(|c| Path::new(c).canonicalize().ok().as_ref() == Some(work))
+            })
+            .map(|((name, _), e)| (name.clone(), e.status()))
+            .collect()
     }
     pub fn statuses(&self) -> HashMap<String, Value> {
         let mut rows: HashMap<String, Value> = HashMap::new();
@@ -422,10 +562,23 @@ impl Manager {
         self.disabled.lock().insert(name.into());
         for e in self.entries.lock().values().filter(|e| e.name == name) {
             e.retired.cancel();
+            e.connection.fetch_add(1, Ordering::SeqCst);
+            e.connection_stop.lock().cancel();
             let mut s = e.snapshot.lock();
             s.status = "disconnected".into();
             s.stale = s.enumerated;
             s.updated = now();
+        }
+    }
+    pub fn signed_out(&self, name: &str) {
+        self.disconnect(name);
+        for e in self.entries.lock().values().filter(|e| e.name == name) {
+            e.authenticated.store(false, Ordering::SeqCst);
+            let mut s = e.snapshot.lock();
+            s.status = "needs_auth".into();
+            s.auth_url = None;
+            s.auth_attempt = None;
+            s.error = Some(json!({"kind":"auth","message":"Signed out. Sign in to reconnect."}));
         }
     }
     pub fn enable(&self, name: &str) {
@@ -445,12 +598,58 @@ impl Manager {
     pub fn start(entry: Arc<Entry>, refresh: bool) {
         runtime().spawn(async move {
             let never = AtomicBool::new(false);
-            if let Ok(live) = Self::ensure(&entry, &never).await {
-                if refresh {
-                    let _ = Self::refresh(&entry, &live, &never).await;
+            match Self::ensure(&entry, &never).await {
+                Ok(live) => {
+                    if refresh {
+                        let _ = Self::refresh(&entry, &live, &never).await;
+                    }
+                }
+                Err(error) => {
+                    if retryable(&format!("{error:#}")) {
+                        Self::schedule_recovery(entry);
+                    }
                 }
             }
         });
+    }
+    fn schedule_recovery(entry: Arc<Entry>) {
+        if entry.retired.is_cancelled() || entry.retry_scheduled.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        // Erase the future type: ensure also starts a monitor that may schedule us.
+        let task: std::pin::Pin<Box<dyn Future<Output = ()> + Send>> = Box::pin(async move {
+            loop {
+                if matches!(
+                    entry.snapshot.lock().status.as_str(),
+                    "needs_auth" | "authenticating"
+                ) {
+                    break;
+                }
+                let attempt = entry.retry_attempt.load(Ordering::SeqCst);
+                if attempt >= 3 {
+                    break;
+                }
+                let delay = 500u64 * (1 << attempt) + (now() as u64 % 151);
+                entry.retry_at.store(now() as u64 + delay, Ordering::SeqCst);
+                tokio::select! {_=tokio::time::sleep(Duration::from_millis(delay))=>{},_=entry.retired.cancelled()=>break}
+                entry.retry_at.store(0, Ordering::SeqCst);
+                if matches!(
+                    entry.snapshot.lock().status.as_str(),
+                    "needs_auth" | "authenticating"
+                ) {
+                    break;
+                }
+                entry.retry_attempt.fetch_add(1, Ordering::SeqCst);
+                match Self::ensure(&entry, &AtomicBool::new(false)).await {
+                    Ok(_) => break,
+                    Err(error) if retryable(&format!("{error:#}")) => {}
+                    Err(_) => break,
+                }
+            }
+            entry.retry_at.store(0, Ordering::SeqCst);
+            entry.retry_scheduled.store(false, Ordering::SeqCst);
+        });
+        runtime().spawn(task);
     }
     pub async fn ensure(entry: &Arc<Entry>, cancelled: &AtomicBool) -> Result<Live> {
         let _guard = tokio::select! {g=entry.operation.lock()=>g,_=stop_requested(cancelled)=>bail!("MCP connection cancelled"),_=entry.retired.cancelled()=>bail!("MCP configuration was disconnected or replaced")};
@@ -515,13 +714,32 @@ impl Manager {
             }
             return Err(e);
         }
+        let subscriptions: Vec<_> = entry.subscriptions.lock().iter().cloned().collect();
+        for uri in subscriptions {
+            if let Err(error) = rpc(
+                &live.peer,
+                "resources/subscribe",
+                json!({"uri":uri}),
+                entry.config.request_timeout_ms,
+                cancelled,
+                &entry.retired,
+            )
+            .await
+            {
+                // One unavailable document must not disable the server's tools.
+                let mut updates = entry.resource_updates.lock();
+                let version = entry.resource_version.fetch_add(1, Ordering::SeqCst) + 1;
+                updates.insert(uri.clone(),json!({"server":entry.name,"uri":uri,"cwd":entry.cwd,"version":version,"updatedAt":now(),"error":entry.redact(&format!("{error:#}"))}));
+            }
+        }
         let weak = Arc::downgrade(entry);
         let watch = live.clone();
         runtime().spawn(async move{
             loop {tokio::time::sleep(Duration::from_millis(100)).await;let Some(e)=weak.upgrade()else{watch.stop.cancel();break};
                 if e.connection.load(Ordering::SeqCst)!=watch.id {watch.stop.cancel();break;}
                 if e.retired.is_cancelled(){watch.stop.cancel();break;}
-                if watch.stop.is_cancelled()||watch.peer.is_transport_closed(){let _g=e.operation.lock().await;if e.connection.load(Ordering::SeqCst)!=watch.id{break;}let mut s=e.snapshot.lock();if matches!(s.status.as_str(),"ready"|"refreshing"){s.status="disconnected".into();s.stale=s.enumerated;s.error=Some(json!({"kind":"transport","message":"MCP server connection closed. Reconnect to continue."}));s.updated=now();}break;}
+                if watch.stop.is_cancelled()||watch.peer.is_transport_closed(){let _g=e.operation.lock().await;if e.connection.load(Ordering::SeqCst)!=watch.id{break;}let mut s=e.snapshot.lock();if matches!(s.status.as_str(),"ready"|"refreshing"){s.status="disconnected".into();s.stale=s.enumerated;s.error=Some(json!({"kind":"transport","message":"MCP server connection closed. Reconnecting with a bounded retry budget."}));s.updated=now();}drop(s);drop(_g);Self::schedule_recovery(e);break;}
+                if e.snapshot.lock().last_success.is_some_and(|t|now().saturating_sub(t)>30000){e.retry_attempt.store(0,Ordering::SeqCst);}
                 if e.config.idle_timeout_ms>0&&e.active.load(Ordering::SeqCst)==0&&(now() as u64).saturating_sub(e.last_used.load(Ordering::SeqCst))>e.config.idle_timeout_ms {
                     let _g=e.operation.lock().await;
                     if e.connection.load(Ordering::SeqCst)==watch.id&&e.active.load(Ordering::SeqCst)==0&&(now() as u64).saturating_sub(e.last_used.load(Ordering::SeqCst))>e.config.idle_timeout_ms{watch.stop.cancel();let mut s=e.snapshot.lock();s.status="disconnected".into();s.stale=s.enumerated;s.error=Some(json!({"kind":"idle","message":"Idle connection parked; it reconnects when used."}));break;}
@@ -566,6 +784,8 @@ impl Manager {
         args: &Value,
         cancelled: &AtomicBool,
     ) -> Result<Value> {
+        let _call = tokio::select! {g=entry.call_lock.lock()=>g,_=stop_requested(cancelled)=>bail!("MCP queued call cancelled"),_=entry.retired.cancelled()=>bail!("MCP connection replaced")};
+        let _parent = CallParent::new(entry);
         let _activity = Activity::new(entry);
         let live = Self::ensure(entry, cancelled).await?;
         if entry.changed.load(Ordering::SeqCst) != entry.refreshed.load(Ordering::SeqCst) {
@@ -584,6 +804,11 @@ impl Manager {
                     entry.name
                 )
             })?;
+        if !super::McpHost::model_visible(&definition)
+            || entry.config.disabled_tools.iter().any(|n| n == tool)
+        {
+            bail!("MCP tool '{tool}' is not available to the model");
+        }
         validate_instance(&definition["inputSchema"], args)
             .context("MCP tool arguments do not match inputSchema")?;
         let result = rpc(
@@ -601,6 +826,23 @@ impl Manager {
         let result = match result {
             Ok(v) => v,
             Err(e) => {
+                for source in e.chain() {
+                    if let Some(rmcp::service::ServiceError::McpError(error)) =
+                        source.downcast_ref::<rmcp::service::ServiceError>()
+                    {
+                        if error.code.0 == -32042 {
+                            if let Some(data) = &error.data {
+                                let _ = entry.broker.enqueue_url_required(
+                                    &entry.name,
+                                    live.id,
+                                    Value::Null,
+                                    data,
+                                    &entry.connection_stop.lock(),
+                                );
+                            }
+                        }
+                    }
+                }
                 entry.remember_challenge(&e);
                 if is_auth(&format!("{e:#}")) {
                     entry.fail_for(live.id, "auth", format!("{e:#}"));
@@ -631,6 +873,8 @@ impl Manager {
         params: Value,
         cancelled: &AtomicBool,
     ) -> Result<Value> {
+        let _call = tokio::select! {g=entry.call_lock.lock()=>g,_=stop_requested(cancelled)=>bail!("MCP queued resource request cancelled"),_=entry.retired.cancelled()=>bail!("MCP connection replaced")};
+        let _parent = CallParent::new(entry);
         let _activity = Activity::new(entry);
         Self::discover(entry, cancelled).await?;
         if method == "prompts/get" {
@@ -664,6 +908,26 @@ impl Manager {
             &entry.retired,
         )
         .await
+    }
+}
+struct CallParent {
+    entry: Arc<Entry>,
+    token: CancellationToken,
+}
+impl CallParent {
+    fn new(entry: &Arc<Entry>) -> Self {
+        let token = entry.retired.child_token();
+        *entry.active_parent.lock() = Some(token.clone());
+        Self {
+            entry: entry.clone(),
+            token,
+        }
+    }
+}
+impl Drop for CallParent {
+    fn drop(&mut self) {
+        self.token.cancel();
+        self.entry.active_parent.lock().take();
     }
 }
 struct Activity(Arc<Entry>);
@@ -733,7 +997,7 @@ struct Handler {
 }
 impl ClientHandler for Handler {
     fn get_info(&self) -> ClientConfig {
-        serde_json::from_value(json!({"protocolVersion":"2025-11-25","capabilities":{"roots":{"listChanged":true}},"clientInfo":{"name":"QuixiDesk","version":env!("CARGO_PKG_VERSION")}})).expect("client info")
+        serde_json::from_value(json!({"protocolVersion":"2025-11-25","capabilities":{"roots":{"listChanged":true},"elicitation":{"form":{},"url":{}}},"clientInfo":{"name":"QuixiDesk","version":env!("CARGO_PKG_VERSION")}})).expect("client info")
     }
     #[allow(deprecated)]
     async fn list_roots(
@@ -743,10 +1007,90 @@ impl ClientHandler for Handler {
         let roots = self
             .entry
             .upgrade()
-            .and_then(|e| url::Url::from_directory_path(&e.cwd).ok())
-            .map(|uri| vec![json!({"uri":uri.as_str(),"name":"Selected workspace"})])
+            .map(|e| e.roots.lock().clone())
             .unwrap_or_default();
         Ok(serde_json::from_value(json!({"roots":roots})).unwrap())
+    }
+    async fn create_elicitation(
+        &self,
+        request: ElicitRequestParams,
+        context: RequestContext<RoleClient>,
+    ) -> std::result::Result<ElicitResult, ErrorData> {
+        let entry = self
+            .entry
+            .upgrade()
+            .ok_or_else(|| ErrorData::internal_error("Connection closed", None))?;
+        if entry.retired.is_cancelled()
+            || entry.connection.load(Ordering::SeqCst) != self.connection
+        {
+            return Err(ErrorData::internal_error("Connection replaced", None));
+        }
+        let stop = entry.connection_stop.lock().clone();
+        let parent = entry.active_parent.lock().clone();
+        // Validate the exact received schema, including constraints absent from SDK typed fields.
+        let original_schema = match &request {
+            ElicitRequestParams::FormElicitationParams {
+                requested_schema, ..
+            } => requested_schema.original_json_schema().cloned(),
+            _ => None,
+        };
+        let mut params = serde_json::to_value(request)
+            .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
+        if let Some(schema) = original_schema {
+            params["requestedSchema"] = schema;
+        }
+        let result = entry
+            .broker
+            .request_scoped(
+                &entry.name,
+                self.connection,
+                serde_json::to_value(context.id).unwrap_or(Value::Null),
+                params,
+                &context.ct,
+                &stop,
+                parent.as_ref(),
+            )
+            .await
+            .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
+        serde_json::from_value(result).map_err(|e| ErrorData::internal_error(e.to_string(), None))
+    }
+    async fn on_custom_notification(
+        &self,
+        notification: CustomNotification,
+        _: NotificationContext<RoleClient>,
+    ) {
+        if let Some(entry) = self.entry.upgrade() {
+            let value = serde_json::to_value(notification).unwrap_or(Value::Null);
+            if value["method"] == "notifications/elicitation/complete" {
+                if let Some(id) = value["params"]["elicitationId"].as_str() {
+                    entry.broker.complete_url(&entry.name, self.connection, id);
+                }
+            }
+        }
+    }
+    async fn on_resource_updated(
+        &self,
+        params: ResourceUpdatedNotificationParam,
+        _: NotificationContext<RoleClient>,
+    ) {
+        if let Some(entry) = self.entry.upgrade() {
+            if entry.retired.is_cancelled()
+                || entry.connection.load(Ordering::SeqCst) != self.connection
+            {
+                return;
+            }
+            let value = serde_json::to_value(params).unwrap_or(Value::Null);
+            if let Some(uri) = value["uri"].as_str() {
+                let mut updates = entry.resource_updates.lock();
+                let version = entry.resource_version.fetch_add(1, Ordering::SeqCst) + 1;
+                if updates.len() >= 256 && !updates.contains_key(uri) {
+                    if let Some(old) = updates.keys().next().cloned() {
+                        updates.remove(&old);
+                    }
+                }
+                updates.insert(uri.into(),json!({"server":entry.name,"cwd":entry.cwd,"uri":uri,"version":version,"updatedAt":now()}));
+            }
+        }
     }
     async fn on_tool_list_changed(&self, _: NotificationContext<RoleClient>) {
         self.invalidate();
@@ -834,56 +1178,20 @@ async fn connect(entry: &Arc<Entry>, connection_id: u64) -> Result<Live> {
                 .serve_with_lifecycle(transport, lifecycle.clone())
                 .await
                 .context("MCP initialization failed")?
-        } else if entry.config.transport_kind() == "http" {
-            let mut headers = reqwest::header::HeaderMap::new();
-            for (k, v) in &entry.config.headers {
-                headers.insert(
-                    reqwest::header::HeaderName::from_bytes(k.as_bytes())?,
-                    reqwest::header::HeaderValue::from_str(v)?,
-                );
-            }
-            let client = reqwest::Client::builder()
-                .default_headers(headers)
-                .redirect(reqwest::redirect::Policy::none())
-                .connect_timeout(Duration::from_secs(15))
-                .build()?;
-            let config = StreamableHttpClientTransportConfig::with_uri(
-                entry.config.url.clone().unwrap_or_default(),
-            )
-            .max_sse_event_size(16 * 1024 * 1024)
-            .reinit_on_expired_session(false);
-            if let Some(authenticated) = super::oauth::authenticated_client(
-                &entry.profile,
-                &entry.name,
-                entry.config.url.as_deref().unwrap_or(""),
-                client.clone(),
-            )
-            .await?
-            {
-                entry.authenticated.store(true, Ordering::SeqCst);
-                handler
-                    .serve_with_lifecycle(
-                        StreamableHttpClientTransport::with_client(authenticated, config),
-                        lifecycle.clone(),
-                    )
-                    .await
-                    .context("MCP authenticated HTTP initialization failed")?
-            } else {
-                handler
-                    .serve_with_lifecycle(
-                        StreamableHttpClientTransport::with_client(client, config),
-                        lifecycle.clone(),
-                    )
-                    .await
-                    .context("MCP HTTP initialization failed")?
-            }
         } else {
             let transport =
-                super::sse::connect(&entry.profile, &entry.name, &entry.config, &stop).await?;
-            handler
+                super::worker::connect(&entry.profile, &entry.name, &entry.config, &entry.cwd)
+                    .await?;
+            entry.snapshot.lock().worker_pid = Some(transport.pid());
+            let authenticated = transport.authenticated();
+            let service = handler
                 .serve_with_lifecycle(transport, lifecycle.clone())
                 .await
-                .context("MCP SSE initialization failed")?
+                .context("MCP isolated remote initialization failed")?;
+            entry
+                .authenticated
+                .store(authenticated.load(Ordering::SeqCst), Ordering::SeqCst);
+            service
         };
         let peer = service.peer().clone();
         let version = peer
@@ -971,13 +1279,20 @@ async fn refresh_catalog(entry: &Arc<Entry>, live: &Live, cancelled: &AtomicBool
     let caps = info["capabilities"].clone();
     let future = async {
         let mut collections = Vec::new();
-        for collection in ["tools", "resources", "prompts"] {
+        for collection in ["tools", "resources", "prompts", "resourceTemplates"] {
             let mut items = Vec::new();
             let mut cursor: Option<String> = None;
             let mut seen = HashSet::new();
             let mut names = HashSet::new();
             let mut total_bytes = 0;
-            if caps.get(collection).is_some() {
+            if caps
+                .get(if collection == "resourceTemplates" {
+                    "resources"
+                } else {
+                    collection
+                })
+                .is_some()
+            {
                 for page in 0..entry.config.max_pages {
                     let params = cursor
                         .as_ref()
@@ -985,18 +1300,25 @@ async fn refresh_catalog(entry: &Arc<Entry>, live: &Live, cancelled: &AtomicBool
                         .unwrap_or_else(|| json!({}));
                     let response = rpc(
                         &live.peer,
-                        &format!("{collection}/list"),
+                        &if collection == "resourceTemplates" {
+                            "resources/templates/list".into()
+                        } else {
+                            format!("{collection}/list")
+                        },
                         params,
                         entry.config.discovery_timeout_ms,
                         cancelled,
                         &entry.retired,
                     )
-                    .await?;
+                    .await;
+                    let response=match response{Ok(v)=>v,Err(e) if collection=="resourceTemplates"&&e.chain().any(|e|e.downcast_ref::<rmcp::service::ServiceError>().is_some_and(|e|matches!(e,rmcp::service::ServiceError::McpError(e) if e.code.0==-32601)))=>break,Err(e)=>return Err(e)};
                     let rows = response[collection].as_array().ok_or_else(|| {
                         anyhow!("Invalid {collection}/list result: missing array")
                     })?;
                     for item in rows {
-                        let key = item[if collection == "resources" {
+                        let key = item[if collection == "resourceTemplates" {
+                            "uriTemplate"
+                        } else if collection == "resources" {
                             "uri"
                         } else {
                             "name"
@@ -1055,6 +1377,7 @@ async fn refresh_catalog(entry: &Arc<Entry>, live: &Live, cancelled: &AtomicBool
     s.tools = cols.remove(0);
     s.resources = cols.remove(0);
     s.prompts = cols.remove(0);
+    s.resource_templates = cols.remove(0);
     s.capabilities = caps;
     s.server_info = info["serverInfo"].clone();
     s.instructions = info["instructions"].as_str().unwrap_or("").to_string();
@@ -1126,4 +1449,40 @@ mod diagnostic_tests {
             "[redacted] done"
         );
     }
+}
+
+fn valid_saved_roots(roots: &[Value]) -> bool {
+    roots.len() <= 32
+        && roots.iter().all(|r| {
+            r["uri"]
+                .as_str()
+                .and_then(|uri| url::Url::parse(uri).ok())
+                .is_some_and(|uri| {
+                    uri.scheme() == "file" && uri.query().is_none() && uri.fragment().is_none()
+                })
+                && r.get("name").is_none_or(Value::is_string)
+                && r.get("path").is_none_or(Value::is_string)
+        })
+}
+
+fn retryable(message: &str) -> bool {
+    if is_auth(message) {
+        return false;
+    }
+    let message = message.to_ascii_lowercase();
+    [
+        "transport closed",
+        "connection closed",
+        "connection reset",
+        "connection refused",
+        "broken pipe",
+        "timed out",
+        "timeout",
+        "502",
+        "503",
+        "504",
+        "expired session",
+    ]
+    .iter()
+    .any(|p| message.contains(p))
 }

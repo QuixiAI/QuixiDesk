@@ -17,7 +17,7 @@ Open **Tools & skills → Configure MCP** and add a server entry. Existing comma
 }
 ```
 
-Use **Connect** to initialize and discover immediately, or ask the agent to use the server. The agent uses `McpDiscover` for actual server/tool discovery, then `McpCall` with the discovered name and full argument schema. Discovery does not execute a tool. External tool calls still require approval in Manual mode, even when a server labels a tool read-only. Approvals are bound to the server configuration; changing its command, URL, or environment invalidates an outstanding approval.
+Use **Connect** to initialize and discover immediately, or ask the agent to use the server. Ready, model-visible tools are exposed directly to the provider with unchanged input schemas and stable, collision-checked aliases. The registry is rebuilt each model round. `McpDiscover` and `McpCall` remain available for servers not yet connected and tools that exceed the provider’s count/schema budget. If a compatible provider rejects tool schemas, one retry defers MCP definitions to those generic tools without truncating schemas or replaying tool actions. The native Anthropic provider supports streaming tool calls/results, including error status, images and signed thinking history. Discovery does not execute a tool. External tool calls still require approval in Manual mode, even when a server labels a tool read-only. Approvals are bound to the server configuration; changing its command, URL, or environment invalidates an outstanding approval.
 
 Remote examples use `{"transport":"http","url":"https://example.com/mcp"}` or `{"transport":"sse","url":"https://example.com/sse"}`. Optional `headers` configure static authentication. OAuth servers expose **Sign in** after an authentication challenge; authorization opens in the user's browser and returns through a local loopback callback. Tokens are encrypted with an OS credential-store key and refresh automatically. Cancelling a new authorization leaves existing credentials intact. **Forget sign-in** removes saved authorization and disconnects. A public pre-registered OAuth client ID can be supplied as `oauthClientId` when a server does not support dynamic registration.
 
@@ -34,10 +34,30 @@ The application configuration is `~/.quixi/quixi_desktop_config.json` (`data/qui
 | `maxTools` | 10000 | Maximum items in each catalog |
 | `lifecycle` | `initialize` | Ordered legacy handshake; `discover` selects modern negotiation; `auto` permits protocol-defined fallback |
 | `cwd` | Selected workspace | Working directory for the connection |
+| `disabledTools` | `[]` | Tool names excluded from model discovery and execution |
+| `roots` | Selected workspace file URI | Optional explicit root objects, useful for a server launched through SSH/WSL |
 
-Connections are isolated by server configuration and workspace. Concurrent users of the same connection share initialization. Active requests prevent idle parking. Parking retains a visibly stale catalog and reconnects on the next use; explicit Disconnect stays disconnected until Connect. Failed mutations are never silently replayed. Invalid configuration saves preserve the existing file, and removed/replaced connections cannot publish results into a new connection's state.
+Connections are isolated by server configuration and workspace. Concurrent users of the same connection share initialization. Active requests prevent idle parking. Parking retains a visibly stale catalog and reconnects on the next use; explicit Disconnect stays disconnected until Connect. Failed mutations are never silently replayed. Invalid configuration saves preserve the existing file, and removed/replaced connections cannot publish results into a new connection's state. An invalid individual server is isolated: healthy entries continue to work and an unchanged invalid entry is preserved when editing a healthy one.
 
 Only a complete, validated catalog is published as ready. Empty catalogs and resource-only servers can be ready. Repeated pagination cursors, duplicate tool names, malformed schemas, and discovery failures produce explicit failures. Full schemas and metadata are preserved; model-facing discovery uses bounded pages and returns an unusually large individual schema intact. Catalog-change notifications trigger refresh. Unsupported legacy placeholder connectors are not advertised as working tools.
+
+## Tools, context and user interactions
+
+An external server’s tool catalog has per-tool switches. Disabled tools and tools with MCP Apps metadata restricting visibility to `app` never reach model discovery or execute through the generic model caller. Changing tool policy invalidates pending configuration-bound approvals; the connection is currently refreshed to apply the new policy.
+
+Use the composer’s MCP context picker to browse resources, expand an advertised URI template, or supply arguments to a prompt. Preview and explicitly attach the returned text before sending. Resource subscriptions mark changed attachments as stale; review/refresh is required before sending the changed content. The server cannot silently replace the user’s draft. Custom roots can be selected with the native folder picker and trigger `notifications/roots/list_changed`. They survive reconnect and app restart, bound to the endpoint configuration and workspace. Subscription restoration failures affect the individual resource rather than disabling all tools. Roots describe shared context; they are not an execution permission grant.
+
+Form and URL elicitation appear in a global pending-request notice, including while a chat is running. Forms preserve the original requested schema, validate supported primitive/enum constraints, and reject unsupported schema constructs. Accept, decline and cancel have separate protocol results. URL requests display their destination and open only after explicit consent. Completion notifications are correlated to server/connection/request identity; a failed action is never automatically replayed. Stop, disconnect, expiry or connection replacement invalidate the pending interaction. `vendor/rmcp/QUIXIDESK_PATCH.md` documents the small SDK patch that retains raw form constraints rather than silently dropping them during typed decoding.
+
+## Transport isolation and recovery
+
+HTTP and legacy SSE sessions run in an owned transport worker process. Packaged apps invoke their own executable with `--mcp-transport-worker`, before GUI initialization; development/test binaries use `quixi-mcp-worker`. Build it with `cargo build -p quixi-mcp --bin quixi-mcp-worker` when running an individual example or unit target. There is no fallback to an in-process HTTP session when the helper is missing.
+
+Configuration and OAuth context cross a private bounded pipe, not command-line arguments. The parent retains permission checks, catalogs, routing and interaction state. Worker errors preserve authentication challenges and remain distinguishable from server-supplied JSON-RPC errors. Child ownership uses process groups on Unix and job objects on Windows. This is crash containment, not an OS sandbox.
+
+Transient transport failure schedules up to three reconnect attempts with exponential delay and jitter. The UI shows the next retry and exhausted retry budget; manual Reconnect starts a fresh budget. Authentication and configuration failures require user action. A connection stable for 30 seconds restores its retry budget. Recovery reinitializes and discovers a complete catalog, restores subscriptions, and prepares future requests without repeating the failed tool call. Idle parking and explicit Disconnect do not trigger automatic recovery.
+
+For SSH, configure `command: "ssh"` and explicit host/remote-command arguments. The remote command must speak MCP on stdout; diagnostics belong on stderr. Roots default to the local selected workspace and do not imply remote filesystem translation. Use explicit `roots` file URIs for the remote machine. WSL can likewise be configured as a stdio command, but is not claimed verified on a machine without a registered distribution.
 
 ## Acceptance matrix
 
@@ -80,9 +100,9 @@ A per-server request timeout is not permission to repeat a failed mutation. Auto
 
 Tool descriptions, server instructions, annotations and returned content remain third-party data. They do not grant user permission. A server's read-only hint alone must not bypass QuixiDesk's permission policy.
 
-Full OAuth user flows and protected token persistence have a separate module and verification suite. Native browser authorization, SSH/WSL transport execution, roots changes, and elicitation require separate verification before claiming parity in those areas. Resource/prompt inventories and modern lifecycle negotiation are covered by the tests above; the tests do not establish every resource template or modern subscription feature. Merely depending on an SDK with such features is not evidence that QuixiDesk has wired and tested them.
+The follow-up suites in `tests/parity.rs` and `tests/interactions.rs`, provider integration tests, and native UI evidence cover the added behavior separately. This is not universal product parity: embedded MCP Apps rendering, server-requested sampling, enterprise identity management, and platform-specific connector catalogs are outside this implementation. The context picker currently attaches text; binary-only resources report an explicit unsupported-content error. Delegated subagents retain their existing restricted tool policy. WSL execution remains unverified. A successful real-service authorization does not establish compatibility with every identity provider or account policy. Merely depending on an SDK with a feature is not evidence that QuixiDesk has wired and tested it.
 
-## Verification status
+## Foundation verification (before the parity follow-up)
 
 The October 29 MCP and engine core snapshot was copied into isolated directories and tested with actual Python subprocesses and loopback HTTP/SSE servers. The archive SHA-256 was `5497cda4300504a7872bbf005635e5d0086983af1d63f16e94792f284979c22f`. No production MCP configuration, credentials or installed app was modified by these tests.
 
@@ -97,3 +117,25 @@ A later shutdown and standalone-helper supplement used archive SHA-256 `a664bf34
 Remote commands were `cargo test --locked --release -p quixi-mcp` and `cargo test --locked --release -p quixi-engine --lib`. Final remote logs were retained in `/tmp/quixi-mcp-validation-linux-final.log` and `/tmp/quixi-mcp-validation-windows-final.log` on the investigation Mac. The Windows process-cleanup assertion uses a native process lookup; the same test uses `kill -0` on Unix. Fixture self-checks also passed for stdio, Streamable HTTP, and legacy SSE.
 
 Native macOS verification used the Computer Use skill against an isolated rebuilt app. It verified REA 6.7.0 discovery of 207 tools, full-schema search, refresh, disconnect/reconnect, stale catalogs, missing-command and timeout errors, detailed configuration validation, truthful unsupported legacy connectors, and clean GUI quit. A separate live REA probe successfully called binary_session. The UI regression suite passed 37 tests. Native report and seven screenshots are retained in `/tmp/quixi-mcp-redesign/`; no real remote OAuth account was authorized. Passing these controlled tests does not establish universal Claude feature parity.
+
+## Parity follow-up verification
+
+The follow-up adds configuration isolation, direct provider tools, native Anthropic tool protocol, form/URL interactions, context UI, roots and subscriptions, process isolation, and bounded recovery. Native screenshots are retained in `/tmp/quixi-mcp-parity/screenshots/` in the investigation environment. The native workflow uses an isolated profile, local provider and independent MCP fixtures; production chat data and credentials are not copied into it.
+
+| Platform | Follow-up verification |
+|---|---|
+| macOS | Workspace: 195 Rust tests passed. Final MCP changes reran all 81 MCP tests; UI suite: 53 passed. |
+| Linux (`eric-5090`) | Native release builds: 81 MCP tests and 90 engine tests passed. |
+| Windows (`win10`) | Native release builds: 81 MCP tests and 90 engine tests passed. |
+
+The MCP count comprises 28 unit, 8 interaction/OAuth, 35 lifecycle, 7 parity, and 3 worker process tests. The tests exercise separate processes and real loopback protocol peers, including lossless form constraints, cancellation, bounded recovery, worker crash/cleanup, graceful HTTP DELETE, and a session expiring after a mutation without replay. A cross-platform test synchronization race was fixed by observing the first subscription notification before retiring its connection; transport acknowledgments do not establish notification delivery.
+
+The exact tested cross-platform archive is `/tmp/quixi-mcp-parity-tested-source.tar.gz`, SHA-256 `bb112e3aed4c2853090da1f3ff2b777e03b2df92fb387c0d341841127f5bbd9b`. Detailed commands and logs are indexed in `/tmp/quixi-mcp-remote-verification.md`. macOS workspace and UI logs are `/tmp/quixi-mcp-parity-workspace-final.log` and `/tmp/quixi-mcp-parity-ui-final.log`.
+
+Actual MCP-over-SSH discovery and read-only execution passed against both hosts. Explicit remote roots were observed by each remote peer, in addition to checking the default local root behavior. WSL has no registered distribution on `win10`, so WSL execution remains untested.
+
+A public HTTP check against xAI’s documented `https://docs.x.ai/api/mcp` endpoint discovered four tools and successfully executed `list_doc_pages` through the isolated transport worker. The response was 8,751 bytes. This validates a real remote HTTP service, not OAuth. Reproduce discovery with `cargo run -p quixi-mcp --example probe -- --url https://docs.x.ai/api/mcp` after building the worker. Reference: https://docs.x.ai/developers/docs-mcp.
+
+Native macOS computer-use checks exercised per-tool controls, an invalid neighboring configuration, resource/template/prompt preview, explicit attachments, stale resource review, form validation and submission, URL consent/completion, native roots selection and persistence across restart, browser OAuth denial/approval, and saved credential restoration. The report and screenshots are at `/tmp/quixi-mcp-parity/report.md`. These checks use the app’s visible controls and genuine protocol fixtures; the chat provider fixture is deterministic rather than a live paid model.
+
+With the user's authorization, the native test app also connected to Linear's official `https://mcp.linear.app/mcp/readonly` endpoint. Browser OAuth completed, 38 tools were discovered, and an actual chat tool call to `get_user({"query":"me"})` returned the current account profile successfully. The deterministic chat-provider fixture validated the presence of the response without repeating profile fields; the result was 601 serialized bytes. No Linear writes, account revocation or sign-out were performed. This supplies independent third-party OAuth and read-only execution evidence in addition to the controlled OAuth fixture. Endpoint reference: https://linear.app/docs/mcp.

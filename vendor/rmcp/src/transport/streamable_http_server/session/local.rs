@@ -1,0 +1,1375 @@
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    num::ParseIntError,
+    sync::Arc,
+    time::{Duration, Instant},
+};
+
+use futures::{Stream, StreamExt};
+use thiserror::Error;
+use tokio::sync::{
+    mpsc::{Receiver, Sender},
+    oneshot,
+};
+use tokio_stream::wrappers::ReceiverStream;
+use tracing::instrument;
+
+use crate::{
+    RoleServer,
+    model::{
+        CancelledNotificationParam, ClientJsonRpcMessage, ClientNotification, ClientRequest,
+        JsonRpcNotification, JsonRpcRequest, Notification, ProgressNotificationParam,
+        ProgressToken, RequestId, ServerJsonRpcMessage, ServerNotification,
+    },
+    transport::{
+        WorkerTransport,
+        common::server_side_http::{SessionId, session_id},
+        worker::{Worker, WorkerContext, WorkerQuitReason, WorkerSendRequest},
+    },
+};
+
+#[derive(Debug, Default)]
+#[non_exhaustive]
+pub struct LocalSessionManager {
+    pub sessions: tokio::sync::RwLock<HashMap<SessionId, LocalSessionHandle>>,
+    pub session_config: SessionConfig,
+    event_store: Option<Arc<dyn EventStore>>,
+}
+
+impl LocalSessionManager {
+    /// Configure this session manager to use a shared event store.
+    pub fn with_event_store(mut self, event_store: Arc<dyn EventStore>) -> Self {
+        self.event_store = Some(event_store);
+        self
+    }
+
+    /// Clone the session handle out of the map, so the lock is released
+    /// before the caller waits on the session worker.
+    async fn session_handle(
+        &self,
+        id: &SessionId,
+    ) -> Result<LocalSessionHandle, LocalSessionManagerError> {
+        self.sessions
+            .read()
+            .await
+            .get(id)
+            .cloned()
+            .ok_or_else(|| LocalSessionManagerError::SessionNotFound(id.clone()))
+    }
+}
+
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum LocalSessionManagerError {
+    #[error("Session not found: {0}")]
+    SessionNotFound(SessionId),
+    #[error("Session error: {0}")]
+    SessionError(#[from] SessionError),
+    #[error("Invalid event id: {0}")]
+    InvalidEventId(#[from] EventIdParseError),
+}
+impl SessionManager for LocalSessionManager {
+    type Error = LocalSessionManagerError;
+    type Transport = WorkerTransport<LocalSessionWorker>;
+    async fn create_session(&self) -> Result<(SessionId, Self::Transport), Self::Error> {
+        let id = session_id();
+        let (handle, worker) = create_local_session_with_event_store(
+            id.clone(),
+            self.session_config.clone(),
+            self.event_store.clone(),
+        );
+        self.sessions.write().await.insert(id.clone(), handle);
+        Ok((id, WorkerTransport::spawn(worker)))
+    }
+    async fn initialize_session(
+        &self,
+        id: &SessionId,
+        message: ClientJsonRpcMessage,
+    ) -> Result<ServerJsonRpcMessage, Self::Error> {
+        let handle = self.session_handle(id).await?;
+        let response = handle.initialize(message).await?;
+        Ok(response)
+    }
+    async fn close_session(&self, id: &SessionId) -> Result<(), Self::Error> {
+        let handle = {
+            let mut sessions = self.sessions.write().await;
+            sessions.remove(id)
+        };
+        if let Some(handle) = handle {
+            match handle.close().await {
+                // Worker already exited — nothing left to clean up.
+                Ok(()) | Err(SessionError::SessionServiceTerminated) => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Ok(())
+    }
+    async fn has_session(&self, id: &SessionId) -> Result<bool, Self::Error> {
+        let sessions = self.sessions.read().await;
+        Ok(sessions.contains_key(id))
+    }
+    async fn create_stream(
+        &self,
+        id: &SessionId,
+        message: ClientJsonRpcMessage,
+    ) -> Result<impl Stream<Item = ServerSseMessage> + Send + 'static, Self::Error> {
+        let handle = self.session_handle(id).await?;
+        let receiver = handle.establish_request_wise_channel().await?;
+        let http_request_id = receiver.http_request_id;
+        handle.push_message(message, http_request_id).await?;
+        Ok(ReceiverStream::new(receiver.inner))
+    }
+
+    async fn create_standalone_stream(
+        &self,
+        id: &SessionId,
+    ) -> Result<impl Stream<Item = ServerSseMessage> + Send + 'static, Self::Error> {
+        let handle = self.session_handle(id).await?;
+        let receiver = handle.establish_common_channel().await?;
+        Ok(ReceiverStream::new(receiver.inner))
+    }
+
+    async fn resume(
+        &self,
+        id: &SessionId,
+        last_event_id: String,
+    ) -> Result<impl Stream<Item = ServerSseMessage> + Send + 'static, Self::Error> {
+        if let Some(event_store) = &self.event_store {
+            let stream = event_store
+                .replay_events_after(&last_event_id)
+                .await
+                .map_err(SessionError::EventStore)?;
+            return Ok(stream.left_stream());
+        }
+        let handle = self.session_handle(id).await?;
+        let receiver = handle.resume(last_event_id.parse()?).await?;
+        Ok(ReceiverStream::new(receiver.inner).right_stream())
+    }
+
+    async fn accept_message(
+        &self,
+        id: &SessionId,
+        message: ClientJsonRpcMessage,
+    ) -> Result<(), Self::Error> {
+        let handle = self.session_handle(id).await?;
+        handle.push_message(message, None).await?;
+        Ok(())
+    }
+
+    async fn restore_session(
+        &self,
+        id: SessionId,
+    ) -> Result<RestoreOutcome<Self::Transport>, Self::Error> {
+        let mut sessions = self.sessions.write().await;
+        if sessions.contains_key(&id) {
+            // A concurrent request already restored this session.
+            return Ok(RestoreOutcome::AlreadyPresent);
+        }
+        let (handle, worker) = create_local_session_with_event_store(
+            id.clone(),
+            self.session_config.clone(),
+            self.event_store.clone(),
+        );
+        sessions.insert(id, handle);
+        Ok(RestoreOutcome::Restored(WorkerTransport::spawn(worker)))
+    }
+
+    fn event_store(&self) -> Option<Arc<dyn EventStore>> {
+        self.event_store.clone()
+    }
+}
+
+/// `<index>/request_id>`
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct EventId {
+    http_request_id: Option<HttpRequestId>,
+    index: usize,
+}
+
+impl std::fmt::Display for EventId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.index)?;
+        match &self.http_request_id {
+            Some(http_request_id) => write!(f, "/{http_request_id}"),
+            None => write!(f, ""),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Error)]
+#[non_exhaustive]
+pub enum EventIdParseError {
+    #[error("Invalid index: {0}")]
+    InvalidIndex(ParseIntError),
+    #[error("Invalid numeric request id: {0}")]
+    InvalidNumericRequestId(ParseIntError),
+    #[error("Missing request id type")]
+    InvalidRequestIdType,
+    #[error("Missing request id")]
+    MissingRequestId,
+}
+
+impl std::str::FromStr for EventId {
+    type Err = EventIdParseError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if let Some((index, request_id)) = s.split_once("/") {
+            let index = usize::from_str(index).map_err(EventIdParseError::InvalidIndex)?;
+            let request_id = u64::from_str(request_id).map_err(EventIdParseError::InvalidIndex)?;
+            Ok(EventId {
+                http_request_id: Some(request_id),
+                index,
+            })
+        } else {
+            let index = usize::from_str(s).map_err(EventIdParseError::InvalidIndex)?;
+            Ok(EventId {
+                http_request_id: None,
+                index,
+            })
+        }
+    }
+}
+
+use super::{
+    EventStore, EventStoreError, RestoreOutcome, ServerSseMessage, SessionManager, StreamId,
+};
+
+struct CachedTx {
+    tx: Sender<ServerSseMessage>,
+    cache: VecDeque<ServerSseMessage>,
+    http_request_id: Option<HttpRequestId>,
+    capacity: usize,
+    starting_index: usize,
+    stream_id: StreamId,
+    event_store: Option<Arc<dyn EventStore>>,
+}
+
+impl CachedTx {
+    fn new(
+        tx: Sender<ServerSseMessage>,
+        http_request_id: Option<HttpRequestId>,
+        starting_index: usize,
+        stream_id: StreamId,
+        event_store: Option<Arc<dyn EventStore>>,
+    ) -> Self {
+        Self {
+            cache: VecDeque::with_capacity(tx.capacity()),
+            capacity: tx.capacity(),
+            tx,
+            http_request_id,
+            starting_index,
+            stream_id,
+            event_store,
+        }
+    }
+    fn new_common(
+        tx: Sender<ServerSseMessage>,
+        session_id: &SessionId,
+        event_store: Option<Arc<dyn EventStore>>,
+    ) -> Self {
+        Self::new(tx, None, 0, format!("{session_id}:common"), event_store)
+    }
+
+    fn next_event_id(&self) -> EventId {
+        let index = self.cache.back().map_or(self.starting_index, |m| {
+            m.event_id
+                .as_deref()
+                .unwrap_or_default()
+                .parse::<EventId>()
+                .expect("valid event id")
+                .index
+                + 1
+        });
+        EventId {
+            http_request_id: self.http_request_id,
+            index,
+        }
+    }
+
+    async fn send(&mut self, message: ServerJsonRpcMessage) -> Result<(), SessionError> {
+        self.store_cache_and_send(ServerSseMessage::from_message(message))
+            .await
+    }
+
+    async fn send_priming(&mut self, retry: Duration) -> Result<(), SessionError> {
+        self.store_cache_and_send(ServerSseMessage::retry(retry))
+            .await
+    }
+
+    async fn store_cache_and_send(
+        &mut self,
+        mut event: ServerSseMessage,
+    ) -> Result<(), SessionError> {
+        let event_id = if let Some(event_store) = &self.event_store {
+            event_store
+                .store_event(&self.stream_id, &event)
+                .await
+                .map_err(SessionError::EventStore)?
+        } else {
+            self.next_event_id().to_string()
+        };
+        event.event_id = Some(event_id);
+        self.cache_and_send(event).await;
+        Ok(())
+    }
+
+    async fn cache_and_send(&mut self, message: ServerSseMessage) {
+        if self.cache.len() >= self.capacity {
+            self.cache.pop_front();
+            self.cache.push_back(message.clone());
+        } else {
+            self.cache.push_back(message.clone());
+        }
+        let _ = self.tx.send(message).await.inspect_err(|e| {
+            let event_id = &e.0.event_id;
+            tracing::trace!(?event_id, "trying to send message in a closed session")
+        });
+    }
+
+    async fn sync(&mut self, index: usize) -> Result<(), SessionError> {
+        let Some(front) = self.cache.front() else {
+            return Ok(());
+        };
+        let front_event_id = front
+            .event_id
+            .as_deref()
+            .unwrap_or_default()
+            .parse::<EventId>()?;
+        let sync_index = index.saturating_sub(front_event_id.index);
+        if sync_index > self.cache.len() {
+            // invalid index
+            return Err(SessionError::InvalidEventId);
+        }
+        for message in self.cache.iter().skip(sync_index) {
+            let send_result = self.tx.send(message.clone()).await;
+            if send_result.is_err() {
+                let event_id: EventId = message.event_id.as_deref().unwrap_or_default().parse()?;
+                return Err(SessionError::ChannelClosed(Some(event_id.index as u64)));
+            }
+        }
+        Ok(())
+    }
+}
+
+struct HttpRequestWise {
+    resources: HashSet<ResourceKey>,
+    tx: CachedTx,
+    completed_at: Option<Instant>,
+}
+
+type HttpRequestId = u64;
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+enum ResourceKey {
+    McpRequestId(RequestId),
+    ProgressToken(ProgressToken),
+}
+
+pub struct LocalSessionWorker {
+    id: SessionId,
+    next_http_request_id: HttpRequestId,
+    tx_router: HashMap<HttpRequestId, HttpRequestWise>,
+    resource_router: HashMap<ResourceKey, HttpRequestId>,
+    common: CachedTx,
+    /// Shadow senders for secondary SSE streams (e.g. from POST EventSource
+    /// reconnections). These keep the HTTP connections alive via SSE keep-alive
+    /// without receiving notifications, preventing MCP clients from entering
+    /// infinite reconnect loops when multiple EventSource connections compete
+    /// to replace the common channel.
+    shadow_txs: Vec<Sender<ServerSseMessage>>,
+    event_rx: Receiver<SessionEvent>,
+    session_config: SessionConfig,
+    event_store: Option<Arc<dyn EventStore>>,
+}
+
+impl LocalSessionWorker {
+    pub fn id(&self) -> &SessionId {
+        &self.id
+    }
+}
+
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum SessionError {
+    #[error("Invalid request id: {0}")]
+    DuplicatedRequestId(HttpRequestId),
+    #[error("Channel closed: {0:?}")]
+    ChannelClosed(Option<HttpRequestId>),
+    #[error("Cannot parse event id: {0}")]
+    EventIdParseError(#[from] EventIdParseError),
+    #[error("Session service terminated")]
+    SessionServiceTerminated,
+    #[error("Invalid event id")]
+    InvalidEventId,
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("Event store error: {0}")]
+    EventStore(#[source] EventStoreError),
+}
+
+impl From<SessionError> for std::io::Error {
+    fn from(value: SessionError) -> Self {
+        match value {
+            SessionError::Io(io) => io,
+            _ => std::io::Error::other(format!("Session error: {value}")),
+        }
+    }
+}
+
+enum OutboundChannel {
+    RequestWise { id: HttpRequestId, close: bool },
+    Common,
+}
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct StreamableHttpMessageReceiver {
+    pub http_request_id: Option<HttpRequestId>,
+    pub inner: Receiver<ServerSseMessage>,
+}
+
+impl LocalSessionWorker {
+    fn unregister_resource(&mut self, resource: &ResourceKey) {
+        let Some(http_request_id) = self.resource_router.remove(resource) else {
+            return;
+        };
+        tracing::trace!(?resource, http_request_id, "unregister resource");
+        let Some(channel) = self.tx_router.get_mut(&http_request_id) else {
+            tracing::warn!(http_request_id, "http request wise channel not found");
+            return;
+        };
+        if !channel.resources.is_empty() && !matches!(resource, ResourceKey::McpRequestId(_)) {
+            return;
+        }
+        tracing::debug!(http_request_id, "close http request wise channel");
+        let resources: Vec<_> = channel.resources.drain().collect();
+        channel.completed_at = Some(Instant::now());
+        // Close the sender so the client's SSE stream ends,
+        // but keep the entry so the cache is available for
+        // late resume requests.
+        let (closed_tx, _) = tokio::sync::mpsc::channel(1);
+        channel.tx.tx = closed_tx;
+        for resource in resources {
+            self.resource_router.remove(&resource);
+        }
+    }
+    fn register_resource(&mut self, resource: ResourceKey, http_request_id: HttpRequestId) {
+        tracing::trace!(?resource, http_request_id, "register resource");
+        if let Some(channel) = self.tx_router.get_mut(&http_request_id) {
+            channel.resources.insert(resource.clone());
+            self.resource_router.insert(resource, http_request_id);
+        }
+    }
+    fn register_request(
+        &mut self,
+        request: &JsonRpcRequest<ClientRequest>,
+        http_request_id: HttpRequestId,
+    ) {
+        use crate::model::GetMeta;
+        self.register_resource(
+            ResourceKey::McpRequestId(request.id.clone()),
+            http_request_id,
+        );
+        if let Some(progress_token) = request.request.get_meta().get_progress_token() {
+            self.register_resource(
+                ResourceKey::ProgressToken(progress_token.clone()),
+                http_request_id,
+            );
+        }
+    }
+    fn catch_cancellation_notification(
+        &mut self,
+        notification: &JsonRpcNotification<ClientNotification>,
+    ) {
+        if let ClientNotification::CancelledNotification(n) = &notification.notification
+            && let Some(request_id) = n.params.request_id.clone()
+        {
+            let resource = ResourceKey::McpRequestId(request_id);
+            self.unregister_resource(&resource);
+        }
+    }
+    fn evict_expired_channels(&mut self) {
+        let ttl = self.session_config.completed_cache_ttl;
+        self.tx_router
+            .retain(|_, rw| rw.completed_at.is_none_or(|at| at.elapsed() < ttl));
+    }
+    fn next_http_request_id(&mut self) -> HttpRequestId {
+        let id = self.next_http_request_id;
+        self.next_http_request_id = self.next_http_request_id.wrapping_add(1);
+        id
+    }
+    async fn establish_request_wise_channel(
+        &mut self,
+    ) -> Result<StreamableHttpMessageReceiver, SessionError> {
+        let http_request_id = self.next_http_request_id();
+        let (tx, rx) = tokio::sync::mpsc::channel(self.session_config.channel_capacity);
+        let mut cached_tx = CachedTx::new(
+            tx,
+            Some(http_request_id),
+            0,
+            uuid::Uuid::new_v4().to_string(),
+            self.event_store.clone(),
+        );
+        if let Some(retry) = self.session_config.sse_retry {
+            cached_tx.send_priming(retry).await?;
+        }
+        self.tx_router.insert(
+            http_request_id,
+            HttpRequestWise {
+                resources: Default::default(),
+                tx: cached_tx,
+                completed_at: None,
+            },
+        );
+        tracing::debug!(http_request_id, "establish new request wise channel");
+        Ok(StreamableHttpMessageReceiver {
+            http_request_id: Some(http_request_id),
+            inner: rx,
+        })
+    }
+    fn resolve_outbound_channel(&self, message: &ServerJsonRpcMessage) -> OutboundChannel {
+        match &message {
+            // SEP-2260: requests carrying an OriginatingRequestId marker ride the
+            // originating request's SSE stream, never the standalone GET stream.
+            ServerJsonRpcMessage::Request(json_rpc_request) => {
+                use crate::model::GetExtensions;
+                let originating = json_rpc_request
+                    .request
+                    .extensions()
+                    .get::<crate::service::OriginatingRequestId>();
+                match originating {
+                    Some(originating) => match self
+                        .resource_router
+                        .get(&ResourceKey::McpRequestId(originating.0.clone()))
+                    {
+                        Some(id) => OutboundChannel::RequestWise {
+                            id: *id,
+                            close: false,
+                        },
+                        None => {
+                            tracing::warn!(
+                                originating_request_id = %originating.0,
+                                "associated server request could not be routed to its \
+                                 originating stream (request completed or association \
+                                 lost); falling back to standalone stream"
+                            );
+                            OutboundChannel::Common
+                        }
+                    },
+                    None => OutboundChannel::Common,
+                }
+            }
+            ServerJsonRpcMessage::Notification(JsonRpcNotification {
+                notification:
+                    ServerNotification::ProgressNotification(Notification {
+                        params: ProgressNotificationParam { progress_token, .. },
+                        ..
+                    }),
+                ..
+            }) => {
+                let id = self
+                    .resource_router
+                    .get(&ResourceKey::ProgressToken(progress_token.clone()));
+
+                if let Some(id) = id {
+                    OutboundChannel::RequestWise {
+                        id: *id,
+                        close: false,
+                    }
+                } else {
+                    OutboundChannel::Common
+                }
+            }
+            ServerJsonRpcMessage::Notification(JsonRpcNotification {
+                notification:
+                    ServerNotification::CancelledNotification(Notification {
+                        params: CancelledNotificationParam { request_id, .. },
+                        ..
+                    }),
+                ..
+            }) => {
+                if let Some(req_id) = request_id {
+                    if let Some(id) = self
+                        .resource_router
+                        .get(&ResourceKey::McpRequestId(req_id.clone()))
+                    {
+                        OutboundChannel::RequestWise {
+                            id: *id,
+                            close: false,
+                        }
+                    } else {
+                        OutboundChannel::Common
+                    }
+                } else {
+                    OutboundChannel::Common
+                }
+            }
+            ServerJsonRpcMessage::Notification(_) => OutboundChannel::Common,
+            ServerJsonRpcMessage::Response(json_rpc_response) => {
+                if let Some(id) = self
+                    .resource_router
+                    .get(&ResourceKey::McpRequestId(json_rpc_response.id.clone()))
+                {
+                    OutboundChannel::RequestWise {
+                        id: *id,
+                        close: true,
+                    }
+                } else {
+                    OutboundChannel::Common
+                }
+            }
+            ServerJsonRpcMessage::Error(json_rpc_error) => {
+                if let Some(id) = json_rpc_error.id.clone().and_then(|rid| {
+                    self.resource_router
+                        .get(&ResourceKey::McpRequestId(rid))
+                        .copied()
+                }) {
+                    OutboundChannel::RequestWise { id, close: true }
+                } else {
+                    OutboundChannel::Common
+                }
+            }
+        }
+    }
+    async fn handle_server_message(
+        &mut self,
+        message: ServerJsonRpcMessage,
+    ) -> Result<(), SessionError> {
+        let outbound_channel = self.resolve_outbound_channel(&message);
+        match outbound_channel {
+            OutboundChannel::RequestWise { id, close } => {
+                if let Some(request_wise) = self.tx_router.get_mut(&id) {
+                    request_wise.tx.send(message).await?;
+                    if close && let Some(channel) = self.tx_router.remove(&id) {
+                        for resource in channel.resources {
+                            self.resource_router.remove(&resource);
+                        }
+                    }
+                } else {
+                    return Err(SessionError::ChannelClosed(Some(id)));
+                }
+            }
+            OutboundChannel::Common => self.common.send(message).await?,
+        }
+        Ok(())
+    }
+    async fn resume(
+        &mut self,
+        last_event_id: EventId,
+    ) -> Result<StreamableHttpMessageReceiver, SessionError> {
+        // Clean up closed shadow senders before processing
+        self.shadow_txs.retain(|tx| !tx.is_closed());
+
+        match last_event_id.http_request_id {
+            Some(http_request_id) => {
+                let request_wise = self
+                    .tx_router
+                    .get_mut(&http_request_id)
+                    .ok_or(SessionError::ChannelClosed(Some(http_request_id)))?;
+                let is_completed = request_wise.completed_at.is_some();
+                let (tx, rx) = tokio::sync::mpsc::channel(self.session_config.channel_capacity);
+                request_wise.tx.tx = tx;
+                let index = last_event_id.index;
+                request_wise.tx.sync(index).await?;
+                if is_completed {
+                    // Drop the sender after replaying so the stream ends
+                    // instead of hanging indefinitely.
+                    let (closed_tx, _) = tokio::sync::mpsc::channel(1);
+                    request_wise.tx.tx = closed_tx;
+                }
+                Ok(StreamableHttpMessageReceiver {
+                    http_request_id: Some(http_request_id),
+                    inner: rx,
+                })
+            }
+            None => {
+                self.resume_or_shadow_common(Some(last_event_id.index))
+                    .await
+            }
+        }
+    }
+
+    async fn establish_common_channel(
+        &mut self,
+    ) -> Result<StreamableHttpMessageReceiver, SessionError> {
+        let last_event_index = self.event_store.is_none().then_some(0);
+        self.resume_or_shadow_common(last_event_index).await
+    }
+
+    /// Resume the common channel, or create a shadow stream if the primary is
+    /// still active.
+    ///
+    /// When the primary common channel is dead (receiver dropped), replace it
+    /// so this stream becomes the new primary notification channel. Cached
+    /// messages are replayed from `last_event_index` so the client receives
+    /// any events it missed (including server-initiated requests).
+    ///
+    /// When the primary is still active, create a "shadow" stream — an idle SSE
+    /// connection kept alive by keep-alive pings. This prevents multiple
+    /// EventSource connections (e.g. from POST response reconnections) from
+    /// killing each other by repeatedly replacing the common channel sender.
+    async fn resume_or_shadow_common(
+        &mut self,
+        last_event_index: Option<usize>,
+    ) -> Result<StreamableHttpMessageReceiver, SessionError> {
+        let is_replacing_dead_primary = self.common.tx.is_closed();
+        let capacity = if is_replacing_dead_primary {
+            self.session_config.channel_capacity
+        } else {
+            1 // Shadow streams only need keep-alive pings
+        };
+        let (tx, rx) = tokio::sync::mpsc::channel(capacity);
+        if is_replacing_dead_primary {
+            // Primary common channel is dead — replace it.
+            tracing::debug!("Replacing dead common channel with new primary");
+            self.common.tx = tx;
+            if let Some(last_event_index) = last_event_index {
+                self.common.sync(last_event_index).await?;
+            }
+        } else {
+            // Primary common channel is still active. Create a shadow stream
+            // that stays alive via SSE keep-alive but doesn't receive
+            // notifications. This prevents competing EventSource connections
+            // from killing each other's channels.
+            const MAX_SHADOW_STREAMS: usize = 32;
+
+            if self.shadow_txs.len() >= MAX_SHADOW_STREAMS {
+                tracing::warn!(
+                    shadow_count = self.shadow_txs.len(),
+                    "Shadow stream limit reached, dropping oldest"
+                );
+                self.shadow_txs.remove(0);
+            }
+            tracing::debug!(
+                shadow_count = self.shadow_txs.len(),
+                "Common channel active, creating shadow stream"
+            );
+            self.shadow_txs.push(tx);
+        }
+        Ok(StreamableHttpMessageReceiver {
+            http_request_id: None,
+            inner: rx,
+        })
+    }
+
+    async fn close_sse_stream(
+        &mut self,
+        http_request_id: Option<HttpRequestId>,
+        retry_interval: Option<Duration>,
+    ) -> Result<(), SessionError> {
+        match http_request_id {
+            // Close a request-wise stream
+            Some(id) => {
+                let request_wise = self
+                    .tx_router
+                    .get_mut(&id)
+                    .ok_or(SessionError::ChannelClosed(Some(id)))?;
+
+                // Send priming event if retry interval is specified
+                if let Some(interval) = retry_interval {
+                    request_wise.tx.send_priming(interval).await?;
+                }
+
+                // Close the stream by dropping the sender
+                let (tx, _rx) = tokio::sync::mpsc::channel(1);
+                request_wise.tx.tx = tx;
+
+                tracing::debug!(
+                    http_request_id = id,
+                    "closed SSE stream for server-initiated disconnection"
+                );
+                Ok(())
+            }
+            // Close the standalone (common) stream
+            None => {
+                // Send priming event if retry interval is specified
+                if let Some(interval) = retry_interval {
+                    self.common.send_priming(interval).await?;
+                }
+
+                // Close the stream by dropping the sender
+                let (tx, _rx) = tokio::sync::mpsc::channel(1);
+                self.common.tx = tx;
+
+                // Also close all shadow streams
+                self.shadow_txs.clear();
+
+                tracing::debug!("closed standalone SSE stream for server-initiated disconnection");
+                Ok(())
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum SessionEvent {
+    ClientMessage {
+        message: ClientJsonRpcMessage,
+        http_request_id: Option<HttpRequestId>,
+    },
+    EstablishRequestWiseChannel {
+        responder: oneshot::Sender<Result<StreamableHttpMessageReceiver, SessionError>>,
+    },
+    CloseRequestWiseChannel {
+        id: HttpRequestId,
+        responder: oneshot::Sender<Result<(), SessionError>>,
+    },
+    Resume {
+        last_event_id: EventId,
+        responder: oneshot::Sender<Result<StreamableHttpMessageReceiver, SessionError>>,
+    },
+    InitializeRequest {
+        request: ClientJsonRpcMessage,
+        responder: oneshot::Sender<Result<ServerJsonRpcMessage, SessionError>>,
+    },
+    Close,
+    CloseSseStream {
+        /// The HTTP request ID to close. If `None`, closes the standalone (common) stream.
+        http_request_id: Option<HttpRequestId>,
+        /// Optional retry interval. If provided, a priming event is sent before closing.
+        retry_interval: Option<Duration>,
+        responder: oneshot::Sender<Result<(), SessionError>>,
+    },
+    EstablishCommonChannel {
+        responder: oneshot::Sender<Result<StreamableHttpMessageReceiver, SessionError>>,
+    },
+}
+
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum SessionQuitReason {
+    ServiceTerminated,
+    ClientTerminated,
+    ExpectInitializeRequest,
+    ExpectInitializeResponse,
+    Cancelled,
+}
+
+#[derive(Debug, Clone)]
+pub struct LocalSessionHandle {
+    id: SessionId,
+    // after all event_tx drop, inner task will be terminated
+    event_tx: Sender<SessionEvent>,
+}
+
+impl LocalSessionHandle {
+    /// Get the session id
+    pub fn id(&self) -> &SessionId {
+        &self.id
+    }
+
+    /// Close the session
+    pub async fn close(&self) -> Result<(), SessionError> {
+        self.event_tx
+            .send(SessionEvent::Close)
+            .await
+            .map_err(|_| SessionError::SessionServiceTerminated)?;
+        Ok(())
+    }
+
+    /// Send a message to the session
+    pub async fn push_message(
+        &self,
+        message: ClientJsonRpcMessage,
+        http_request_id: Option<HttpRequestId>,
+    ) -> Result<(), SessionError> {
+        self.event_tx
+            .send(SessionEvent::ClientMessage {
+                message,
+                http_request_id,
+            })
+            .await
+            .map_err(|_| SessionError::SessionServiceTerminated)?;
+        Ok(())
+    }
+
+    /// establish a channel for a http-request, the corresponded message from server will be
+    /// sent through this channel. The channel will be closed when the request is completed,
+    /// or you can close it manually by calling [`LocalSessionHandle::close_request_wise_channel`].
+    pub async fn establish_request_wise_channel(
+        &self,
+    ) -> Result<StreamableHttpMessageReceiver, SessionError> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.event_tx
+            .send(SessionEvent::EstablishRequestWiseChannel { responder: tx })
+            .await
+            .map_err(|_| SessionError::SessionServiceTerminated)?;
+        rx.await
+            .map_err(|_| SessionError::SessionServiceTerminated)?
+    }
+
+    /// close the http-request wise channel.
+    pub async fn close_request_wise_channel(
+        &self,
+        request_id: HttpRequestId,
+    ) -> Result<(), SessionError> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.event_tx
+            .send(SessionEvent::CloseRequestWiseChannel {
+                id: request_id,
+                responder: tx,
+            })
+            .await
+            .map_err(|_| SessionError::SessionServiceTerminated)?;
+        rx.await
+            .map_err(|_| SessionError::SessionServiceTerminated)?
+    }
+
+    /// Establish a common channel for general purpose messages.
+    pub async fn establish_common_channel(
+        &self,
+    ) -> Result<StreamableHttpMessageReceiver, SessionError> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.event_tx
+            .send(SessionEvent::EstablishCommonChannel { responder: tx })
+            .await
+            .map_err(|_| SessionError::SessionServiceTerminated)?;
+        rx.await
+            .map_err(|_| SessionError::SessionServiceTerminated)?
+    }
+
+    /// Resume streaming response by the last event id. This is suitable for both request wise and common channel.
+    pub async fn resume(
+        &self,
+        last_event_id: EventId,
+    ) -> Result<StreamableHttpMessageReceiver, SessionError> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.event_tx
+            .send(SessionEvent::Resume {
+                last_event_id,
+                responder: tx,
+            })
+            .await
+            .map_err(|_| SessionError::SessionServiceTerminated)?;
+        rx.await
+            .map_err(|_| SessionError::SessionServiceTerminated)?
+    }
+
+    /// Send an initialize request to the session. And wait for the initialized response.
+    ///
+    /// This is used to establish a session with the server.
+    pub async fn initialize(
+        &self,
+        request: ClientJsonRpcMessage,
+    ) -> Result<ServerJsonRpcMessage, SessionError> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.event_tx
+            .send(SessionEvent::InitializeRequest {
+                request,
+                responder: tx,
+            })
+            .await
+            .map_err(|_| SessionError::SessionServiceTerminated)?;
+        rx.await
+            .map_err(|_| SessionError::SessionServiceTerminated)?
+    }
+
+    /// Close an SSE stream for a specific request.
+    ///
+    /// This closes the SSE connection for a POST request stream, but keeps the session
+    /// and message cache active. Clients can reconnect using the `Last-Event-ID` header
+    /// via a GET request to resume receiving messages.
+    ///
+    /// # Arguments
+    ///
+    /// * `http_request_id` - The HTTP request ID of the stream to close
+    /// * `retry_interval` - Optional retry interval. If provided, a priming event is sent
+    pub async fn close_sse_stream(
+        &self,
+        http_request_id: HttpRequestId,
+        retry_interval: Option<Duration>,
+    ) -> Result<(), SessionError> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.event_tx
+            .send(SessionEvent::CloseSseStream {
+                http_request_id: Some(http_request_id),
+                retry_interval,
+                responder: tx,
+            })
+            .await
+            .map_err(|_| SessionError::SessionServiceTerminated)?;
+        rx.await
+            .map_err(|_| SessionError::SessionServiceTerminated)?
+    }
+
+    /// Close the standalone SSE stream.
+    ///
+    /// This closes the standalone SSE connection (established via GET request),
+    /// but keeps the session and message cache active. Clients can reconnect using
+    /// the `Last-Event-ID` header via a GET request to resume receiving messages.
+    ///
+    /// # Arguments
+    ///
+    /// * `retry_interval` - Optional retry interval. If provided, a priming event is sent
+    pub async fn close_standalone_sse_stream(
+        &self,
+        retry_interval: Option<Duration>,
+    ) -> Result<(), SessionError> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.event_tx
+            .send(SessionEvent::CloseSseStream {
+                http_request_id: None,
+                retry_interval,
+                responder: tx,
+            })
+            .await
+            .map_err(|_| SessionError::SessionServiceTerminated)?;
+        rx.await
+            .map_err(|_| SessionError::SessionServiceTerminated)?
+    }
+}
+
+pub type SessionTransport = WorkerTransport<LocalSessionWorker>;
+
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum LocalSessionWorkerError {
+    #[error("transport terminated")]
+    TransportTerminated,
+    #[error("unexpected message: {0:?}")]
+    UnexpectedEvent(SessionEvent),
+    #[error("fail to send initialize request {0}")]
+    FailToSendInitializeRequest(SessionError),
+    #[error("fail to handle message: {0}")]
+    FailToHandleMessage(SessionError),
+    #[error("init timeout after {}ms", _0.as_millis())]
+    InitTimeout(Duration),
+    #[error("Transport closed")]
+    TransportClosed,
+    #[error("Tokio join error {0}")]
+    TokioJoinError(#[from] tokio::task::JoinError),
+}
+impl Worker for LocalSessionWorker {
+    type Error = LocalSessionWorkerError;
+    type Role = RoleServer;
+    fn err_closed() -> Self::Error {
+        LocalSessionWorkerError::TransportClosed
+    }
+    fn err_join(e: tokio::task::JoinError) -> Self::Error {
+        LocalSessionWorkerError::TokioJoinError(e)
+    }
+    fn config(&self) -> crate::transport::worker::WorkerConfig {
+        crate::transport::worker::WorkerConfig {
+            name: Some(format!("streamable-http-session-{}", self.id)),
+            channel_buffer_capacity: self.session_config.channel_capacity,
+        }
+    }
+    #[instrument(name = "streamable_http_session", skip_all, fields(id = self.id.as_ref()))]
+    async fn run(
+        mut self,
+        mut context: WorkerContext<Self>,
+    ) -> Result<(), WorkerQuitReason<Self::Error>> {
+        enum InnerEvent {
+            FromHttpService(SessionEvent),
+            FromHandler(WorkerSendRequest<LocalSessionWorker>),
+        }
+        let init_timeout = self.session_config.init_timeout.unwrap_or(Duration::MAX);
+        let evt = tokio::select! {
+            evt = self.event_rx.recv() => evt.ok_or_else(|| {
+                WorkerQuitReason::fatal(
+                    LocalSessionWorkerError::TransportTerminated,
+                    "get initialize request",
+                )
+            })?,
+            _ = context.cancellation_token.cancelled() => {
+                return Err(WorkerQuitReason::Cancelled);
+            }
+            _ = tokio::time::sleep(init_timeout) => {
+                return Err(WorkerQuitReason::fatal(
+                    LocalSessionWorkerError::InitTimeout(init_timeout),
+                    "waiting for initialize request",
+                ));
+            }
+        };
+        let SessionEvent::InitializeRequest { request, responder } = evt else {
+            return Err(WorkerQuitReason::fatal(
+                LocalSessionWorkerError::UnexpectedEvent(evt),
+                "get initialize request",
+            ));
+        };
+        context.send_to_handler(request).await?;
+        let send_initialize_response = context.recv_from_handler().await?;
+        responder
+            .send(Ok(send_initialize_response.message))
+            .map_err(|_| {
+                WorkerQuitReason::fatal(
+                    LocalSessionWorkerError::FailToSendInitializeRequest(
+                        SessionError::SessionServiceTerminated,
+                    ),
+                    "send initialize response",
+                )
+            })?;
+        send_initialize_response
+            .responder
+            .send(Ok(()))
+            .map_err(|_| WorkerQuitReason::HandlerTerminated)?;
+        let ct = context.cancellation_token.clone();
+        let keep_alive = self.session_config.keep_alive.unwrap_or(Duration::MAX);
+        loop {
+            self.evict_expired_channels();
+            let keep_alive_timeout = tokio::time::sleep(keep_alive);
+            let event = tokio::select! {
+                event = self.event_rx.recv() => {
+                    if let Some(event) = event {
+                        InnerEvent::FromHttpService(event)
+                    } else {
+                        return Err(WorkerQuitReason::fatal(LocalSessionWorkerError::TransportTerminated, "waiting next session event"))
+                    }
+                },
+                from_handler = context.recv_from_handler() => {
+                    InnerEvent::FromHandler(from_handler?)
+                }
+                _ = ct.cancelled() => {
+                    return Err(WorkerQuitReason::Cancelled)
+                }
+                _ = keep_alive_timeout => {
+                    return Err(WorkerQuitReason::IdleTimeout(keep_alive))
+                }
+            };
+            match event {
+                InnerEvent::FromHandler(WorkerSendRequest {
+                    message, responder, ..
+                }) => {
+                    // catch response
+                    let to_unregister = match &message {
+                        crate::model::JsonRpcMessage::Response(json_rpc_response) => {
+                            let request_id = json_rpc_response.id.clone();
+                            Some(ResourceKey::McpRequestId(request_id))
+                        }
+                        crate::model::JsonRpcMessage::Error(json_rpc_error) => {
+                            json_rpc_error.id.clone().map(ResourceKey::McpRequestId)
+                        }
+                        _ => {
+                            None
+                            // no need to unregister resource
+                        }
+                    };
+                    let handle_result = self
+                        .handle_server_message(message)
+                        .await
+                        .map_err(LocalSessionWorkerError::FailToHandleMessage);
+                    let _ = responder.send(handle_result).inspect_err(|error| {
+                        tracing::warn!(?error, "failed to send message to http service handler");
+                    });
+                    if let Some(to_unregister) = to_unregister {
+                        self.unregister_resource(&to_unregister);
+                    }
+                }
+                InnerEvent::FromHttpService(SessionEvent::ClientMessage {
+                    message: json_rpc_message,
+                    http_request_id,
+                }) => {
+                    match &json_rpc_message {
+                        crate::model::JsonRpcMessage::Request(request) => {
+                            if let Some(http_request_id) = http_request_id {
+                                self.register_request(request, http_request_id)
+                            }
+                        }
+                        crate::model::JsonRpcMessage::Notification(notification) => {
+                            self.catch_cancellation_notification(notification)
+                        }
+                        _ => {}
+                    }
+                    context.send_to_handler(json_rpc_message).await?;
+                }
+                InnerEvent::FromHttpService(SessionEvent::EstablishRequestWiseChannel {
+                    responder,
+                }) => {
+                    let handle_result = self.establish_request_wise_channel().await;
+                    let _ = responder.send(handle_result);
+                }
+                InnerEvent::FromHttpService(SessionEvent::EstablishCommonChannel { responder }) => {
+                    let handle_result = self.establish_common_channel().await;
+                    let _ = responder.send(handle_result);
+                }
+                InnerEvent::FromHttpService(SessionEvent::CloseRequestWiseChannel {
+                    id,
+                    responder,
+                }) => {
+                    let _handle_result = self.tx_router.remove(&id);
+                    let _ = responder.send(Ok(()));
+                }
+                InnerEvent::FromHttpService(SessionEvent::Resume {
+                    last_event_id,
+                    responder,
+                }) => {
+                    let handle_result = self.resume(last_event_id).await;
+                    let _ = responder.send(handle_result);
+                }
+                InnerEvent::FromHttpService(SessionEvent::Close) => {
+                    return Err(WorkerQuitReason::TransportClosed);
+                }
+                InnerEvent::FromHttpService(SessionEvent::CloseSseStream {
+                    http_request_id,
+                    retry_interval,
+                    responder,
+                }) => {
+                    let handle_result =
+                        self.close_sse_stream(http_request_id, retry_interval).await;
+                    let _ = responder.send(handle_result);
+                }
+                _ => {
+                    // ignore
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct SessionConfig {
+    /// the capacity of the channel for the session. Default is 16.
+    pub channel_capacity: usize,
+    /// The session will be closed after this duration of inactivity.
+    ///
+    /// This serves as a safety net for cleaning up sessions whose HTTP
+    /// connections have silently dropped (e.g., due to an HTTP/2
+    /// `RST_STREAM`). Without a timeout, such sessions become zombies:
+    /// the session worker keeps running indefinitely because the session
+    /// handle's sender is still held in the session manager, preventing
+    /// the worker's event channel from closing.
+    ///
+    /// Defaults to 5 minutes. Set to `None` to disable (not recommended
+    /// for long-running servers behind proxies).
+    pub keep_alive: Option<Duration>,
+    /// SSE retry interval for priming events on request-wise streams.
+    /// When set, the session layer prepends a priming event with the correct
+    /// stream-identifying event ID to each request-wise SSE stream.
+    /// Default is 3 seconds, matching `StreamableHttpServerConfig::default()`.
+    pub sse_retry: Option<Duration>,
+    /// How long to retain completed request-wise channel caches for late
+    /// resume requests. After this duration, completed entries are evicted
+    /// and resume will return an error. Default is 60 seconds.
+    pub completed_cache_ttl: Duration,
+    /// Maximum duration to wait for the `initialize` request after session
+    /// creation. If not received within this window, the session is
+    /// terminated. Default is 60 seconds. Set to `None` to disable.
+    pub init_timeout: Option<Duration>,
+}
+
+impl SessionConfig {
+    pub const DEFAULT_CHANNEL_CAPACITY: usize = 16;
+    pub const DEFAULT_KEEP_ALIVE: Duration = Duration::from_secs(300);
+    pub const DEFAULT_SSE_RETRY: Duration = Duration::from_secs(3);
+    pub const DEFAULT_COMPLETED_CACHE_TTL: Duration = Duration::from_secs(60);
+    pub const DEFAULT_INIT_TIMEOUT: Duration = Duration::from_secs(60);
+}
+
+impl Default for SessionConfig {
+    fn default() -> Self {
+        Self {
+            channel_capacity: Self::DEFAULT_CHANNEL_CAPACITY,
+            keep_alive: Some(Self::DEFAULT_KEEP_ALIVE),
+            sse_retry: Some(Self::DEFAULT_SSE_RETRY),
+            completed_cache_ttl: Self::DEFAULT_COMPLETED_CACHE_TTL,
+            init_timeout: Some(Self::DEFAULT_INIT_TIMEOUT),
+        }
+    }
+}
+
+/// Create a new session with the given id and configuration.
+///
+/// This function will return a pair of [`LocalSessionHandle`] and [`LocalSessionWorker`].
+///
+/// You can run the [`LocalSessionWorker`] as a transport for mcp server. And use the [`LocalSessionHandle`] operate the session.
+pub fn create_local_session(
+    id: impl Into<SessionId>,
+    config: SessionConfig,
+) -> (LocalSessionHandle, LocalSessionWorker) {
+    create_local_session_with_event_store(id, config, None)
+}
+
+fn create_local_session_with_event_store(
+    id: impl Into<SessionId>,
+    config: SessionConfig,
+    event_store: Option<Arc<dyn EventStore>>,
+) -> (LocalSessionHandle, LocalSessionWorker) {
+    let id = id.into();
+    let (event_tx, event_rx) = tokio::sync::mpsc::channel(config.channel_capacity);
+    let (common_tx, _) = tokio::sync::mpsc::channel(config.channel_capacity);
+    let common = CachedTx::new_common(common_tx, &id, event_store.clone());
+    tracing::info!(session_id = ?id, "create new session");
+    let handle = LocalSessionHandle {
+        event_tx,
+        id: id.clone(),
+    };
+    let session_worker = LocalSessionWorker {
+        next_http_request_id: 0,
+        id,
+        tx_router: HashMap::new(),
+        resource_router: HashMap::new(),
+        common,
+        shadow_txs: Vec::new(),
+        event_rx,
+        session_config: config.clone(),
+        event_store,
+    };
+    (handle, session_worker)
+}
+
+#[cfg(test)]
+mod sep2260_routing_tests {
+    use super::*;
+    use crate::service::OriginatingRequestId;
+
+    fn roots_request(originating: Option<RequestId>) -> ServerJsonRpcMessage {
+        #[expect(
+            deprecated,
+            reason = "roots is SEP-2577-deprecated; any restricted request works here"
+        )]
+        let mut request = crate::model::ListRootsRequest {
+            method: Default::default(),
+            extensions: Default::default(),
+        };
+        if let Some(id) = originating {
+            request.extensions.insert(OriginatingRequestId(id));
+        }
+        ServerJsonRpcMessage::request(
+            crate::model::ServerRequest::ListRootsRequest(request),
+            RequestId::Number(1000),
+        )
+    }
+
+    #[tokio::test]
+    async fn associated_server_request_routes_to_originating_stream() {
+        let (_handle, mut worker) = create_local_session("test-session", SessionConfig::default());
+        let receiver = worker.establish_request_wise_channel().await.unwrap();
+        let http_request_id = receiver.http_request_id.unwrap();
+        let originating_id = RequestId::Number(7);
+        worker.register_resource(
+            ResourceKey::McpRequestId(originating_id.clone()),
+            http_request_id,
+        );
+
+        let channel = worker.resolve_outbound_channel(&roots_request(Some(originating_id)));
+        assert!(
+            matches!(channel, OutboundChannel::RequestWise { id, close: false } if id == http_request_id)
+        );
+    }
+
+    #[tokio::test]
+    async fn unassociated_server_request_routes_to_common_stream() {
+        let (_handle, mut worker) = create_local_session("test-session", SessionConfig::default());
+        let _receiver = worker.establish_request_wise_channel().await.unwrap();
+        let channel = worker.resolve_outbound_channel(&roots_request(None));
+        assert!(matches!(channel, OutboundChannel::Common));
+    }
+
+    #[tokio::test]
+    async fn associated_request_for_completed_request_falls_back_to_common() {
+        // Originating request already unregistered (completion race / re-scoped
+        // task op): must fall back to Common, never a closed request-wise channel.
+        let (_handle, mut worker) = create_local_session("test-session", SessionConfig::default());
+        let receiver = worker.establish_request_wise_channel().await.unwrap();
+        let http_request_id = receiver.http_request_id.unwrap();
+        let originating_id = RequestId::Number(7);
+        worker.register_resource(
+            ResourceKey::McpRequestId(originating_id.clone()),
+            http_request_id,
+        );
+        worker.unregister_resource(&ResourceKey::McpRequestId(originating_id.clone()));
+
+        let channel = worker.resolve_outbound_channel(&roots_request(Some(originating_id)));
+        assert!(matches!(channel, OutboundChannel::Common));
+    }
+}

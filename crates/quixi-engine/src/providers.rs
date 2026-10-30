@@ -2980,11 +2980,8 @@ pub struct ProviderToolTurn {
 }
 
 impl ProviderManager {
-    /// Runs one streaming chat turn with OpenAI-style `tools` and returns the visible text
-    /// plus every tool call the model asked for. Only the OpenAI-compatible providers are
-    /// supported (DeepSeek, OpenRouter, Groq, Mistral, Together, Fireworks, Cerebras,
-    /// Perplexity, Cohere, Gemini, local Ollama/LM Studio, and custom endpoints);
-    /// Anthropic-format and Codex-OAuth providers fall back to the tool-less path.
+    /// Runs a streaming tool turn through the provider’s native wire adapter.
+    /// OpenAI-compatible, Anthropic Messages, and Codex OAuth are supported.
     pub fn complete_turn_with_tools<F>(
         &self,
         messages: &[Value],
@@ -2998,9 +2995,22 @@ impl ProviderManager {
         self.complete_turn_with_tools_for_provider(messages, tools, model_override, None, &mut on_chunk)
     }
 
+    /// Application budgets are conservative envelopes, not promises about an arbitrary gateway.
+    pub(crate) fn mcp_tool_budget(&self,model:&str)->crate::mcp_registry::Budget{
+        let st=self.state.read();
+        let provider=st.providers.iter().find(|p|p.configured&&(p.selected_model==model||p.models.iter().any(|m|m.id==model&&Self::is_model_available_for_provider(p,m))))
+            .or_else(||st.providers.iter().find(|p|p.id==st.active_provider&&p.configured)).or_else(||st.providers.iter().find(|p|p.configured));
+        let Some(p)=provider else{return crate::mcp_registry::Budget{enabled:false,..Default::default()}};
+        let mut budget=crate::mcp_registry::Budget::default();
+        if p.id=="openai" {budget.max_tools=128;budget.max_bytes=192*1024;}
+        if p.context_window<=32768{budget.max_tools=32;budget.max_bytes=32*1024;}
+        budget.enabled=p.api_format=="openai"||p.api_format=="anthropic";
+        budget
+    }
+
     pub(crate) fn subagent_selection(&self, parent_model: &str) -> (String, Option<String>) {
         let st = self.state.read();
-        if let Some(p) = st.providers.iter().find(|p| p.id == st.subagent_provider && p.configured && (p.api_format == "openai" || (p.id == "openai" && p.auth_mode == "oauth"))) {
+        if let Some(p) = st.providers.iter().find(|p| p.id == st.subagent_provider && p.configured && (p.api_format == "openai" || p.api_format == "anthropic" || (p.id == "openai" && p.auth_mode == "oauth"))) {
             if !st.subagent_model.is_empty() && (p.selected_model == st.subagent_model || p.models.iter().any(|m|m.id == st.subagent_model && Self::is_model_available_for_provider(p,m))) {
                 return (st.subagent_model.clone(), Some(p.id.clone()));
             }
@@ -3063,8 +3073,13 @@ impl ProviderManager {
         if provider_id == "openai" && auth_mode == "oauth" {
             return Some(self.complete_codex_tool_turn(messages, tools, &model_id, &credential, &mut on_chunk));
         }
-        if api_format != "openai"
-            || base_url.is_empty()
+        if api_format == "anthropic" && !base_url.is_empty() {
+            return Some(self.complete_anthropic_tool_turn(messages,tools,&model_id,&base_url,&credential,&provider_name,&mut on_chunk));
+        }
+        if api_format != "openai" {
+            return Some(tool_failure(format!("Tool calling is not supported for provider format {api_format}"), &provider_name, &model_id));
+        }
+        if base_url.is_empty()
             || credential.starts_with("oauth_")
             || (credential.is_empty() && auth_mode != "local" && provider_id != "custom")
         {
@@ -3097,10 +3112,18 @@ impl ProviderManager {
                 .header("X-Title", "QuixiDesk");
         }
 
+        // Internal replay/error metadata belongs to adapters, never the Chat Completions wire format.
+        let wire_messages: Vec<Value> = messages.iter().cloned().map(|mut message| {
+            if let Some(object) = message.as_object_mut() {
+                object.remove("is_error");
+                object.remove("_responses_output");
+            }
+            message
+        }).collect();
         let resp = match req
             .json(&json!({
                 "model": model_id,
-                "messages": messages,
+                "messages": wire_messages,
                 "tools": tools,
                 "tool_choice": "auto",
                 "stream": true
@@ -3244,7 +3267,7 @@ fn parse_tool_stream<R: std::io::BufRead, F: FnMut(StreamChunk)>(reader: R, mut 
             }
             let input: Value = serde_json::from_str(&call.arguments)
                 .map_err(|error| format!("Invalid tool arguments for `{}`: {error}", call.name))?;
-            crate::agent_tools::validate_input(&call.name, &input)?;
+            crate::agent_tools::validate_provider_input(&call.name, &input)?;
         }
         let tool_calls: Vec<ProviderToolCall> = calls
             .into_iter()
@@ -3503,6 +3526,7 @@ mod tool_stream_regression_tests {
 }
 
 include!("provider_tool_responses.rs");
+include!("provider_tool_anthropic.rs");
 
 #[cfg(test)]
 mod provider_validation_tests {

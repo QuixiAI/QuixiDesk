@@ -712,6 +712,9 @@ fn serve_static_or_spa(resources_dir: &Path, req_path: &str) -> Response<Cow<'st
 }
 
 fn main() -> anyhow::Result<()> {
+    if std::env::args().nth(1).as_deref() == Some("--mcp-transport-worker") {
+        return quixi_mcp::transport_worker_main();
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

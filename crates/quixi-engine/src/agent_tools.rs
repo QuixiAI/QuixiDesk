@@ -351,6 +351,13 @@ fn looks_destructive(command: &str) -> bool {
 }
 
 /// Validate required arguments before any side effect, including truncated model output.
+/// Dynamic MCP aliases are resolved against the immutable per-turn registry at dispatch.
+/// Parsing checks shape only; an unknown alias still fails the normal tool dispatcher.
+pub(crate) fn validate_provider_input(name: &str, input: &Value) -> Result<(), String> {
+    if name.starts_with("mcp_") && input.is_object() { Ok(()) }
+    else { validate_input(name,input) }
+}
+
 pub fn validate_input(name: &str, input: &Value) -> Result<(), String> {
     let schemas = tool_schemas();
     let task_schema = crate::subagents::schema();
