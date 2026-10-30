@@ -7,6 +7,7 @@
     page: "new",
     id: null,
     sessions: [],
+    pendingMessages: new Map(),
     projects: [],
     artifacts: [],
     schedules: [],
@@ -30,6 +31,7 @@
   };
   const icons = {
     plus: "M12 5v14M5 12h14",
+    trash: "M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7",
     search: "M21 21l-5-5M18 10a8 8 0 1 1-16 0 8 8 0 0 1 16 0",
     projects: "M3 6h7l2 3h9v11H3zM3 6V4h7l2 2",
     artifacts: "M4 3h12l4 4v14H4zM8 12h8M8 16h5",
@@ -238,6 +240,7 @@
     return d;
   }
   function confirmDialog(title, text, action, label = "Delete") {
+    let busy = false;
     const d = dialog(title, [
       el("p", {}, text),
       el(
@@ -246,9 +249,18 @@
         button("Cancel", () => d.close(), "quiet"),
         button(
           label,
-          async () => {
-            await action();
-            d.close();
+          async (event) => {
+            if (busy) return;
+            busy = true;
+            const control = event.currentTarget;
+            control.disabled = true;
+            try {
+              await action();
+              d.close();
+            } finally {
+              busy = false;
+              control.disabled = false;
+            }
           },
           "danger",
         ),
@@ -549,6 +561,7 @@
                 },
                 "session-link",
               ),
+              ib(`Delete conversation: ${s.title || "Untitled task"}`, "trash", () => deleteSession(s)),
               button("···", () => sessionMenu(s), "more"),
             ),
           );
@@ -656,6 +669,7 @@
           s.forkedFrom ? button("Original conversation",()=>navigate("chat",s.forkedFrom.sessionId),"quiet") : null,
           button("Find in conversation", () => openConversationFind(), "quiet", "search"),
           button("Files & context", () => contextDrawer(), "quiet"),
+          ib("Delete conversation", "trash", () => deleteSession(s)),
           ib("Task actions", "more", () => sessionMenu(s)),
         ),
       );
@@ -743,10 +757,23 @@
       rows: 3,
       value: getDraft(),
       onInput: () => saveDraft(),
+      onPaste: (event) => {
+        if (pendingSubmissions.has(draftKey())) return;
+        const clipboard = event.clipboardData;
+        const files = window.QuixiChat.clipboardImages(clipboard);
+        if (!files.length) return; // Leave ordinary text paste to the browser.
+        event.preventDefault();
+        const key = draftKey();
+        const items = window.QuixiChat.queueFiles(files, () => { if (draftKey() === key) renderChips(); });
+        state.attachments.push(...items);
+        const text = clipboard?.getData("text/plain");
+        if (text) ta.setRangeText(text, ta.selectionStart, ta.selectionEnd, "end");
+        saveDraft(); renderChips();
+      },
       onKeydown: (e) => {
         if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
           e.preventDefault();
-          if (!running(session())) sendPrompt();
+          sendPrompt("queue");
         }
       },
     });
@@ -786,6 +813,14 @@
       running(s) ? "stop" : "arrow",
     );
     send.id = "send-button";
+    const steer = button("Steer now", () => sendPrompt("steer"), "quiet");
+    steer.id = "steer-button";
+    steer.title = "Guide the active task at the next safe boundary; running tools finish first.";
+    steer.hidden = !running(s);
+    const queue = button("Queue follow-up", () => sendPrompt("queue"), "primary");
+    queue.id = "queue-button";
+    queue.title = "Run as a separate turn after the current task completes. Enter queues a follow-up.";
+    queue.hidden = !running(s);
     const chooseModel = button(
       [
         el("span", {}, state.providers?.activeModel || "Choose model"),
@@ -824,14 +859,15 @@
           mode,
           el("span", { class: "spacer" }),
           el("span", { class: "model-control" }, chooseModel),
+          steer,
+          queue,
           send,
         ),
       ),
-      el(
-        "p",
-        { class: "composer-note" },
-        "Enter to send · Shift+Enter for a new line",
-      ),
+      el("div", {id:"pending-messages", role:"status", "aria-live":"polite"},
+        ...(state.pendingMessages.get(s?.sessionId) || []).map(m => el("p", {class:"composer-note"}, `${m.delivery === "steer" ? "Steering pending" : "Queued follow-up"}: ${m.text || "Attachments"}`))),
+      el("p", { class: "composer-note", id:"composer-note" },
+        running(s) ? "Enter to queue · Steer now guides the active task · Stop clears pending messages" : "Enter to send · Shift+Enter for a new line"),
     );
   }
   function renderChips() {
@@ -932,7 +968,7 @@
     positionPopover(d,anchor);
   }
   const pendingSubmissions=new Set();
-  async function sendPrompt() {
+  async function sendPrompt(delivery = "queue") {
     const input = document.getElementById("prompt");
     if (!input) return;
     const text = input.value.trim();
@@ -947,7 +983,6 @@
       toast("Choose a model before sending a task.");
       return;
     }
-    if (running(session())) return;
     if (state.attachments.some(file => file.mcp?.stale)) { toast("Review the updated MCP context before sending this message.", true); return; }
     const b = document.getElementById("send-button");
     if (b?.disabled || pendingSubmissions.has(draftKey())) return;
@@ -975,7 +1010,10 @@
       }
       state.stopped.delete(s.sessionId);
       const uuid = crypto.randomUUID();
-      await rpc(service(s), "sendMessageV2", [s.sessionId, {text, attachments, messageUuid:uuid}]);
+      const wasRunning = running(s);
+      const accepted = await rpc(service(s), "sendMessageV2", [s.sessionId, {text, attachments, messageUuid:uuid, delivery}]);
+      if (accepted?.error) throw new Error(accepted.error);
+      if (accepted?.queued) toast(delivery === "steer" ? "Steering sent — applies at the next safe boundary." : "Follow-up queued.");
       const stillHere=document.getElementById("prompt") && draftKey()===originKey;
       for (const key of [originKey]) {
         state.drafts.delete(key);state.attachmentDrafts.delete(key);
@@ -984,7 +1022,7 @@
       for(const file of attached)if(file.mcp?.subscribed)mcpRequest("subscribeResource",[file.mcp.server,file.mcp.uri,file.mcp.cwd,false]).catch(error=>toast(error.message,true));
       if(stillHere){state.attachments=[];document.getElementById("prompt").value="";}
       s.isRunning = true;
-      state.streams.set(s.sessionId, { text: "", thinking: "" });
+      if (!wasRunning) state.streams.set(s.sessionId, { text: "", thinking: "" });
       await refreshSession(s.sessionId);
       if(document.getElementById("prompt") && draftKey()===originKey){pendingSubmissions.delete(originKey);navigate("chat",s.sessionId);document.getElementById("prompt")?.focus();}
     } catch (e) {
@@ -1025,7 +1063,15 @@
       icon(active ? "stop" : "arrow"),
       active ? "Stop" : "Send",
     );
-    b.disabled = false;
+    b.disabled = pendingSubmissions.has(draftKey());
+    for (const id of ["steer-button", "queue-button"]) {
+      const control = document.getElementById(id);
+      if (control) {control.hidden = !active; control.disabled = pendingSubmissions.has(draftKey());}
+    }
+    const note = document.getElementById("composer-note");
+    if (note) note.textContent = active ? "Enter to queue · Steer now guides the active task · Stop clears pending messages" : "Enter to send · Shift+Enter for a new line";
+    const pending = document.getElementById("pending-messages");
+    pending?.replaceChildren(...(state.pendingMessages.get(state.id) || []).map(m => el("p", {class:"composer-note"}, `${m.delivery === "steer" ? "Steering pending" : "Queued follow-up"}: ${m.text || "Attachments"}`)));
     const input = document.getElementById("prompt");
     if (input)
       input.placeholder = active
@@ -1036,6 +1082,8 @@
     let old = state.sessions.find((s) => s.sessionId === id);
     if (!old) { await loadSessions(); old = state.sessions.find((s) => s.sessionId === id); }
     if (!old) return;
+    const pending = await rpc(service(old), "getPendingMessages", [id]);
+    state.pendingMessages.set(id, Array.isArray(pending) ? pending : []);
     const value = await rpc(service(old), "getSession", [id]);
     if (value) {
       Object.assign(old, value);
@@ -1069,10 +1117,19 @@
   // Render a small, safe Markdown subset as DOM nodes. Model text is never HTML.
   function inlineText(text) {
     const out = document.createDocumentFragment();
-    const pattern =
-      /(`[^`\n]+`|\*\*[^*\n]+\*\*|\*[^*\n]+\*|\[[^\]\n]+\]\([^\s)]+\))/g;
+    text = String(text ?? "");
+    // Bound inline parsing work. Unmatched delimiters must not trigger an
+    // unanchored regex scan of the entire remaining response at every character.
+    const pattern = /^(?:`[^`\n]+`|\*\*[^*\n]+\*\*|\*[^*\n]+\*|\[[^\]\n]+\]\([^\s)]+\))/;
+    const matches = [];
+    for (let i = 0; i < text.length;) {
+      if (!"`*[".includes(text[i])) { i++; continue; }
+      const match = text.slice(i, i + 1024).match(pattern);
+      if (!match) { i++; continue; }
+      match.index = i; matches.push(match); i += match[0].length;
+    }
     let last = 0;
-    for (const match of text.matchAll(pattern)) {
+    for (const match of matches) {
       out.append(document.createTextNode(text.slice(last, match.index)));
       const token = match[0];
       if (token.startsWith("`")) out.append(el("code", {}, token.slice(1, -1)));
@@ -1111,9 +1168,14 @@
   }
   function plainBody(text) {
     const box = el("div", { class: "body" });
-    const lines = String(text || "")
-      .replace(/\r\n/g, "\n")
-      .split("\n");
+    const normalized = String(text ?? "").replace(/\r\n?|[\u2028\u2029]/g, "\n");
+    // Large responses remain complete and copyable without allocating an
+    // unbounded Markdown DOM on every streaming update.
+    if (normalized.length > 200000) {
+      box.append(el("pre", {class:"plain-response"}, normalized));
+      return box;
+    }
+    const lines = normalized.split("\n");
     const cells = (line) =>
       line
         .trim()
@@ -1554,15 +1616,16 @@
     const children = state.subagents.get(s.sessionId) || [];
     if (children.length) {
       const panel = el("details", {class:"subagent-panel", "data-disclosure":"subagents", open:opened.has("subagents")},
-        el("summary", {}, "Subagents · " + children.length + (children.some(c=>c.status==="running") ? " · Working" : children.some(c=>["failed", "interrupted"].includes(c.status) || c.failedToolCalls > 0) ? " · Needs attention" : children.some(c=>c.status==="cancelled") ? " · Stopped" : " · Complete")));
+        el("summary", {}, "Subagents · " + children.length + (children.some(c=>c.status==="running") ? " · Working" : children.some(c=>["failed", "interrupted"].includes(c.status)) ? " · Returned to agent" : children.some(c=>c.status==="cancelled") ? " · Stopped" : " · Complete")));
       for (const child of children) panel.append(el("div", {class:"subagent-row"},
         el("div", {class:"grow"}, el("strong", {}, child.title),
-          el("p", {class:"hint"}, [child.status, child.readOnly ? "Read-only" : "Workspace tools", child.model, `${child.toolCalls || 0} tool call${child.toolCalls === 1 ? "" : "s"}`, child.failedToolCalls ? `${child.failedToolCalls} failed` : ""].filter(Boolean).join(" · ")),
-          child.error ? el("p", {class:"error-text"}, child.error) : null),
+          el("p", {class:"hint"}, [["failed", "interrupted"].includes(child.status) ? "Returned to parent agent" : child.status, child.readOnly ? "Read-only" : "Workspace tools", child.model, `${child.toolCalls || 0} tool call${child.toolCalls === 1 ? "" : "s"}`].filter(Boolean).join(" · ")),
+          null),
         button("View activity", async()=>{
           const task = await rpc(service(s), "getSubagent", [s.sessionId, child.agentId]);
           if (!task) throw new Error("Subagent activity is unavailable.");
           const body = el("div", {class:"subagent-history"}, el("p", {class:"hint"}, "Assignment and recorded activity"), plainBody(task.prompt || ""));
+          if (task.error) body.append(el("p", {class:"hint"}, "Internal diagnostic (handled by the parent agent): " + task.error));
           for (const message of task.messages || []) {
             if (message.content) body.append(el("details", {}, el("summary", {}, message.role === "tool" ? (message.is_error ? "Tool failed" : "Tool result") : "Subagent response"), el("pre", {}, typeof message.content === "string" ? message.content : JSON.stringify(message.content))));
             for (const call of message.tool_calls || []) body.append(el("details", {}, el("summary", {}, call.function.name), el("pre", {}, call.function.arguments)));
@@ -1601,6 +1664,36 @@
     refreshConversationFind(false);
     if (nearBottom) target.scrollTop = target.scrollHeight;
     else target.scrollTop = oldScroll;
+  }
+  function deleteSession(s) {
+    confirmDialog(
+      "Delete conversation?",
+      `Permanently remove “${s.title || "Untitled task"}” and its stored recovery copy? This cannot be undone.`,
+      async () => {
+        const result = await rpc(service(s), "delete", [s.sessionId]);
+        if (result?.error || result === false) throw Error(result?.error || "Conversation could not be deleted.");
+        state.transcripts.delete(s.sessionId);
+        state.drafts.delete(s.sessionId);
+        state.attachmentDrafts.delete(s.sessionId);
+        await loadSessions();
+        if (state.id === s.sessionId) navigate("new");
+        else renderPage();
+        toast("Conversation deleted.");
+      },
+    );
+  }
+  function deleteProject(p) {
+    confirmDialog("Delete project?",
+      `Remove “${p.name}” and its project instructions? Conversations and files in its folders will be kept. This cannot be undone.`,
+      async () => {
+        const result = await rpc("CoworkSpaces", "deleteSpace", [p.id]);
+        if (result?.error || result !== true) throw Error(result?.error || "Project could not be deleted.");
+        if (state.project === p.id) state.project = null;
+        await loadProjects();
+        if (state.page === "project" && state.id === p.id) navigate("projects");
+        else renderPage();
+        toast("Project deleted. Conversations and files kept.");
+      });
   }
   async function sessionMenu(s) {
     s = state.sessions.find((current) => current.sessionId === s.sessionId) || s;
@@ -1652,16 +1745,7 @@
           "Delete task",
           () => {
             d.close();
-            confirmDialog(
-              "Delete conversation?",
-              `Permanently remove “${s.title}” and its stored recovery copy?`,
-              async () => {
-                await rpc(service(s), "delete", [s.sessionId]);
-                await loadSessions();
-                if (state.id === s.sessionId) navigate("new");
-                else renderPage();
-              },
-            );
+            deleteSession(s);
           },
           "danger",
         ),
@@ -3336,6 +3420,14 @@
     host.append(drawer);
   }
   const refreshTimers = new Map();
+  let streamFrame = null;
+  function scheduleStreamRender() {
+    if (streamFrame !== null) return;
+    streamFrame = requestAnimationFrame(() => {
+      streamFrame = null;
+      if (state.page === "chat") renderTranscript();
+    });
+  }
   addEventListener("quixi:event", ({ detail: { channel, payload } }) => {
     if (channel === "quixi:open-tools") { navigate("tools"); return; }
     if (channel === "quixi:mcp-interaction") { pollMcpInteractions(); return; }
@@ -3380,7 +3472,7 @@
         stream.text += event.delta.text || "";
       if (event?.delta?.type === "thinking_delta")
         stream.thinking += event.delta.thinking || "";
-      if (state.id === id) renderTranscript();
+      if (state.id === id) scheduleStreamRender();
       return;
     }
     if (
@@ -3476,7 +3568,7 @@
     observer?.observe(d);window.addEventListener("resize",place);
     d.addEventListener("close",()=>{observer?.disconnect();window.removeEventListener("resize",place);},{once:true});
   }
-  const workflowContext={state,el,button,ib,icon,select,field,dialog,formDialog,confirmDialog,toast,api,rpc,copy,navigate,header,empty,date,currentFolder,loadSchedules,loadProjects,loadSessions,loadArtifacts,render,renderPage,saveDraft,renderChips,sessionMenu,projectEditor,manageProjectFolders,scheduleEditor,artifactThumbnail};
+  const workflowContext={deleteSession,deleteProject,state,el,button,ib,icon,select,field,dialog,formDialog,confirmDialog,toast,api,rpc,copy,navigate,header,empty,date,currentFolder,loadSchedules,loadProjects,loadSessions,loadArtifacts,render,renderPage,saveDraft,renderChips,sessionMenu,projectEditor,manageProjectFolders,scheduleEditor,artifactThumbnail};
   const workspaceUI=window.QuixiWorkspace.create(workflowContext);
   const capabilityUI=window.QuixiCapabilityWorkflows.create({...workflowContext,plainBody,openExternal,getToolsData:()=>toolsData,reloadTools:()=>loadTools(),updateMcpConnections,advancedMcpEditor:()=>mcpEditor(),
     startSkill:async(skill,files)=>{saveDraft();navigate("new");state.attachments.push(...files.map(f=>({name:f.name||f.path||"SKILL.md",text:f.content||f.contents||""})));const input=document.getElementById("prompt");input.value=`Use the attached ${skill.name||skill.id} instructions to help me with: `+(input.value.trim()?"\n\n"+input.value:"");saveDraft();renderChips();input.focus();}});

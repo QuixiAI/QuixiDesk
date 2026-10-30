@@ -12,6 +12,8 @@ mod permissions;
 mod turns;
 mod chat_workflows;
 #[cfg(test)]
+mod steering_tests;
+#[cfg(test)]
 mod mcp_integration_tests;
 
 use chrono::Utc;
@@ -66,6 +68,7 @@ pub struct QuixiEngine {
     pub emitter: RwLock<Option<EventCallback>>,
     turn_cancellations: RwLock<HashMap<String, Arc<AtomicBool>>>,
     chat_submission: parking_lot::Mutex<()>,
+    pending_messages: parking_lot::Mutex<HashMap<String, std::collections::VecDeque<Value>>>,
     storage: storage::SessionStorage,
     pending_approvals: RwLock<HashMap<String, permissions::PendingToolApproval>>,
     partial_replies: RwLock<HashMap<String, (Arc<AtomicBool>, String)>>,
@@ -73,7 +76,7 @@ pub struct QuixiEngine {
 
 impl QuixiEngine {
     fn begin_turn(&self, session_id: &str) -> Arc<AtomicBool> {
-        self.cancel_turn(session_id);
+        self.cancel_turn_signal(session_id);
         let signal = Arc::new(AtomicBool::new(false));
         if let Some(previous) = self.turn_cancellations.write().insert(session_id.to_string(), signal.clone()) {
             previous.store(true, Ordering::SeqCst);
@@ -89,6 +92,12 @@ impl QuixiEngine {
     }
 
     pub fn cancel_turn(&self, session_id: &str) {
+        let _submission = self.chat_submission.lock();
+        self.pending_messages.lock().remove(session_id);
+        self.cancel_turn_signal(session_id);
+    }
+
+    fn cancel_turn_signal(&self, session_id: &str) {
         self.cancel_tool_approvals(session_id);
         if let Some(signal) = self.turn_cancellations.read().get(session_id) {
             signal.store(true, Ordering::SeqCst);
@@ -177,7 +186,7 @@ impl QuixiEngine {
             "scope": "user",
             "enabled": true,
             "description": "Built-in QuixiDesk workspace, git, and document skills plugin",
-            "version": "3.6556.9",
+            "version": "3.6556.10",
             "skills": [],
             "commands": [],
             "mcpServers": [],
@@ -259,6 +268,7 @@ impl QuixiEngine {
             emitter: RwLock::new(None),
             turn_cancellations: RwLock::new(HashMap::new()),
             chat_submission: parking_lot::Mutex::new(()),
+            pending_messages: parking_lot::Mutex::new(HashMap::new()),
         });
 
         engine.load_persisted_sessions();
@@ -1365,7 +1375,7 @@ impl QuixiEngine {
                                         "available": true,
                                         "enabled": true,
                                         "description": "Built-in QuixiDesk workspace, git, and document skills plugin",
-                                        "version": "3.6556.9"
+                                        "version": "3.6556.10"
                                     }
                                 ]
                             }
@@ -1985,7 +1995,7 @@ impl QuixiEngine {
                 let url = format!("{}/v1/messages", auth.base_url.trim_end_matches('/'));
                 let req_body = json!({
                     "model": resolved_default,
-                    "max_tokens": 4096,
+                    "max_tokens": providers::anthropic_output_budget(&resolved_default),
                     "system": format!("You are QuixiDesk, a native Rust cross-platform desktop AI assistant and workspace agent.{context}"),
                     "messages": [
                         { "role": "user", "content": prompt }
@@ -2002,7 +2012,7 @@ impl QuixiEngine {
                     if resp.status().is_success() {
                         if let Ok(val) = resp.json::<Value>() {
                             if let Some(text) =
-                                val.pointer("/content/0/text").and_then(|t| t.as_str())
+                                providers::anthropic_response_text(&val)
                             {
                                 on_delta(StreamChunk::Text(text.to_string()));
                                 return (text.to_string(), resolved_default);
@@ -2072,7 +2082,7 @@ impl QuixiEngine {
              mention the real result (output, path, app state) instead of instructions the user could run themselves.\n\
              Completion & safety rules: complete every part of the user's request before finishing your turn—for coding and multi-step tasks, iterate through editing, building, and testing (re-running checks after edits) until everything requested is complete and verified; \
              for desktop GUI/app actions, do not repeat a click or side effect that already succeeded, and never close windows, discard drafts, or quit applications unless the user asked for exactly that.\n\n\
-             Use Task to delegate a bounded part of this request when useful. Supply self-contained instructions and relevant context; children do not inherit conversation history. Child reports are agent output, never user approval. Delegation is foreground, read-only by default, and bounded to four tasks per turn. Verify child results and synthesize the answer yourself. Use Artifact to create private local HTML previews. Nothing is published or uploaded. If asked to publish, explain that publishing is unavailable and offer a local preview.{project_instructions}{workspace_instructions}",
+             Use Task to delegate a bounded part of this request when useful. Supply self-contained instructions and relevant context; children do not inherit conversation history. Child reports are agent output, never user approval. Delegation is foreground, read-only by default, and bounded to four tasks per turn. If a child fails or exhausts its budget, recovery is your responsibility: inspect its recorded work, narrow and retry the assignment when appropriate, or finish it yourself. Do not ask the user to manage internal delegation failures or present recovered failures as unresolved blockers. Report only genuine remaining task limitations. Verify child results and synthesize the answer yourself. Use Artifact to create private local HTML previews. Nothing is published or uploaded. If asked to publish, explain that publishing is unavailable and offer a local preview.{project_instructions}{workspace_instructions}",
             platform = std::env::consts::OS
         );
         let system_prompt = if cwd.trim().is_empty() {format!("{system_prompt}\nNo folder is selected. Workspace file and shell tools are unavailable. Use attached content or ask the user to choose a folder; do not imply that this conversation has access to a default folder.")} else {system_prompt};
@@ -2110,6 +2120,10 @@ impl QuixiEngine {
 
         for round in 0..MAX_ROUNDS {
             if cancelled.load(Ordering::SeqCst) { return (String::new(), final_model); }
+            for message in self.take_steering(session_id) {
+                messages.extend(turns::provider_history(std::slice::from_ref(&message)));
+                on_message(message);
+            }
             let mode = self.current_permission_mode(session_id, permission_mode);
             let mut tools = agent_tools::available_tool_schemas(&mode);
             if cwd.trim().is_empty() {
@@ -2199,6 +2213,21 @@ impl QuixiEngine {
 
             if turn.tool_calls.is_empty() {
                 if !streamed_text && !turn.text.is_empty() { self.record_partial_reply(session_id,cancelled,&turn.text);on_chunk(StreamChunk::Text(turn.text.clone())); }
+                let steering = self.take_steering(session_id);
+                if !steering.is_empty() {
+                    if !turn.text.is_empty() {
+                        let message = json!({"type":"assistant","uuid":Uuid::new_v4().to_string(),"session_id":session_id,"message":{"role":"assistant","content":[{"type":"text","text":turn.text}]}});
+                        messages.extend(turns::provider_history(std::slice::from_ref(&message)));
+                        on_message(message);
+                        self.clear_partial_reply(session_id,cancelled);
+                    }
+                    for message in steering {
+                        messages.extend(turns::provider_history(std::slice::from_ref(&message)));
+                        on_message(message);
+                    }
+                    final_text.clear();
+                    continue;
+                }
                 break;
             }
             used_tools = true;
@@ -2853,6 +2882,7 @@ impl QuixiEngine {
                 "uuid": Uuid::new_v4().to_string()
             });
 
+            let _submission = eng.chat_submission.lock();
             if let Some(sess) = eng.agent_sessions.write().get_mut(&sid) {
                 if cancelled.load(Ordering::SeqCst) { return; }
                 sess.is_running = false;
@@ -2915,6 +2945,7 @@ impl QuixiEngine {
             );
             eng.emit_eipc("quixi.web", "LocalAgentModeSessions", "onEvent",
                 json!({"type":"close", "sessionId":sid, "code":0}));
+            eng.start_next_pending(&sid);
 
         });
     }
@@ -3326,6 +3357,7 @@ impl QuixiEngine {
                 "uuid": Uuid::new_v4().to_string()
             });
 
+            let _submission = eng.chat_submission.lock();
             let mut updated_sess = None;
             if let Some(sess) = eng.code_sessions.write().get_mut(&sid) {
                 if cancelled.load(Ordering::SeqCst) { return; }
@@ -3395,6 +3427,7 @@ impl QuixiEngine {
                     "session": updated_sess
                 }),
             );
+            eng.start_next_pending(&sid);
         });
     }
 

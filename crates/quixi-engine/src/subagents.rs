@@ -249,10 +249,9 @@ impl QuixiEngine {
                     "{system}\n{}",
                     agent_tools::permission_context(&current_mode)
                 ));
-                // Keep child context independently bounded; do not silently discard evidence.
-                if context::estimated_tokens(&messages) > 24000 {
-                    return Err("Subagent context budget reached; narrow the assignment.".into());
-                }
+                // Use the selected model's context window and compact older evidence.
+                // Full activity remains stored in the child record for parent recovery.
+                self.compact_context_for_provider(&mut messages, &model, provider.as_deref(), prompt, cancelled)?;
                 let turn = self
                     .provider_manager
                     .complete_turn_with_tools_for_provider(

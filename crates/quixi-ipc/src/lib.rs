@@ -269,7 +269,7 @@ impl EipcRouter {
             }),
             ("DesktopInfo", "getDefaultBrowserName") => json!("Safari"),
             ("DesktopInfo", "getSystemInfo") => json!({
-                "app_version": "3.6556.9",
+                "app_version": "3.6556.10",
                 "os_version": "15.0",
                 "os_pretty_name": "macOS Sequoia",
                 "cpu_model": "Apple Silicon",
@@ -636,6 +636,9 @@ impl EipcRouter {
                     .get(&session_id)
                     .map(|s| json!(s))
                     .unwrap_or_else(|| json!({ "sessionId": session_id }))
+            }
+            ("LocalAgentModeSessions" | "LocalSessions", "getPendingMessages") => {
+                self.engine.get_pending_messages(args.first().and_then(Value::as_str).unwrap_or_default())
             }
             ("LocalAgentModeSessions" | "LocalSessions", "sendMessageV2") => {
                 let sid=args.first().and_then(Value::as_str).unwrap_or_default();

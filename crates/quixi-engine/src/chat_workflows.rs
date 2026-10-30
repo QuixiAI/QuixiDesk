@@ -95,10 +95,47 @@ impl QuixiEngine {
         let uuid=options["messageUuid"].as_str().filter(|id|!id.trim().is_empty()).map(str::to_owned).unwrap_or_else(||Uuid::new_v4().to_string());
         let prior=agent.as_ref().map(|session|session.buffered_messages.clone()).unwrap_or_else(||self.code_transcripts.read().get(session_id).cloned().unwrap_or_default());
         if prior.iter().any(|message|message["uuid"].as_str()==Some(&uuid)) {return Ok(json!({"dispatched":true,"duplicate":true,"messageUuid":uuid}));}
-        if agent.as_ref().is_some_and(|s|s.is_running) || code.as_ref().is_some_and(|s|s.turn_running) {return Err("This conversation is still running. Stop it or wait before sending another message.".into());}
+        let delivery = options["delivery"].as_str().unwrap_or("queue");
+        if !matches!(delivery,"steer"|"queue") {return Err("Choose steer or queue delivery.".into());}
+        let mut pending = self.pending_messages.lock();
+        let queue = pending.entry(session_id.into()).or_default();
+        if queue.iter().any(|m|m["messageUuid"]==uuid) {return Ok(json!({"dispatched":true,"duplicate":true,"queued":true,"delivery":delivery,"messageUuid":uuid}));}
+        if agent.as_ref().is_some_and(|s|s.is_running) || code.as_ref().is_some_and(|s|s.turn_running) {
+            if queue.len() >= 32 {return Err("This conversation already has 32 pending messages.".into());}
+            queue.push_back(json!({"text":text,"content":content,"messageUuid":uuid,"delivery":delivery}));
+            return Ok(json!({"dispatched":true,"queued":true,"delivery":delivery,"messageUuid":uuid}));
+        }
+        drop(pending);
         if agent.is_some() { self.send_agent_message_content(session_id,text,Some(&uuid),content); }
         else {self.send_code_message_content(session_id,text,Some(&uuid),content);}
         Ok(json!({"dispatched":true,"messageUuid":uuid}))
+    }
+
+    pub fn get_pending_messages(&self, sid: &str) -> Value {
+        json!(self.pending_messages.lock().get(sid).map(|q|q.iter().map(|m|json!({"messageUuid":m["messageUuid"],"text":m["text"],"delivery":m["delivery"]})).collect::<Vec<_>>()).unwrap_or_default())
+    }
+
+    pub(crate) fn take_steering(&self, sid: &str) -> Vec<Value> {
+        let mut pending = self.pending_messages.lock();
+        let Some(queue) = pending.get_mut(sid) else {return Vec::new();};
+        let mut messages = Vec::new();
+        queue.retain(|m| {
+            if m["delivery"] != "steer" {return true;}
+            messages.push(json!({"type":"user","uuid":m["messageUuid"],"session_id":sid,"timestamp":Utc::now().to_rfc3339(),"delivery":"steer","message":{"role":"user","content":m["content"]}}));
+            false
+        });
+        messages
+    }
+
+    // Caller holds chat_submission across completion and dispatch, avoiding an idle race.
+    pub(crate) fn start_next_pending(self: &Arc<Self>, sid: &str) {
+        let next = self.pending_messages.lock().get_mut(sid).and_then(|q|q.pop_front());
+        let Some(next) = next else {return;};
+        let text = next["text"].as_str().unwrap_or_default();
+        let uuid = next["messageUuid"].as_str();
+        let content = next["content"].as_array().cloned().unwrap_or_default();
+        if self.agent_sessions.read().contains_key(sid) {self.send_agent_message_content(sid,text,uuid,content);}
+        else if self.code_sessions.read().contains_key(sid) {self.send_code_message_content(sid,text,uuid,content);}
     }
 
     /// Edits and retries are new branches. The original transcript is never truncated.
@@ -220,7 +257,18 @@ mod tests {
         assert_eq!(branch["bufferedMessages"][0]["message"]["content"][0]["text"],"edited first");
         engine.agent_sessions.write().get_mut(&sid).unwrap().is_running=true;
         assert!(engine.fork_chat_message(&sid,&json!({"messageUuid":"u1"})).is_err());
-        assert!(engine.send_chat_message(&sid,&json!({"text":"next","messageUuid":"new"})).is_err());
+        assert_eq!(engine.send_chat_message(&sid,&json!({"text":"next","messageUuid":"new"})).unwrap()["queued"],true);
+        assert_eq!(engine.send_chat_message(&sid,&json!({"text":"next","messageUuid":"new"})).unwrap()["duplicate"],true);
+        engine.send_chat_message(&sid,&json!({"text":"second","messageUuid":"second","delivery":"queue"})).unwrap();
+        engine.send_chat_message(&sid,&json!({"text":"redirect","messageUuid":"steering","delivery":"steer"})).unwrap();
+        assert_eq!(engine.get_pending_messages(&sid).as_array().unwrap().len(),3);
+        let steering=engine.take_steering(&sid);
+        assert_eq!(steering.len(),1);
+        assert_eq!(steering[0]["uuid"],"steering");
+        assert_eq!(engine.get_pending_messages(&sid)[0]["messageUuid"],"new");
+        assert_eq!(engine.get_pending_messages(&sid)[1]["messageUuid"],"second");
+        engine.cancel_turn(&sid);
+        assert!(engine.get_pending_messages(&sid).as_array().unwrap().is_empty());
         assert_eq!(engine.send_chat_message(&sid,&json!({"text":"first","messageUuid":"u1"})).unwrap()["duplicate"],true);
         assert_eq!(engine.agent_sessions.read()[&sid].buffered_messages,original);
         std::thread::sleep(std::time::Duration::from_millis(150));drop(engine);fs::remove_dir_all(root).unwrap();

@@ -67,6 +67,7 @@ async function fixture({
     },
   ];
   const calls = [];
+  const pendingMessages = [];
   const projects = [{id:"project-a",name:"Project A",instructions:"PRIVATE-PROJECT-A",folders:[{path:"/project-a"}]}];
   const providers = {
     configuredCount: 1,
@@ -90,6 +91,18 @@ async function fixture({
     if (member === "getAll")
       return service === "LocalSessions" ? [] : structuredClone(sessions);
     if (member === "getAllSpaces") return structuredClone(projects);
+    if (member === "deleteSpace") {
+      const index = projects.findIndex(p => p.id === args[0]);
+      if (index < 0) return false;
+      projects.splice(index, 1);
+      return true;
+    }
+    if (member === "delete") {
+      const index = sessions.findIndex(s => s.sessionId === args[0]);
+      if (index < 0) return false;
+      sessions.splice(index, 1);
+      return true;
+    }
     if (member === "browseAndAddTrustedFolder") return pickedFolder;
     if (member === "addFolderToSpace") {
       const project = projects.find((p) => p.id === args[0]);
@@ -124,9 +137,14 @@ async function fixture({
           "acceptEdits";
       return { ok: true };
     }
+    if (member === "getPendingMessages") return structuredClone(pendingMessages);
     if (member === "sendMessageV2") {
       if(sendGate)await sendGate;
       const s = sessions.find((s) => s.sessionId === args[0]);
+      if (s.isRunning) {
+        pendingMessages.push(args[1]);
+        return {dispatched:true, queued:true, delivery:args[1].delivery};
+      }
       s.isRunning = true;
       s.bufferedMessages.push({
         type: "user",
@@ -142,6 +160,7 @@ async function fixture({
       sessions.push(branch);return structuredClone(branch);
     }
     if (member === "stop") {
+      pendingMessages.length = 0;
       sessions.find((s) => s.sessionId === args[0]).isRunning = false;
       return true;
     }
@@ -260,7 +279,7 @@ async function fixture({
     origin: "https://app.localhost",
   };
   for (const name of ["workspace-workflows", "schedule-workflows", "capability-workflows", "chat-workflows"]) { const file=path.join(__dirname, "../../resources/ui/"+name+".js"); if(fs.existsSync(file)) w.eval(fs.readFileSync(file,"utf8")); }
-  w.eval(source);
+  w.eval(source.replace('  function plainBody(text) {', '  window.testPlainBody = plainBody;\n  function plainBody(text) {'));
   await wait();
   const click = async (text) => {
     const b = Array.from(w.document.querySelectorAll("button")).find(
@@ -428,6 +447,7 @@ test("streaming updates do not replace a follow-up being typed", async () => {
       f.w.document.querySelector("#prompt").value,
       "Keep this follow-up",
     );
+    await new Promise(resolve => f.w.requestAnimationFrame(resolve));
     assert.match(
       f.w.document.querySelector("#conversation").textContent,
       /Streaming answer/,
@@ -1311,4 +1331,157 @@ test("late submission does not clear another conversation draft",async()=>{
   await f.click("Existing conversation");f.type("#prompt","Keep this other draft");release();await wait();await wait();
   assert.match(f.w.location.pathname,/fixture-one/);assert.equal(f.w.document.querySelector("#prompt").value,"Keep this other draft");
  }finally{release();f.close();}
+});
+
+test("recents offer direct deletion with cancel and confirmed removal", async () => {
+  const f = await fixture();
+  try {
+    await f.click("Delete conversation: Existing conversation");
+    assert.match(f.w.document.querySelector("dialog").textContent, /cannot be undone/);
+    await f.click("Cancel");
+    assert.equal(f.sessions.length, 1);
+    assert.equal(f.calls.filter(c => c.member === "delete").length, 0);
+    await f.click("Delete conversation: Existing conversation");
+    await f.click("Delete");
+    assert.equal(f.sessions.length, 0);
+    assert.equal(f.w.document.querySelectorAll(".recent-row").length, 0);
+    assert.equal(f.calls.filter(c => c.member === "delete").length, 1);
+  } finally { f.close(); }
+});
+
+test("project deletion is direct and preserves conversations", async () => {
+  const f = await fixture();
+  try {
+    await f.click("Projects");
+    await f.click("Delete project: Project A");
+    assert.match(f.w.document.querySelector("dialog").textContent, /Conversations and files.*kept/);
+    await f.click("Cancel");
+    assert.equal(f.projects.length, 1);
+    await f.click("Open project");
+    await f.click("Delete project");
+    await f.click("Delete");
+    assert.equal(f.projects.length, 0);
+    assert.equal(f.sessions.length, 1);
+    assert.equal(f.w.document.body.dataset.page, "projects");
+  } finally { f.close(); }
+});
+
+test("search results and open conversations expose direct delete controls", async () => {
+  const f = await fixture();
+  try {
+    await f.click("Search");
+    assert.ok(f.w.document.querySelector("#search-results [aria-label=\"Delete conversation: Existing conversation\"]"));
+    assert.ok(f.w.document.querySelector("#search-results [aria-label=\"Delete project: Project A\"]"));
+    await f.click("Existing conversation");
+    await f.click("Delete conversation");
+    await f.click("Delete");
+    assert.equal(f.w.document.body.dataset.page, "new");
+    assert.equal(f.sessions.length, 0);
+  } finally { f.close(); }
+});
+
+test("active composer sends steering immediately and queues followups without stopping", async () => {
+  const f = await fixture();
+  try {
+    f.sessions[0].isRunning = true;
+    await f.click("Existing conversation");
+    f.type("#prompt", "Use the smaller change instead");
+    await f.click("Steer now");
+    let sent = f.calls.filter(c => c.member === "sendMessageV2");
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].args[1].delivery, "steer");
+    assert.equal(f.w.document.querySelector("#prompt").value, "");
+    assert.match(f.w.document.querySelector("#pending-messages").textContent, /Steering pending/);
+    f.type("#prompt", "Then write a summary");
+    await f.click("Queue follow-up");
+    sent = f.calls.filter(c => c.member === "sendMessageV2");
+    assert.equal(sent.length, 2);
+    assert.equal(sent[1].args[1].delivery, "queue");
+    assert.match(f.w.document.querySelector("#pending-messages").textContent, /Then write a summary/);
+    assert.equal(f.calls.filter(c => c.member === "stop").length, 0);
+    assert.equal(f.sessions[0].bufferedMessages.length, 0);
+    f.type("#prompt", "One more followup").dispatchEvent(new f.w.KeyboardEvent("keydown", {key:"Enter", bubbles:true}));
+    await wait();
+    assert.equal(f.calls.filter(c => c.member === "sendMessageV2").length, 3);
+    await f.click("Stop");
+    assert.equal(f.w.document.querySelector("#pending-messages").textContent, "");
+    assert.equal(f.w.document.querySelector("#steer-button").hidden, true);
+  } finally { f.close(); }
+});
+
+test("internal delegation failures are returned to parent, not user attention alerts", async () => {
+  const diagnostic = "Subagent context budget reached; narrow the assignment.";
+  const f = await fixture({subagents:[{agentId:"child-budget",title:"Inspect backend",status:"failed",error:diagnostic,toolCalls:9,failedToolCalls:2,messages:[]}]});
+  try {
+    await f.click("Existing conversation");
+    const panel = f.w.document.querySelector(".subagent-panel");
+    assert.match(panel.textContent, /Returned to agent/);
+    assert.match(panel.textContent, /Returned to parent agent/);
+    assert.doesNotMatch(panel.textContent, /Needs attention|context budget|2 failed/);
+    assert.equal(panel.querySelectorAll(".error-text").length, 0);
+    await f.click("View activity");
+    assert.match(f.w.document.querySelector("dialog").textContent, /Internal diagnostic/);
+    assert.match(f.w.document.querySelector("dialog").textContent, /context budget/);
+  } finally { f.close(); }
+});
+
+test("markdown safely handles separators and malformed streaming input", async () => {
+ const f = await fixture();
+ try {
+  for (const text of ["# title\u2028- item\u2029> quote", "<script>alert(1)</script>", "*".repeat(30000), "[".repeat(30000), "```js\nconst a = 1", "**unfinished", "[unfinished]("]) {
+   const body = f.w.testPlainBody(text);
+   assert.ok(body.childNodes.length);
+   assert.equal(body.querySelector("script"), null);
+  }
+  const large = "x".repeat(200001);
+  assert.equal(f.w.testPlainBody(large).querySelector("pre").textContent, large);
+  assert.ok(f.w.testPlainBody("[safe](https://example.com)").querySelector("a"));
+  assert.equal(f.w.testPlainBody("[bad](javascript:evil)").querySelector("a"), null);
+ } finally { f.close(); }
+});
+
+test("clipboard images support WebKit files fallback without duplicates", async () => {
+ const f = await fixture();
+ try {
+  const file = new f.w.File(["png"], "paste.png", {type:"image/png"});
+  const text = new f.w.File(["text"], "note.txt", {type:"text/plain"});
+  const get = f.w.QuixiChat.clipboardImages;
+  assert.equal(get({items:[{kind:"file",type:"image/png",getAsFile:()=>file}],files:[file]}).length, 1);
+  assert.equal(get({files:[file,text]})[0], file);
+  assert.equal(get(null).length, 0);
+ } finally { f.close(); }
+});
+
+
+test("pasting images queues validated attachments and preserves accompanying text", async () => {
+ const f = await fixture();
+ try {
+  const bytes = new Uint8Array([137,80,78,71,13,10,26,10]);
+  const file = new f.w.File([bytes], "clipboard.png", {type:"image/png"});
+  file.arrayBuffer = async () => bytes.buffer;
+  const prompt = f.type("#prompt", "Before After");
+  prompt.setSelectionRange(7, 7);
+  const event = new f.w.Event("paste", {bubbles:true, cancelable:true});
+  Object.defineProperty(event, "clipboardData", {value:{files:[file],getData:()=>"image "}});
+  prompt.dispatchEvent(event);
+  assert.equal(event.defaultPrevented, true);
+  assert.equal(prompt.value, "Before image After");
+  await wait();
+  assert.match(f.w.document.body.textContent, /clipboard.png/);
+  await f.click("Send");
+  const sent = f.calls.find(c => c.member === "sendMessageV2");
+  assert.ok(sent);
+  assert.match(JSON.stringify(sent.args), /image\/png/);
+  assert.match(JSON.stringify(sent.args), /iVBORw0KGgo=/);
+ } finally { f.close(); }
+});
+
+test("ordinary clipboard text retains native paste behavior", async () => {
+ const f = await fixture();
+ try {
+  const event = new f.w.Event("paste", {bubbles:true, cancelable:true});
+  Object.defineProperty(event, "clipboardData", {value:{files:[],getData:()=>"plain text"}});
+  f.w.document.querySelector("#prompt").dispatchEvent(event);
+  assert.equal(event.defaultPrevented, false);
+ } finally { f.close(); }
 });

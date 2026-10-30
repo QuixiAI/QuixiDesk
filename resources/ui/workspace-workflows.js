@@ -16,7 +16,7 @@
         const renderRows=()=>{
           const q=filter.value.toLocaleLowerCase();const found=sessions.filter(s=>textMatch(s,q,["title"]));
           rows.replaceChildren(...found.map(s=>el("div",{class:"list-row"},icon(s.isStarred?"star":"file"),
-            el("div",{class:"grow"},button(s.title||"Untitled",()=>navigate("chat",s.sessionId),"subtle-link"),el("small",{},s.isRunning?"Working…":date(s.lastActivityAt))),ib("Task actions","more",()=>c.sessionMenu(s)))));
+            el("div",{class:"grow"},button(s.title||"Untitled",()=>navigate("chat",s.sessionId),"subtle-link"),el("small",{},s.isRunning?"Working…":date(s.lastActivityAt))),ib(`Delete conversation: ${s.title||"Untitled"}`,"trash",()=>c.deleteSession(s)),ib("Task actions","more",()=>c.sessionMenu(s)))));
           if(!found.length)rows.append(empty(q?"No conversations match":"Start something here",q?"Try a different title.":"New conversations inherit this project’s instructions and chosen folder.",button("Start task",()=>startProject(p),"primary","plus")));
         };
         filter.addEventListener("input",renderRows);
@@ -26,7 +26,8 @@
           el("h3",{},"Instructions"),el("p",{class:"project-instructions"},p.instructions||"No instructions yet. Add a goal, conventions, or background for every task."),
           el("h3",{},"Folders"),...(p.folders||[]).map(f=>el("p",{class:"path"},icon("folder",14),f.path)),
           !(p.folders?.length)?el("p",{class:"hint"},"No project folder selected. Choose a folder when a task needs local files."):null,
-          button("Manage folders",()=>c.manageProjectFolders(p),"quiet","folder"));
+          button("Manage folders",()=>c.manageProjectFolders(p),"quiet","folder"),
+          button("Delete project",()=>c.deleteProject(p),"quiet danger","trash"));
         const related=el("div",{class:"project-related"});
         const updateRelated=()=>{
           if(!host.isConnected||state.page!=="project"||state.id!==p.id)return;
@@ -49,7 +50,7 @@
         function draw(){const q=input.value.toLocaleLowerCase();const list=state.projects.filter(p=>textMatch(p,q,["name","description"])).sort((a,b)=>sort.value==="name"?a.name.localeCompare(b.name):(b.updatedAt||0)-(a.updatedAt||0));
           cards.replaceChildren(...list.map(p=>el("article",{class:"card project-card"},el("div",{class:"card-symbol"},icon("projects",21)),el("h3",{},p.name),el("p",{},p.description||"A place for related work."),
             el("small",{},`${p.folders?.length||0} folders · ${state.sessions.filter(s=>s.spaceId===p.id&&!s.isArchived).length} conversations`),
-            el("div",{class:"card-actions"},button("Open project",()=>navigate("project",p.id)),button("Edit",()=>c.projectEditor(p),"quiet")))));
+            el("div",{class:"card-actions"},button("Open project",()=>navigate("project",p.id)),button("Edit",()=>c.projectEditor(p),"quiet"),ib(`Delete project: ${p.name}`,"trash",()=>c.deleteProject(p))))));
           if(!list.length)cards.append(empty("No projects found",q?"Try another name.":"Create a project to keep instructions and conversations together."));}
         input.addEventListener("input",draw);host.replaceChildren(header("Projects","One place for each ongoing effort.",button("New project",()=>c.projectEditor(),"primary","plus")),el("div",{class:"toolbar"},input,sort),cards);draw();
       }
@@ -91,15 +92,15 @@
           const found=q?await rpc("LocalAgentModeSessions","searchSessions",[q,100]):[];
           if(ticket!==generation||!host.isConnected)return;
           const low=q.toLocaleLowerCase();let rows=[];
-          for(const s of state.sessions){const hit=(found||[]).find(f=>f.sessionId===s.sessionId);if((!q||hit||textMatch(s,low,["title"]))&&(scope.value==="all"||!s.isArchived)&&(scope.value!=="pinned"||s.isStarred))rows.push({kind:"conversation",title:s.title||"Untitled",detail:hit?.snippet||date(s.lastActivityAt),icon:"file",open:()=>navigate("chat",s.sessionId),time:s.lastActivityAt});}
+          for(const s of state.sessions){const hit=(found||[]).find(f=>f.sessionId===s.sessionId);if((!q||hit||textMatch(s,low,["title"]))&&(scope.value==="all"||!s.isArchived)&&(scope.value!=="pinned"||s.isStarred))rows.push({kind:"conversation",remove:()=>c.deleteSession(s),title:s.title||"Untitled",detail:hit?.snippet||date(s.lastActivityAt),icon:"file",open:()=>navigate("chat",s.sessionId),time:s.lastActivityAt});}
           if(scope.value!=="pinned"){
-            for(const p of state.projects)if(!q||textMatch(p,low,["name","description","instructions"]))rows.push({kind:"project",title:p.name,detail:p.description||"Project",icon:"projects",open:()=>navigate("project",p.id),time:p.updatedAt});
+            for(const p of state.projects)if(!q||textMatch(p,low,["name","description","instructions"]))rows.push({kind:"project",remove:()=>c.deleteProject(p),title:p.name,detail:p.description||"Project",icon:"projects",open:()=>navigate("project",p.id),time:p.updatedAt});
             for(const a of state.artifacts)if(!q||textMatch(a,low,["name","title","description"]))rows.push({kind:"artifact",title:a.name||a.title,detail:"Artifact · Revision "+(a.revision||1),icon:"artifacts",open:()=>openArtifact(a.id),time:a.updatedAt});
             for(const t of state.schedules)if(t.status!=="deleted"&&(!q||textMatch(t,low,["displayName","name","prompt"])))rows.push({kind:"schedule",title:t.displayName||t.name,detail:t.enabled?"Scheduled task":"Paused task",icon:"schedule",open:()=>{navigate("schedules");c.scheduleEditor(t);},time:t.updatedAt});
           }
           rows=rows.filter(r=>kind.value==="all"||r.kind===kind.value).sort((a,b)=>(b.time||0)-(a.time||0));
           status.textContent=`${rows.length} result${rows.length===1?"":"s"}`;
-          results.replaceChildren(...rows.map(r=>el("div",{class:"list-row search-result"},icon(r.icon),el("div",{class:"grow"},button(highlighted(r.title,q),r.open,"subtle-link"),el("p",{class:"snippet"},highlighted(r.detail,q))),el("small",{},r.kind))));
+          results.replaceChildren(...rows.map(r=>el("div",{class:"list-row search-result"},icon(r.icon),el("div",{class:"grow"},button(highlighted(r.title,q),r.open,"subtle-link"),el("p",{class:"snippet"},highlighted(r.detail,q))),el("small",{},r.kind),r.remove?ib(`Delete ${r.kind}: ${r.title}`,"trash",r.remove):null)));
           if(!rows.length)results.append(empty("No matches","Try a different phrase, category, or archive filter."));
         }catch(e){if(ticket===generation){status.textContent="Search failed";results.replaceChildren(el("p",{class:"error-text"},e.message),button("Try again",search));}}}
         input.addEventListener("input",()=>{++generation;clearTimeout(timer);timer=setTimeout(search,250);});

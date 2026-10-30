@@ -1317,7 +1317,7 @@ impl McpHost {
                         "dxt_version": "0.1",
                         "name": id,
                         "display_name": display_name,
-                        "version": "3.6556.9",
+                        "version": "3.6556.10",
                         "description": desc,
                         "author": {
                             "name": "QuixiDesk"

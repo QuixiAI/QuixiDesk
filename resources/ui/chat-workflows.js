@@ -48,8 +48,15 @@
     }
     onChange?.();
   }
+  function clipboardImages(clipboard) {
+    if (!clipboard) return [];
+    const items = Array.from(clipboard.items || []).filter(item => item.kind === "file" && item.type.startsWith("image/"));
+    const files = items.map(item => item.getAsFile()).filter(Boolean);
+    // Some WebKit clipboard implementations expose only files, not items.
+    return files.length ? files : Array.from(clipboard.files || []).filter(file => file.type.startsWith("image/"));
+  }
   function queueFiles(files, onChange) {
-    const items = Array.from(files).map(file => ({id: crypto.randomUUID(), name: file.name, file, size: file.size, status: "loading"}));
+    const items = Array.from(files).map(file => ({id: crypto.randomUUID(), name: file.name || "clipboard-image", file, size: file.size, status: "loading"}));
     // Start after the caller has attached these objects to the originating draft.
     queueMicrotask(() => items.forEach(item => { if (item.status !== "cancelled") void load(item, onChange); }));
     return items;
@@ -69,5 +76,5 @@
   function transcriptAttachments(message) {
     return (message?.message?.content || []).filter(block => block.attachment).map(block => ({...block.attachment, preview: block.type === "image_url" ? block.image_url?.url : undefined}));
   }
-  window.QuixiChat = Object.freeze({limits, accept, queueFiles, cancelAttachment, retryAttachment: load, attachmentsForSend, editableText, transcriptAttachments});
+  window.QuixiChat = Object.freeze({limits, accept, clipboardImages, queueFiles, cancelAttachment, retryAttachment: load, attachmentsForSend, editableText, transcriptAttachments});
 })();

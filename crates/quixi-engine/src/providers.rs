@@ -2736,7 +2736,7 @@ impl ProviderManager {
                 .header("accept", "text/event-stream")
                 .json(&json!({
                     "model": model_id,
-                    "max_tokens": 4096,
+                    "max_tokens": anthropic_output_budget(&model_id),
                     "system": sys_prompt,
                     "messages": msgs,
                     "stream": true
@@ -2769,57 +2769,8 @@ impl ProviderManager {
                 return Some((msg, provider_name, model_id));
             }
 
-            if resp.status().is_success() {
-                let mut acc = String::new();
-                let reader = BufReader::new(resp);
-                for line in reader.lines().map_while(Result::ok) {
-                    let trimmed = line.trim();
-                    if let Some(data_str) = trimmed.strip_prefix("data:") {
-                        let data_str = data_str.trim();
-                        if data_str.is_empty() || data_str == "[DONE]" {
-                            continue;
-                        }
-                        if let Ok(ev) = serde_json::from_str::<Value>(data_str) {
-                            if ev.get("type").and_then(|v| v.as_str())
-                                == Some("content_block_delta")
-                            {
-                                if let Some(th) = ev
-                                    .pointer("/delta/thinking")
-                                    .and_then(|v| v.as_str())
-                                    .filter(|s| !s.is_empty())
-                                {
-                                    on_chunk(StreamChunk::Thinking(th.to_string()));
-                                }
-                                if let Some(d) = ev
-                                    .pointer("/delta/text")
-                                    .and_then(|v| v.as_str())
-                                    .filter(|s| !s.is_empty())
-                                {
-                                    acc.push_str(d);
-                                    on_delta!(d);
-                                }
-                            } else if let Some(text) =
-                                ev.pointer("/content/0/text").and_then(|v| v.as_str())
-                            {
-                                acc.push_str(text);
-                                on_delta!(text);
-                            }
-                        }
-                    } else if trimmed.starts_with('{') {
-                        if let Ok(body) = serde_json::from_str::<Value>(trimmed) {
-                            if let Some(text) =
-                                body.pointer("/content/0/text").and_then(|t| t.as_str())
-                            {
-                                acc.push_str(text);
-                                on_delta!(text);
-                            }
-                        }
-                    }
-                }
-                if !acc.trim().is_empty() {
-                    return Some((acc, provider_name, model_id));
-                }
-            }
+            let turn = anthropic_stream_turn(BufReader::new(resp), &provider_name, &model_id, &mut on_chunk);
+            return Some((turn.text, provider_name, model_id));
         } else if !base_url.is_empty()
             && (!credential.is_empty() || auth_mode == "local" || provider_id == "custom")
             && !credential.starts_with("oauth_")

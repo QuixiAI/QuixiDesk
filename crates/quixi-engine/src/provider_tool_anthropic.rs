@@ -1,5 +1,14 @@
 // Native Messages adapter. Schemas stay intact; tool calls execute only after a complete stream.
 // Protocol: https://platform.claude.com/docs/en/build-with-claude/streaming
+// Bounded defaults within known model limits; unknown models stay conservative.
+pub(crate) fn anthropic_output_budget(model: &str) -> u32 {
+    if ["claude-sonnet-4", "claude-opus-4", "claude-haiku-4", "claude-3-7-sonnet"].iter().any(|prefix| model.contains(prefix)) {
+        16_384
+    } else if model.contains("claude-3-5-sonnet") || model.contains("claude-3-5-haiku") {
+        8_192
+    } else { 4_096 }
+}
+
 fn anthropic_payload(messages: &[Value], tools: &Value, model: &str) -> Result<Value, String> {
     let mut system = Vec::new();
     let mut converted: Vec<Value> = Vec::new();
@@ -87,7 +96,7 @@ fn anthropic_payload(messages: &[Value], tools: &Value, model: &str) -> Result<V
         })
         .collect();
     Ok(
-        json!({"model":model,"max_tokens":4096,"system":system.join("\n\n"),"messages":converted,"tools":tools,"tool_choice":{"type":"auto"},"stream":true}),
+        json!({"model":model,"max_tokens":anthropic_output_budget(model),"system":system.join("\n\n"),"messages":converted,"tools":tools,"tool_choice":{"type":"auto"},"stream":true}),
     )
 }
 
@@ -164,14 +173,11 @@ fn parse_anthropic_tool_stream<R: std::io::BufRead, F: FnMut(StreamChunk)>(
             }
             Some("content_block_stop") => {
                 let i = event["index"].as_u64().ok_or("Missing block index")? as usize;
-                let (block, partial, closed) = blocks.get_mut(&i).ok_or("Stop without a block")?;
+                let (_, _, closed) = blocks.get_mut(&i).ok_or("Stop without a block")?;
                 if *closed {
                     return Err("Duplicate block stop".into());
                 }
-                if block["type"] == "tool_use" && !partial.is_empty() {
-                    block["input"] = serde_json::from_str(partial)
-                        .map_err(|e| format!("Invalid tool arguments: {e}"))?;
-                }
+                // Defer JSON validation until stop reason is known.
                 *closed = true;
             }
             Some("message_delta") => {
@@ -205,9 +211,13 @@ fn parse_anthropic_tool_stream<R: std::io::BufRead, F: FnMut(StreamChunk)>(
     let mut text = String::new();
     let mut thinking = String::new();
     let mut native = Vec::new();
-    for (_, (block, _, _)) in blocks {
+    for (_, (mut block, partial, _)) in blocks {
         match block["type"].as_str() {
             Some("tool_use") => {
+                if !partial.is_empty() {
+                    block["input"] = serde_json::from_str(&partial)
+                        .map_err(|e| format!("Invalid tool arguments: {e}"))?;
+                }
                 let id = block["id"]
                     .as_str()
                     .filter(|v| !v.is_empty())
@@ -283,7 +293,23 @@ impl ProviderManager {
             Ok(v) => v,
             Err(e) => return tool_failure(e, provider, model),
         };
-        match parse_anthropic_tool_stream(std::io::BufReader::new(response), on_chunk) {
+        anthropic_stream_turn(std::io::BufReader::new(response), provider, model, on_chunk)
+    }
+}
+
+fn anthropic_stream_turn<R: std::io::BufRead, F: FnMut(StreamChunk)>(
+    reader: R, provider: &str, model: &str, on_chunk: &mut F,
+) -> ProviderToolTurn {
+        let mut partial_text = String::new();
+        let mut partial_thinking = String::new();
+        let result = parse_anthropic_tool_stream(reader, &mut |chunk| {
+            match &chunk {
+                StreamChunk::Text(s) => partial_text.push_str(s),
+                StreamChunk::Thinking(s) => partial_thinking.push_str(s),
+            }
+            on_chunk(chunk);
+        });
+        match result {
             Ok((text, thinking, tool_calls, response_items)) => ProviderToolTurn {
                 text,
                 thinking,
@@ -293,9 +319,27 @@ impl ProviderManager {
                 model_id: model.into(),
                 stream_error: None,
             },
-            Err(e) => tool_failure(e, provider, model),
+            Err(e) => {
+                // The caller retries certain parser errors before retaining text.
+                // Surface this as a terminal partial response instead, with no calls.
+                let error = if e.contains("stop_reason=max_tokens") {
+                    "Anthropic output truncated (max_tokens); request a continuation or smaller output. No tools were executed.".to_owned()
+                } else {
+                    format!("Anthropic response incomplete: {}; no tools were executed.", e.replace("Invalid tool arguments", "Malformed tool input"))
+                };
+                let notice = format!("
+
+[{error}]");
+                on_chunk(StreamChunk::Text(notice.clone()));
+                partial_text.push_str(&notice);
+                ProviderToolTurn {
+                    text: partial_text, thinking: partial_thinking,
+                    tool_calls: Vec::new(), response_items: Vec::new(),
+                    provider_name: provider.into(), model_id: model.into(),
+                    stream_error: Some(error),
+                }
+            }
         }
-    }
 }
 
 #[cfg(test)]
@@ -329,6 +373,50 @@ mod anthropic_tool_tests {
         }
     }
     #[test]
+    fn budgets_are_model_aware_and_bounded() {
+        for (model, budget) in [("claude-sonnet-4-5", 16384), ("claude-opus-4-1", 16384), ("claude-3-5-sonnet-latest", 8192), ("claude-3-haiku", 4096), ("unknown", 4096)] {
+            let payload = anthropic_payload(&[], &json!([]), model).unwrap();
+            assert_eq!(payload["max_tokens"], budget);
+        }
+    }
+
+    #[test]
+    fn max_tokens_preserves_long_text_and_never_executes_tools() {
+        // More than 4096 tokens even for tokenizers that merge repeated words.
+        let text = "This is a long output sentence.
+".repeat(5000);
+        for input in [None, Some("{\"path\":"), Some("{}" )] {
+            let mut events = vec![
+                json!({"type":"message_start"}),
+                json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+                json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":text}}),
+                json!({"type":"content_block_stop","index":0}),
+            ];
+            if let Some(input) = input {
+                events.extend([
+                    json!({"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"call","name":"Write","input":{}}}),
+                    json!({"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":input}}),
+                    json!({"type":"content_block_stop","index":1}),
+                ]);
+            }
+            events.extend([
+                json!({"type":"message_delta","delta":{"stop_reason":"max_tokens"}}),
+                json!({"type":"message_stop"}),
+            ]);
+            let mut streamed = String::new();
+            let turn = anthropic_stream_turn(std::io::Cursor::new(stream(events)), "Anthropic", "claude-sonnet-4-5", &mut |chunk| {
+                if let StreamChunk::Text(s) = chunk { streamed.push_str(&s); }
+            });
+            assert!(turn.text.starts_with(&text));
+            assert_eq!(turn.text, streamed);
+            assert!(turn.text.contains("output truncated (max_tokens)"));
+            assert!(turn.tool_calls.is_empty());
+            assert!(turn.response_items.is_empty());
+            assert!(turn.stream_error.unwrap().contains("max_tokens"));
+        }
+    }
+
+    #[test]
     fn native_adapter_preserves_schema_signed_thinking_errors_and_images() {
         let schema = json!({"type":"object","properties":{"x":{"oneOf":[{"type":"number","minimum":3},{"type":"null"}]}},"additionalProperties":false});
         let signed = json!({"type":"thinking","thinking":"reason","signature":"signed"});
@@ -345,5 +433,32 @@ mod anthropic_tool_tests {
             payload["messages"][1]["content"][1]["source"]["data"],
             "YQ=="
         );
+    }
+}
+
+// The legacy non-streaming fallback must surface truncation too.
+pub(crate) fn anthropic_response_text(response: &Value) -> Option<String> {
+    let mut text = response["content"].as_array()?.iter()
+        .filter(|block| block["type"] == "text")
+        .filter_map(|block| block["text"].as_str())
+        .collect::<String>();
+    if response["stop_reason"] == "max_tokens" {
+        text.push_str("
+
+[Anthropic output truncated (max_tokens); request a continuation or smaller output.]");
+    }
+    if text.is_empty() { None } else { Some(text) }
+}
+
+#[cfg(test)]
+mod anthropic_fallback_tests {
+    use super::*;
+    #[test]
+    fn fallback_retains_all_text_and_reports_truncation() {
+        let response = json!({"content":[{"type":"thinking","thinking":"hidden"},{"type":"text","text":"one"},{"type":"text","text":"two"}],"stop_reason":"max_tokens"});
+        let text = anthropic_response_text(&response).unwrap();
+        assert!(text.starts_with("onetwo"));
+        assert!(text.contains("truncated (max_tokens)"));
+        assert_eq!(anthropic_response_text(&json!({"content":[{"type":"text","text":"complete"}],"stop_reason":"end_turn"})).as_deref(), Some("complete"));
     }
 }

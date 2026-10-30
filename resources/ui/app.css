@@ -308,12 +308,16 @@ summary {
   color: var(--muted);
   display: block;
 }
+.recent-row > .icon,
 .recent-row > .more {
   opacity: 0.55;
   padding: 7px;
   background: transparent;
   border: 0;
 }
+.recent-row > .icon { flex-shrink: 0; }
+.recent-row:hover > .icon,
+.recent-row:focus-within > .icon,
 .recent-row:hover > .more,
 .recent-row:focus-within > .more {
   opacity: 1;
@@ -2152,3 +2156,6 @@ dialog:focus {
 .mcp-context-toolbar input { flex: 1; width: 0; min-width: 120px; }
 .mcp-context-toolbar button { flex: 0 0 auto; }
 .dialog-actions { display: flex; justify-content: flex-end; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 20px; }
+
+/* Keep oversized plain-text responses readable without horizontal overflow. */
+.plain-response { white-space: pre-wrap; overflow-wrap: anywhere; }
