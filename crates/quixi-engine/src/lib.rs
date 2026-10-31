@@ -1,21 +1,21 @@
-pub mod agent_tools;
-mod chat_workflows;
+mod task_context;
+mod subagents;
+mod mcp_registry;
+mod scheduling;
 mod context;
 mod credentials;
-mod local_ui;
-#[cfg(test)]
-mod mcp_integration_tests;
-mod mcp_registry;
-mod permissions;
+mod tool_media;
+pub mod agent_tools;
 pub mod providers;
-mod scheduling;
+mod local_ui;
+mod storage;
+mod permissions;
+mod turns;
+mod chat_workflows;
 #[cfg(test)]
 mod steering_tests;
-mod storage;
-mod subagents;
-mod task_context;
-mod tool_media;
-mod turns;
+#[cfg(test)]
+mod mcp_integration_tests;
 
 use chrono::Utc;
 use parking_lot::RwLock;
@@ -31,10 +31,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use uuid::Uuid;
 
 pub type EventCallback = Arc<dyn Fn(&str, Value) + Send + Sync>;
@@ -83,35 +80,23 @@ impl QuixiEngine {
     fn begin_turn(&self, session_id: &str) -> Arc<AtomicBool> {
         self.cancel_turn_signal(session_id);
         let signal = Arc::new(AtomicBool::new(false));
-        if let Some(previous) = self
-            .turn_cancellations
-            .write()
-            .insert(session_id.to_string(), signal.clone())
-        {
+        if let Some(previous) = self.turn_cancellations.write().insert(session_id.to_string(), signal.clone()) {
             previous.store(true, Ordering::SeqCst);
         }
-        self.partial_replies
-            .write()
-            .insert(session_id.into(), (signal.clone(), String::new()));
+        self.partial_replies.write().insert(session_id.into(), (signal.clone(),String::new()));
         signal
     }
 
     fn current_permission_mode(&self, session_id: &str, fallback: &str) -> String {
-        if let Some(session) = self.agent_sessions.read().get(session_id) {
-            return session.permission_mode.clone();
-        }
-        if let Some(session) = self.code_sessions.read().get(session_id) {
-            return session.permission_mode.clone();
-        }
+        if let Some(session) = self.agent_sessions.read().get(session_id) { return session.permission_mode.clone(); }
+        if let Some(session) = self.code_sessions.read().get(session_id) { return session.permission_mode.clone(); }
         fallback.to_string()
     }
 
     pub fn cancel_turn(&self, session_id: &str) {
         let _submission = self.chat_submission.lock();
         if let Some(queue) = self.pending_messages.lock().get_mut(session_id) {
-            for message in queue {
-                message["held"] = json!(true);
-            }
+            for message in queue { message["held"] = json!(true); }
         }
         self.cancel_turn_signal(session_id);
     }
@@ -277,7 +262,9 @@ impl QuixiEngine {
             marketplaces: RwLock::new(default_marketplaces),
             preview_tabs: RwLock::new(Vec::new()),
             active_preview_tab_id: RwLock::new("seed".to_string()),
-            trusted_folders: RwLock::new(vec![default_workspace]),
+            trusted_folders: RwLock::new(vec![
+                default_workspace,
+            ]),
             mcp_host: McpHost::new_with_data_dir(&data_dir),
             netstack: NetstackPolicy::new_with_data_dir(&data_dir),
             shell_host: ShellHostEngine::new(),
@@ -341,13 +328,9 @@ impl QuixiEngine {
                                     .user_selected_folders
                                     .iter()
                                     .any(|d| d == quixi_proto::paths::default_workspace_str())
-                                && sess
-                                    .user_selected_folders
-                                    .iter()
-                                    .any(|d| d == quixi_proto::paths::home_dir_str())
+                                && sess.user_selected_folders.iter().any(|d| d == quixi_proto::paths::home_dir_str())
                             {
-                                sess.user_selected_folders
-                                    .retain(|d| d != quixi_proto::paths::home_dir_str());
+                                sess.user_selected_folders.retain(|d| d != quixi_proto::paths::home_dir_str());
                                 changed = true;
                             }
                             for msg in &mut sess.buffered_messages {
@@ -384,26 +367,14 @@ impl QuixiEngine {
                             }
                             if let Some(stripped) = sess.session_id.strip_prefix("local_cli_") {
                                 let canonical_id = format!("local_{}", stripped);
-                                let canonical =
-                                    code_sessions_dir.join(format!("{canonical_id}.json"));
-                                if fs::read(canonical)
-                                    .ok()
-                                    .and_then(|raw| {
-                                        serde_json::from_slice::<LocalCodeSession>(&raw).ok()
-                                    })
-                                    .is_some_and(|saved| saved.session_id == canonical_id)
-                                {
-                                    continue;
-                                }
+                                let canonical = code_sessions_dir.join(format!("{canonical_id}.json"));
+                                if fs::read(canonical).ok().and_then(|raw| serde_json::from_slice::<LocalCodeSession>(&raw).ok())
+                                    .is_some_and(|saved| saved.session_id == canonical_id) { continue; }
                                 sess.session_id = canonical_id;
                             }
                             if let Ok(document) = serde_json::from_str::<Value>(&raw) {
-                                if let Some(transcript) =
-                                    document.get("transcript").and_then(Value::as_array)
-                                {
-                                    self.code_transcripts
-                                        .write()
-                                        .insert(sess.session_id.clone(), transcript.clone());
+                                if let Some(transcript) = document.get("transcript").and_then(Value::as_array) {
+                                    self.code_transcripts.write().insert(sess.session_id.clone(), transcript.clone());
                                 }
                             }
                             sess.is_running = false;
@@ -487,10 +458,7 @@ impl QuixiEngine {
                 json!(Utc::now().timestamp_millis()),
             );
         }
-        if let Some(gm) = boot
-            .get_mut("gated_messages")
-            .and_then(|g| g.as_object_mut())
-        {
+        if let Some(gm) = boot.get_mut("gated_messages").and_then(|g| g.as_object_mut()) {
             gm.insert("locale".to_string(), json!(current_locale));
             if let Some(msgs) = gm.get_mut("messages").and_then(|m| m.as_object_mut()) {
                 msgs.insert("secret:oxbo0n".to_string(), json!("QuixiDesk files"));
@@ -563,8 +531,7 @@ impl QuixiEngine {
                             for line in c.lines() {
                                 let trimmed = line.trim();
                                 if let Some(rest) = trimmed.strip_prefix("description:") {
-                                    let val =
-                                        rest.trim().trim_matches('"').trim_matches('\'').trim();
+                                    let val = rest.trim().trim_matches('"').trim_matches('\'').trim();
                                     if !val.is_empty() && val != "|" && val != ">" {
                                         return Some(val.to_string());
                                     }
@@ -576,8 +543,7 @@ impl QuixiEngine {
                             if let Some(first) = lines.next() {
                                 if first.trim() == "---" {
                                     in_frontmatter = true;
-                                } else if !first.trim().is_empty() && !first.trim().starts_with('#')
-                                {
+                                } else if !first.trim().is_empty() && !first.trim().starts_with('#') {
                                     return Some(first.trim().to_string());
                                 }
                             }
@@ -728,12 +694,7 @@ impl QuixiEngine {
                 trimmed
             }
         };
-        let explicit_id = opts
-            .get("id")
-            .or_else(|| opts.get("scheduledTaskId"))
-            .and_then(Value::as_str)
-            .filter(|id| !id.trim().is_empty())
-            .is_some();
+        let explicit_id = opts.get("id").or_else(|| opts.get("scheduledTaskId")).and_then(Value::as_str).filter(|id| !id.trim().is_empty()).is_some();
         let mut id = opts
             .get("id")
             .or_else(|| opts.get("scheduledTaskId"))
@@ -742,14 +703,8 @@ impl QuixiEngine {
             .map(|s| s.trim().to_string())
             .unwrap_or(slug_default);
 
-        if id.is_empty()
-            || !id
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-        {
-            return json!({"error":"Invalid schedule identifier."});
-        }
-        let _guard = self.schedule_dispatch.lock();
+        if id.is_empty() || !id.chars().all(|c|c.is_ascii_alphanumeric()||c=='-'||c=='_'){return json!({"error":"Invalid schedule identifier."});}
+        let _guard=self.schedule_dispatch.lock();
         // A second schedule with the same name must not overwrite an existing task.
         if !explicit_id && self.scheduled_tasks.read().contains_key(&id) {
             id = format!("{}-{}", id, &Uuid::new_v4().to_string()[..8]);
@@ -760,117 +715,57 @@ impl QuixiEngine {
         let description = opts
             .get("description")
             .and_then(|v| v.as_str())
-            .or_else(|| {
-                existing
-                    .as_ref()
-                    .and_then(|e| e.get("description"))
-                    .and_then(|v| v.as_str())
-            })
+            .or_else(|| existing.as_ref().and_then(|e| e.get("description")).and_then(|v| v.as_str()))
             .unwrap_or("")
             .to_string();
         let prompt = opts
             .get("prompt")
             .or_else(|| opts.get("content"))
             .and_then(|v| v.as_str())
-            .or_else(|| {
-                existing
-                    .as_ref()
-                    .and_then(|e| e.get("prompt"))
-                    .and_then(|v| v.as_str())
-            })
+            .or_else(|| existing.as_ref().and_then(|e| e.get("prompt")).and_then(|v| v.as_str()))
             .unwrap_or("Summarize recent project activity.")
             .to_string();
-        if prompt.trim().is_empty() {
-            return json!({"error":"Describe what this schedule should do."});
-        }
-        let space_id = opts
-            .get("spaceId")
-            .or_else(|| existing.as_ref().and_then(|e| e.get("spaceId")))
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string);
-        if space_id
-            .as_ref()
-            .is_some_and(|id| !self.cowork_spaces.read().contains_key(id))
-        {
-            return json!({"error":"The selected project no longer exists. Choose another project or no project."});
-        }
+        if prompt.trim().is_empty() { return json!({"error":"Describe what this schedule should do."}); }
+        let space_id = opts.get("spaceId").or_else(|| existing.as_ref().and_then(|e| e.get("spaceId"))).and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string);
+        if space_id.as_ref().is_some_and(|id| !self.cowork_spaces.read().contains_key(id)) { return json!({"error":"The selected project no longer exists. Choose another project or no project."}); }
         let cron = opts
             .get("cronExpression")
             .or_else(|| opts.get("cron"))
             .or_else(|| opts.get("schedule"))
             .and_then(|v| v.as_str())
-            .or_else(|| {
-                existing
-                    .as_ref()
-                    .and_then(|e| e.get("cronExpression"))
-                    .and_then(|v| v.as_str())
-            })
+            .or_else(|| existing.as_ref().and_then(|e| e.get("cronExpression")).and_then(|v| v.as_str()))
             .unwrap_or("0 9 * * *")
             .to_string();
-        let next_run = match scheduling::next_run(&cron, Utc::now().timestamp_millis()) {
-            Ok(t) => t,
-            Err(e) => return json!({"error":e}),
-        };
+        let next_run=match scheduling::next_run(&cron,Utc::now().timestamp_millis()){Ok(t)=>t,Err(e)=>return json!({"error":e})};
         let enabled = opts
             .get("enabled")
             .and_then(|v| v.as_bool())
-            .or_else(|| {
-                existing
-                    .as_ref()
-                    .and_then(|e| e.get("enabled"))
-                    .and_then(|v| v.as_bool())
-            })
+            .or_else(|| existing.as_ref().and_then(|e| e.get("enabled")).and_then(|v| v.as_bool()))
             .unwrap_or(true);
         let cwd = opts
             .get("cwd")
             .or_else(|| opts.get("folderPath"))
             .and_then(|v| v.as_str())
-            .or_else(|| {
-                existing
-                    .as_ref()
-                    .and_then(|e| e.get("cwd"))
-                    .and_then(|v| v.as_str())
-            })
+            .or_else(|| existing.as_ref().and_then(|e| e.get("cwd")).and_then(|v| v.as_str()))
             .unwrap_or("")
             .to_string();
-        let cwd = if cwd.trim().is_empty() {
-            String::new()
-        } else {
-            match local_ui::resolve_folder_path(&cwd, &quixi_proto::paths::home_dir()) {
-                Ok(p) if p.is_dir() => p.to_string_lossy().to_string(),
-                Ok(_) => {
-                    return json!({"error":"Choose an existing working folder, or clear the folder."})
-                }
-                Err(e) => return json!({"error":e}),
-            }
+        let cwd = if cwd.trim().is_empty() { String::new() } else {
+            match local_ui::resolve_folder_path(&cwd,&quixi_proto::paths::home_dir()) { Ok(p) if p.is_dir() => p.to_string_lossy().to_string(), Ok(_) => return json!({"error":"Choose an existing working folder, or clear the folder."}), Err(e) => return json!({"error":e}) }
         };
         let model = opts
             .get("model")
             .and_then(|v| v.as_str())
-            .or_else(|| {
-                existing
-                    .as_ref()
-                    .and_then(|e| e.get("model"))
-                    .and_then(|v| v.as_str())
-            })
+            .or_else(|| existing.as_ref().and_then(|e| e.get("model")).and_then(|v| v.as_str()))
             .map(|s| s.to_string())
             .unwrap_or_default();
         let permission_mode = opts
             .get("permissionMode")
             .and_then(|v| v.as_str())
-            .or_else(|| {
-                existing
-                    .as_ref()
-                    .and_then(|e| e.get("permissionMode"))
-                    .and_then(|v| v.as_str())
-            })
+            .or_else(|| existing.as_ref().and_then(|e| e.get("permissionMode")).and_then(|v| v.as_str()))
             .unwrap_or("default")
             .to_string();
 
-        if !matches!(permission_mode.as_str(), "default" | "auto") {
-            return json!({"error":"Choose Manual or Auto permissions."});
-        }
+        if !matches!(permission_mode.as_str(), "default" | "auto") { return json!({"error":"Choose Manual or Auto permissions."}); }
 
         let now_ms = Utc::now().timestamp_millis() as u64;
         let created_at = existing
@@ -891,6 +786,7 @@ impl QuixiEngine {
             model,
             prompt
         );
+
 
         let mut task = json!({
             "id": id,
@@ -914,28 +810,10 @@ impl QuixiEngine {
             "createdAt": created_at,
             "updatedAt": now_ms,
         });
-        if let Some(old) = existing {
-            for key in [
-                "lastSessionId",
-                "lastRunStatus",
-                "lastRunMessage",
-                "lastAttemptAt",
-                "lastFinishedAt",
-            ] {
-                if let Some(v) = old.get(key) {
-                    task[key] = v.clone();
-                }
-            }
-        }
-        if let Err(e) =
-            storage::atomic_write(&json_path, &serde_json::to_vec_pretty(&task).unwrap())
-        {
-            return json!({"error":format!("Schedule could not be saved: {e}")});
-        }
+        if let Some(old)=existing {for key in ["lastSessionId","lastRunStatus","lastRunMessage","lastAttemptAt","lastFinishedAt"] {if let Some(v)=old.get(key){task[key]=v.clone();}}}
+        if let Err(e)=storage::atomic_write(&json_path,&serde_json::to_vec_pretty(&task).unwrap()){return json!({"error":format!("Schedule could not be saved: {e}")});}
         // The JSON record is authoritative; a failed text export must not claim the task was unsaved.
-        if let Err(error) = storage::atomic_write(&file_path, md_body.as_bytes()) {
-            tracing::warn!(%error, "Could not update schedule text export");
-        }
+        if let Err(error) = storage::atomic_write(&file_path, md_body.as_bytes()) { tracing::warn!(%error, "Could not update schedule text export"); }
         self.scheduled_tasks.write().insert(id, task.clone());
 
         let ev_type = if is_update {
@@ -963,54 +841,22 @@ impl QuixiEngine {
     }
 
     pub fn update_scheduled_task_status(&self, id: &str, status: &str) -> bool {
-        if !id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-        {
-            return false;
-        }
-        let _guard = self.schedule_dispatch.lock();
+        if !id.chars().all(|c|c.is_ascii_alphanumeric()||c=='-'||c=='_'){return false;}
+        let _guard=self.schedule_dispatch.lock();
         let tasks_dir = self.data_dir.join("scheduled_tasks");
         let updated = {
-            let mut map = self.scheduled_tasks.write();
-            let Some(mut task) = map.get(id).cloned() else {
-                return false;
-            };
-            let enabled = status == "enabled";
+            let mut map=self.scheduled_tasks.write();
+            let Some(mut task)=map.get(id).cloned()else{return false;};
+            let enabled=status=="enabled";
             if enabled {
-                let Ok(next) = scheduling::next_run(
-                    task["cronExpression"].as_str().unwrap_or_default(),
-                    Utc::now().timestamp_millis(),
-                ) else {
-                    return false;
-                };
-                task["dispatchVersion"] = json!(1);
-                task["nextRunAt"] = json!(next);
+                let Ok(next)=scheduling::next_run(task["cronExpression"].as_str().unwrap_or_default(),Utc::now().timestamp_millis())else{return false;};
+                task["dispatchVersion"]=json!(1);task["nextRunAt"]=json!(next);
             }
-            task["enabled"] = json!(enabled);
-            task["status"] = json!(if status == "deleted" {
-                "deleted"
-            } else if enabled {
-                "enabled"
-            } else {
-                "disabled"
-            });
-            task["updatedAt"] = json!(Utc::now().timestamp_millis());
+            task["enabled"]=json!(enabled);task["status"]=json!(if status=="deleted"{"deleted"}else if enabled{"enabled"}else{"disabled"});
+            task["updatedAt"]=json!(Utc::now().timestamp_millis());
             // Persist disabled tombstones before removing an entry, preventing resurrection after restart.
-            if storage::atomic_write(
-                &tasks_dir.join(format!("{id}.json")),
-                &serde_json::to_vec_pretty(&task).unwrap(),
-            )
-            .is_err()
-            {
-                return false;
-            }
-            if status == "deleted" {
-                map.remove(id);
-                let _ = fs::remove_file(tasks_dir.join(format!("{id}.md")));
-            } else {
-                map.insert(id.into(), task.clone());
-            }
+            if storage::atomic_write(&tasks_dir.join(format!("{id}.json")),&serde_json::to_vec_pretty(&task).unwrap()).is_err(){return false;}
+            if status=="deleted"{map.remove(id);let _=fs::remove_file(tasks_dir.join(format!("{id}.md")));}else{map.insert(id.into(),task.clone());}
             Some(task)
         };
         if let Some(task) = updated {
@@ -1037,10 +883,7 @@ impl QuixiEngine {
     }
 
     pub fn get_scheduled_task_file_content(&self, id: &str) -> String {
-        let md_path = self
-            .data_dir
-            .join("scheduled_tasks")
-            .join(format!("{}.md", id));
+        let md_path = self.data_dir.join("scheduled_tasks").join(format!("{}.md", id));
         if let Ok(raw) = fs::read_to_string(&md_path) {
             if !raw.trim().is_empty() {
                 return raw;
@@ -1210,37 +1053,21 @@ impl QuixiEngine {
         };
 
         if clean_path == "/api/quixi/workspace/inspect" && method == "POST" {
-            return match local_ui::resolve_folder_path(
-                body_json["path"].as_str().unwrap_or(""),
-                &quixi_proto::paths::home_dir(),
-            ) {
-                Ok(path) => {
-                    Self::json_resp(200, &json!({"exists":true,"path":path.to_string_lossy()}))
-                }
+            return match local_ui::resolve_folder_path(body_json["path"].as_str().unwrap_or(""), &quixi_proto::paths::home_dir()) {
+                Ok(path) => Self::json_resp(200, &json!({"exists":true,"path":path.to_string_lossy()})),
                 Err(error) => Self::json_resp(400, &json!({"error":error})),
             };
         }
         if clean_path == "/api/quixi/workspace/read" && method == "POST" {
             let path = PathBuf::from(body_json["path"].as_str().unwrap_or(""));
-            if !path.is_absolute() {
-                return Self::json_resp(400, &json!({"error":"File path must be absolute."}));
-            }
+            if !path.is_absolute() { return Self::json_resp(400, &json!({"error":"File path must be absolute."})); }
             return match fs::metadata(&path).and_then(|meta| {
-                if !meta.is_file() {
-                    return Err(std::io::Error::other("Not a regular file"));
-                }
-                if meta.len() > 1_000_000 {
-                    return Err(std::io::Error::other("Preview is limited to 1 MB"));
-                }
+                if !meta.is_file() { return Err(std::io::Error::other("Not a regular file")); }
+                if meta.len() > 1_000_000 { return Err(std::io::Error::other("Preview is limited to 1 MB")); }
                 fs::read_to_string(&path)
             }) {
-                Ok(contents) => Self::json_resp(
-                    200,
-                    &json!({"contents":contents,"path":path.to_string_lossy()}),
-                ),
-                Err(error) => {
-                    Self::json_resp(400, &json!({"error":format!("Cannot read file: {error}")}))
-                }
+                Ok(contents) => Self::json_resp(200, &json!({"contents":contents,"path":path.to_string_lossy()})),
+                Err(error) => Self::json_resp(400, &json!({"error":format!("Cannot read file: {error}")})),
             };
         }
 
@@ -1255,23 +1082,12 @@ impl QuixiEngine {
         }
 
         if let Some(id) = clean_path.strip_prefix("/api/quixi/prompt-context/") {
-            return self
-                .prompt_contexts
-                .read()
-                .get(id)
+            return self.prompt_contexts.read().get(id)
                 .map(|context| Self::json_resp(200, context))
-                .unwrap_or_else(|| {
-                    Self::json_resp(
-                        404,
-                        &json!({"error":"No tool-enabled request recorded for this session"}),
-                    )
-                });
+                .unwrap_or_else(|| Self::json_resp(404, &json!({"error":"No tool-enabled request recorded for this session"})));
         }
         if let Some(id) = clean_path.strip_prefix("/api/quixi/artifacts/") {
-            return self
-                .artifacts
-                .read()
-                .get(id)
+            return self.artifacts.read().get(id)
                 .map(|a| Self::json_resp(200, a))
                 .unwrap_or_else(|| Self::json_resp(404, &json!({"error":"Artifact not found"})));
         }
@@ -1282,9 +1098,7 @@ impl QuixiEngine {
         }
         if clean_path == "/api/quixi/providers/save" {
             let res = self.provider_manager.save_provider(&body_json);
-            if res.get("error").is_none() {
-                self.sync_sessions_to_connected_models();
-            }
+            if res.get("error").is_none() { self.sync_sessions_to_connected_models(); }
             return Self::json_resp(200, &res);
         }
         if clean_path == "/api/quixi/providers/remove" {
@@ -1316,16 +1130,18 @@ impl QuixiEngine {
 
         // 0b. /api/quixi/browser & /api/quixi/browser/render (In-App Browser Side Pane)
         if clean_path == "/api/quixi/browser/render" {
-            let tab_id: Option<u32> = path.split_once('?').and_then(|(_, q)| {
-                q.split('&').find_map(|pair| {
-                    let (k, v) = pair.split_once('=')?;
-                    if k == "tab_id" || k == "tabId" {
-                        v.parse::<u32>().ok()
-                    } else {
-                        None
-                    }
-                })
-            });
+            let tab_id: Option<u32> = path
+                .split_once('?')
+                .and_then(|(_, q)| {
+                    q.split('&').find_map(|pair| {
+                        let (k, v) = pair.split_once('=')?;
+                        if k == "tab_id" || k == "tabId" {
+                            v.parse::<u32>().ok()
+                        } else {
+                            None
+                        }
+                    })
+                });
             let html = quixi_platform::BrowserUse::render_tab_html(tab_id);
             return (200, "text/html; charset=utf-8", html.into_bytes());
         }
@@ -1379,7 +1195,10 @@ impl QuixiEngine {
                         }
                     }
                     "click_ref" => {
-                        let r = body_json.get("ref").and_then(|v| v.as_str()).unwrap_or("");
+                        let r = body_json
+                            .get("ref")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
                         let _ = quixi_platform::BrowserUse::click_ref(tab_id, r);
                     }
                     "form_input" => {
@@ -1394,7 +1213,10 @@ impl QuixiEngine {
                         let _ = quixi_platform::BrowserUse::form_input(tab_id, r, val_str);
                     }
                     "eval" => {
-                        let text = body_json.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                        let text = body_json
+                            .get("text")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
                         let _ = quixi_platform::BrowserUse::eval_javascript(tab_id, text);
                     }
                     _ => {}
@@ -1845,16 +1667,13 @@ impl QuixiEngine {
                         .collect()
                 })
                 .unwrap_or_default();
-            let reply_text = self.generate_reply_with_history(
-                prompt,
-                quixi_proto::paths::default_workspace_str(),
-                &history,
-            );
+            let reply_text =
+                self.generate_reply_with_history(prompt, quixi_proto::paths::default_workspace_str(), &history);
             let now = Utc::now().to_rfc3339();
 
-            let active_model = self
-                .provider_manager
-                .resolve_connected_model(body_json.get("model").and_then(|v| v.as_str()));
+            let active_model = self.provider_manager.resolve_connected_model(
+                body_json.get("model").and_then(|v| v.as_str()),
+            );
             {
                 let mut convs = self.chat_conversations.write();
                 let entry = convs.entry(conv_uuid.to_string()).or_insert_with(|| {
@@ -1913,9 +1732,9 @@ impl QuixiEngine {
                 }
             }
 
-            let active_model = self
-                .provider_manager
-                .resolve_connected_model(body_json.get("model").and_then(|v| v.as_str()));
+            let active_model = self.provider_manager.resolve_connected_model(
+                body_json.get("model").and_then(|v| v.as_str()),
+            );
             let sse = Self::build_sse_completion(&assistant_msg_uuid, &reply_text, &active_model);
             return (200, "text/event-stream; charset=utf-8", sse.into_bytes());
         }
@@ -2157,13 +1976,12 @@ impl QuixiEngine {
     where
         F: FnMut(StreamChunk),
     {
-        let resolved_default = self
-            .provider_manager
-            .resolve_connected_model(model_override);
+        let resolved_default = self.provider_manager.resolve_connected_model(model_override);
 
         let mut active_provider_info: Option<(String, String)> = None;
-        if let Some((live_text, prov_name, model_id)) =
-            self.provider_manager.try_live_completion_with_context(
+        if let Some((live_text, prov_name, model_id)) = self
+            .provider_manager
+            .try_live_completion_with_context(
                 prompt,
                 cwd,
                 history,
@@ -2203,7 +2021,9 @@ impl QuixiEngine {
                 {
                     if resp.status().is_success() {
                         if let Ok(val) = resp.json::<Value>() {
-                            if let Some(text) = providers::anthropic_response_text(&val) {
+                            if let Some(text) =
+                                providers::anthropic_response_text(&val)
+                            {
                                 on_delta(StreamChunk::Text(text.to_string()));
                                 return (text.to_string(), resolved_default);
                             }
@@ -2214,8 +2034,7 @@ impl QuixiEngine {
         }
 
         // A provider failure must not trigger heuristic file/browser access or fabricate work.
-        let fallback_reply =
-            "No connected provider returned a response. Check Providers and try again.".to_string();
+        let fallback_reply = "No connected provider returned a response. Check Providers and try again.".to_string();
 
         for line in fallback_reply.split_inclusive('\n') {
             on_delta(StreamChunk::Text(line.to_string()));
@@ -2226,6 +2045,7 @@ impl QuixiEngine {
             .unwrap_or(resolved_default);
         (fallback_reply, final_model)
     }
+
 
     /// Runs a full agent turn: the model may call tools (Bash / Read / Write / Edit /
     /// WebFetch / McpCall), we execute them locally and feed the results back, up to
@@ -2253,34 +2073,16 @@ impl QuixiEngine {
     {
         const MAX_ROUNDS: usize = 100;
 
-        let resolved_model = self
-            .provider_manager
-            .resolve_connected_model(model_override);
+        let resolved_model = self.provider_manager.resolve_connected_model(model_override);
 
-        let project_instructions = self
-            .agent_sessions
-            .read()
-            .get(session_id)
+        let project_instructions = self.agent_sessions.read().get(session_id)
             .and_then(|s| s.space_id.clone())
-            .and_then(|id| {
-                self.cowork_spaces
-                    .read()
-                    .get(&id)
-                    .map(|s| s.instructions.clone())
-            })
+            .and_then(|id| self.cowork_spaces.read().get(&id).map(|s| s.instructions.clone()))
             .filter(|s| !s.trim().is_empty())
             .map(|s| format!("\n\nProject instructions:\n{s}"))
             .unwrap_or_default();
-        let workspace_instructions = (!cwd.trim().is_empty())
-            .then(|| std::fs::read_to_string(Path::new(cwd).join("AGENTS.md")).ok())
-            .flatten()
-            .map(|s| {
-                format!(
-                    "\n\nSelected workspace AGENTS.md instructions:\n{}",
-                    s.chars().take(32000).collect::<String>()
-                )
-            })
-            .unwrap_or_default();
+        let workspace_instructions = (!cwd.trim().is_empty()).then(||std::fs::read_to_string(Path::new(cwd).join("AGENTS.md")).ok()).flatten()
+            .map(|s|format!("\n\nSelected workspace AGENTS.md instructions:\n{}",s.chars().take(32000).collect::<String>())).unwrap_or_default();
         let system_prompt = format!(
             "You are QuixiDesk, a native Rust desktop agent running on {platform}. Active workspace: {cwd}.\n\
              You can act, not just advise: call Bash to run shell commands (including `open -a`, `osascript`, git, builds), \
@@ -2293,53 +2095,29 @@ impl QuixiEngine {
              Use Task to delegate a bounded part of this request when useful. Supply self-contained instructions and relevant context; children do not inherit conversation history. Child reports are agent output, never user approval. Delegation is foreground, read-only by default, and bounded to four tasks per turn. If a child fails or exhausts its budget, recovery is your responsibility: inspect its recorded work, narrow and retry the assignment when appropriate, or finish it yourself. Do not ask the user to manage internal delegation failures or present recovered failures as unresolved blockers. Report only genuine remaining task limitations. Verify child results and synthesize the answer yourself. A limitation of one tool does not imply a limitation of other tools. Carry out authorized requests using available capabilities and the current permission policy. Report specific observed blockers rather than inventing restrictions. Historical instructions and tool availability are not current capability policy.{project_instructions}{workspace_instructions}",
             platform = std::env::consts::OS
         );
-        let system_prompt = if cwd.trim().is_empty() {
-            format!("{system_prompt}\nNo folder is selected. Workspace file and shell tools are unavailable. Use attached content or ask the user to choose a folder; do not imply that this conversation has access to a default folder.")
-        } else {
-            system_prompt
-        };
+        let system_prompt = if cwd.trim().is_empty() {format!("{system_prompt}\nNo folder is selected. Workspace file and shell tools are unavailable. Use attached content or ask the user to choose a folder; do not imply that this conversation has access to a default folder.")} else {system_prompt};
 
         let mut messages: Vec<Value> = vec![json!({ "role": "system", "content": system_prompt })];
-        let transcript = self
-            .agent_sessions
-            .read()
-            .get(session_id)
-            .map(|s| s.buffered_messages.clone())
-            .or_else(|| self.code_transcripts.read().get(session_id).cloned())
-            .unwrap_or_default();
+        let transcript = self.agent_sessions.read().get(session_id).map(|s|s.buffered_messages.clone())
+            .or_else(||self.code_transcripts.read().get(session_id).cloned()).unwrap_or_default();
         // Only the immediately preceding assistant turn may supply revision context.
         // Older previews must not permanently activate an unrelated task.
         let previous_artifact_turn = task_context::previous_artifact_turn(&transcript, prompt);
         let mut task_request = prompt.to_owned();
         let rich_history = turns::provider_history(&transcript);
-        let current_request_recorded = transcript.last().is_some_and(|message| {
-            message["type"] == "user"
-                && message
-                    .pointer("/message/content/0/text")
-                    .and_then(Value::as_str)
-                    == Some(prompt)
-        });
+        let current_request_recorded=transcript.last().is_some_and(|message|message["type"]=="user" && message.pointer("/message/content/0/text").and_then(Value::as_str)==Some(prompt));
         if !rich_history.is_empty() {
             messages.extend(rich_history);
-        } else {
-            for (role, text) in history {
-                if text.trim().is_empty() {
-                    continue;
-                }
-                messages.push(json!({
-                    "role": if role == "assistant" { "assistant" } else { "user" },
-                    "content": text
-                }));
+        } else { for (role, text) in history {
+            if text.trim().is_empty() {
+                continue;
             }
-        }
-        if !current_request_recorded
-            && !messages.last().is_some_and(|m| {
-                m["role"] == "user"
-                    && (m["content"].as_str() == Some(prompt)
-                        || m["content"].as_array().is_some_and(|blocks| {
-                            blocks.first().and_then(|b| b["text"].as_str()) == Some(prompt)
-                        }))
-            })
+            messages.push(json!({
+                "role": if role == "assistant" { "assistant" } else { "user" },
+                "content": text
+            }));
+        } }
+        if !current_request_recorded && !messages.last().is_some_and(|m|m["role"]=="user" && (m["content"].as_str()==Some(prompt) || m["content"].as_array().is_some_and(|blocks|blocks.first().and_then(|b|b["text"].as_str())==Some(prompt))))
         {
             messages.push(json!({ "role": "user", "content": prompt }));
         }
@@ -2355,14 +2133,9 @@ impl QuixiEngine {
         let mut defer_direct_mcp = false;
 
         for round in 0..MAX_ROUNDS {
-            if cancelled.load(Ordering::SeqCst) {
-                return (String::new(), final_model);
-            }
+            if cancelled.load(Ordering::SeqCst) { return (String::new(), final_model); }
             for message in self.take_steering(session_id) {
-                if let Some(text) = message
-                    .pointer("/message/content/0/text")
-                    .and_then(Value::as_str)
-                {
+                if let Some(text) = message.pointer("/message/content/0/text").and_then(Value::as_str) {
                     task_request.push('\n');
                     task_request.push_str(text);
                 }
@@ -2374,41 +2147,18 @@ impl QuixiEngine {
                 .filter(|a| a["createdBySessionId"] == session_id)
                 .map(|a| json!({"id":a["id"], "title":a["title"], "createdBySessionId":a["createdBySessionId"]}))
                 .collect();
-            let task_context = task_context::TaskContext::derive(
-                &task_request,
-                &artifacts,
-                session_id,
-                previous_artifact_turn,
-            );
+            let task_context = task_context::TaskContext::derive(&task_request, &artifacts, session_id, previous_artifact_turn);
             let mut tools = agent_tools::available_tool_schemas(&mode);
             task_context.filter_tools(&mut tools);
             if cwd.trim().is_empty() {
-                tools.as_array_mut().unwrap().retain(|tool| {
-                    !chat_workflows::needs_workspace(
-                        tool["function"]["name"].as_str().unwrap_or_default(),
-                    )
-                });
+                tools.as_array_mut().unwrap().retain(|tool| !chat_workflows::needs_workspace(tool["function"]["name"].as_str().unwrap_or_default()));
             }
             tools.as_array_mut().unwrap().push(subagents::schema());
             let mut budget = self.provider_manager.mcp_tool_budget(&resolved_model);
-            if defer_direct_mcp {
-                budget.enabled = false;
-            }
-            let registry = mcp_registry::Registry::build(
-                self.mcp_host.ready_tools(&self.mcp_workspace(cwd)),
-                tools.as_array().unwrap(),
-                budget,
-            );
-            tools
-                .as_array_mut()
-                .unwrap()
-                .extend(registry.schemas.iter().cloned());
-            messages[0]["content"] = json!(format!(
-                "{system_prompt}\n\n{}\n\n{}\n\n{}",
-                task_context.guidance(),
-                agent_tools::permission_context(&mode),
-                registry.context()
-            ));
+            if defer_direct_mcp { budget.enabled = false; }
+            let registry=mcp_registry::Registry::build(self.mcp_host.ready_tools(&self.mcp_workspace(cwd)),tools.as_array().unwrap(),budget);
+            tools.as_array_mut().unwrap().extend(registry.schemas.iter().cloned());
+            messages[0]["content"] = json!(format!("{system_prompt}\n\n{}\n\n{}\n\n{}", task_context.guidance(), agent_tools::permission_context(&mode),registry.context()));
             self.prompt_contexts.write().insert(session_id.to_owned(), json!({
                 "version": 1, "round": round, "permissionMode": mode,
                 "sections": [
@@ -2419,45 +2169,24 @@ impl QuixiEngine {
                 ],
                 "tools": tools.as_array().unwrap().iter().map(|t|t["function"]["name"].clone()).collect::<Vec<_>>()
             }));
-            if let Err(error) =
-                self.compact_context(&mut messages, &resolved_model, prompt, cancelled)
-            {
-                if !cancelled.load(Ordering::SeqCst) {
-                    on_chunk(StreamChunk::Text(error.clone()));
-                }
-                return (error, final_model);
+            if let Err(error)=self.compact_context(&mut messages,&resolved_model,prompt,cancelled) {
+                if !cancelled.load(Ordering::SeqCst) {on_chunk(StreamChunk::Text(error.clone()));}
+                return (error,final_model);
             }
             let mut streamed_text = false;
             let turn = match self.provider_manager.complete_turn_with_tools(
                 &messages,
                 &tools,
                 Some(&resolved_model),
-                &mut |chunk| {
-                    if !cancelled.load(Ordering::SeqCst) {
-                        if let StreamChunk::Text(text) = &chunk {
-                            if !text.is_empty() {
-                                streamed_text = true;
-                                self.record_partial_reply(session_id, cancelled, text);
-                            }
-                        }
-                        on_chunk(chunk);
-                    }
-                },
+                &mut |chunk| { if !cancelled.load(Ordering::SeqCst) { if let StreamChunk::Text(text)=&chunk { if !text.is_empty() {streamed_text=true;self.record_partial_reply(session_id,cancelled,text);} } on_chunk(chunk); } },
             ) {
                 Some(turn) => turn,
                 None => {
                     // Provider cannot do tool calling — use the classic path exactly once.
-                    if transcript.iter().any(|message| {
-                        message
-                            .pointer("/message/content")
-                            .and_then(Value::as_array)
-                            .is_some_and(|blocks| {
-                                blocks.iter().any(|block| block.get("attachment").is_some())
-                            })
-                    }) {
+                    if transcript.iter().any(|message|message.pointer("/message/content").and_then(Value::as_array).is_some_and(|blocks|blocks.iter().any(|block|block.get("attachment").is_some()))) {
                         let error="This provider connection cannot accept attachments through the supported chat protocol. Your files and message are saved; choose another provider and retry.".to_string();
                         on_chunk(StreamChunk::Text(error.clone()));
-                        return (error, final_model);
+                        return (error,final_model);
                     }
                     if used_tools {
                         break;
@@ -2468,22 +2197,13 @@ impl QuixiEngine {
                         history,
                         model_override,
                         &project_instructions,
-                        &mut |chunk| {
-                            if !cancelled.load(Ordering::SeqCst) {
-                                if let StreamChunk::Text(text) = &chunk {
-                                    self.record_partial_reply(session_id, cancelled, text);
-                                }
-                                on_chunk(chunk);
-                            }
-                        },
+                        &mut |chunk| { if !cancelled.load(Ordering::SeqCst) {if let StreamChunk::Text(text)=&chunk {self.record_partial_reply(session_id,cancelled,text);} on_chunk(chunk); } },
                     );
                     return (reply, model);
                 }
             };
 
-            if cancelled.load(Ordering::SeqCst) {
-                return (String::new(), final_model);
-            }
+            if cancelled.load(Ordering::SeqCst) { return (String::new(), final_model); }
             tracing::info!(
                 round,
                 tool_calls = turn.tool_calls.len(),
@@ -2494,14 +2214,9 @@ impl QuixiEngine {
 
             if let Some(ref err) = turn.stream_error {
                 let lower = err.to_lowercase();
-                if !defer_direct_mcp
-                    && !registry.schemas.is_empty()
-                    && !streamed_text
+                if !defer_direct_mcp && !registry.schemas.is_empty() && !streamed_text
                     && (err.contains("HTTP 400") || err.contains("HTTP 422"))
-                    && ["tool", "schema", "parameter"]
-                        .iter()
-                        .any(|word| lower.contains(word))
-                {
+                    && ["tool", "schema", "parameter"].iter().any(|word| lower.contains(word)) {
                     // An unsuccessful provider request executed no tools. Retain complete
                     // definitions through discovery rather than stripping schema keywords.
                     defer_direct_mcp = true;
@@ -2531,34 +2246,25 @@ impl QuixiEngine {
             }
 
             if turn.tool_calls.is_empty() {
-                if !streamed_text && !turn.text.is_empty() {
-                    self.record_partial_reply(session_id, cancelled, &turn.text);
-                    on_chunk(StreamChunk::Text(turn.text.clone()));
-                }
+                if !streamed_text && !turn.text.is_empty() { self.record_partial_reply(session_id,cancelled,&turn.text);on_chunk(StreamChunk::Text(turn.text.clone())); }
                 let steering = self.take_steering(session_id);
                 if !steering.is_empty() {
                     if !turn.text.is_empty() {
                         let message = json!({"type":"assistant","uuid":Uuid::new_v4().to_string(),"session_id":session_id,"message":{"role":"assistant","content":[{"type":"text","text":turn.text}]}});
-                        if let Some(text) = message
-                            .pointer("/message/content/0/text")
-                            .and_then(Value::as_str)
-                        {
-                            task_request.push('\n');
-                            task_request.push_str(text);
-                        }
-                        messages.extend(turns::provider_history(std::slice::from_ref(&message)));
+                        if let Some(text) = message.pointer("/message/content/0/text").and_then(Value::as_str) {
+                    task_request.push('\n');
+                    task_request.push_str(text);
+                }
+                messages.extend(turns::provider_history(std::slice::from_ref(&message)));
                         on_message(message);
-                        self.clear_partial_reply(session_id, cancelled);
+                        self.clear_partial_reply(session_id,cancelled);
                     }
                     for message in steering {
-                        if let Some(text) = message
-                            .pointer("/message/content/0/text")
-                            .and_then(Value::as_str)
-                        {
-                            task_request.push('\n');
-                            task_request.push_str(text);
-                        }
-                        messages.extend(turns::provider_history(std::slice::from_ref(&message)));
+                        if let Some(text) = message.pointer("/message/content/0/text").and_then(Value::as_str) {
+                    task_request.push('\n');
+                    task_request.push_str(text);
+                }
+                messages.extend(turns::provider_history(std::slice::from_ref(&message)));
                         on_message(message);
                     }
                     final_text.clear();
@@ -2573,12 +2279,7 @@ impl QuixiEngine {
             let repeated = turn
                 .tool_calls
                 .iter()
-                .filter(|c| {
-                    !agent_tools::repeatable_observation(
-                        &c.name,
-                        &serde_json::from_str::<Value>(&c.arguments).unwrap_or(Value::Null),
-                    ) && !seen_calls.insert(format!("{}|{}", c.name, c.arguments))
-                })
+                .filter(|c| !agent_tools::repeatable_observation(&c.name,&serde_json::from_str::<Value>(&c.arguments).unwrap_or(Value::Null)) && !seen_calls.insert(format!("{}|{}", c.name, c.arguments)))
                 .count();
             let mut repeat_warning = false;
             if repeated == turn.tool_calls.len() {
@@ -2593,30 +2294,20 @@ impl QuixiEngine {
             }
 
             let mut displayed = std::collections::HashSet::new();
-            let fresh_calls: Vec<bool> = turn
-                .tool_calls
-                .iter()
-                .map(|call| {
-                    let input =
-                        serde_json::from_str::<Value>(&call.arguments).unwrap_or(Value::Null);
-                    registry.route(&call.name).is_some()
-                        || call.name == agent_tools::TOOL_MCP_CALL
-                        || agent_tools::repeatable_observation(&call.name, &input)
-                        || (!tool_results.contains(&call.name, &input)
-                            && displayed.insert(format!("{}|{}", call.name, input)))
-                })
-                .collect();
+            let fresh_calls: Vec<bool> = turn.tool_calls.iter().map(|call| {
+                let input = serde_json::from_str::<Value>(&call.arguments).unwrap_or(Value::Null);
+                registry.route(&call.name).is_some() || call.name == agent_tools::TOOL_MCP_CALL || agent_tools::repeatable_observation(&call.name,&input) ||
+                    (!tool_results.contains(&call.name, &input)
+                    && displayed.insert(format!("{}|{}", call.name, input)))
+            }).collect();
             // 1. Assistant message with the tool_use blocks.
             let mut content: Vec<Value> = Vec::new();
             if !turn.text.trim().is_empty() {
                 content.push(json!({ "type": "text", "text": turn.text }));
             }
             for (call, fresh) in turn.tool_calls.iter().zip(&fresh_calls) {
-                if !fresh {
-                    continue;
-                }
-                let input: Value =
-                    serde_json::from_str(&call.arguments).unwrap_or_else(|_| json!({}));
+                if !fresh { continue; }
+                let input: Value = serde_json::from_str(&call.arguments).unwrap_or_else(|_| json!({}));
                 content.push(json!({
                     "type": "tool_use",
                     "id": call.id,
@@ -2639,10 +2330,7 @@ impl QuixiEngine {
                     "stop_reason": "tool_use"
                 }
             });
-            if fresh_calls.iter().any(|fresh| *fresh) {
-                self.clear_partial_reply(session_id, cancelled);
-                on_message(assistant_msg.clone());
-            }
+            if fresh_calls.iter().any(|fresh| *fresh) {self.clear_partial_reply(session_id,cancelled);on_message(assistant_msg.clone());}
             // The provider conversation needs the real OpenAI tool-call shape, not our
             // Provider transcript blocks: assistant.tool_calls + role=tool results.
             let mut provider_tool_calls: Vec<Value> = Vec::new();
@@ -2664,9 +2352,7 @@ impl QuixiEngine {
             let mut result_blocks: Vec<Value> = Vec::new();
             let mut mutated_files = false;
             for call in &turn.tool_calls {
-                if cancelled.load(Ordering::SeqCst) {
-                    return (String::new(), final_model);
-                }
+                if cancelled.load(Ordering::SeqCst) { return (String::new(), final_model); }
                 let (output, is_error) = match serde_json::from_str::<Value>(&call.arguments) {
                     Ok(input) if registry.route(&call.name).is_some()=>{
                         let route=registry.route(&call.name).unwrap();let input=route.input(&input);
@@ -2716,9 +2402,7 @@ impl QuixiEngine {
                     "content": result_blocks.iter().zip(&fresh_calls).filter(|(_, fresh)| **fresh).map(|(block, _)| block.clone()).collect::<Vec<_>>()
                 }
             });
-            if fresh_calls.iter().any(|fresh| *fresh) {
-                on_message(result_msg.clone());
-            }
+            if fresh_calls.iter().any(|fresh| *fresh) { on_message(result_msg.clone()); }
             for (call, block) in turn.tool_calls.iter().zip(result_blocks.iter()) {
                 messages.push(json!({
                     "role": "tool",
@@ -2755,8 +2439,7 @@ impl QuixiEngine {
         }
 
         if final_text.trim().is_empty() {
-            final_text =
-                "See the tool results above for what completed and any errors.".to_string();
+            final_text = "See the tool results above for what completed and any errors.".to_string();
         }
 
         (final_text, final_model)
@@ -2824,7 +2507,7 @@ impl QuixiEngine {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
-        let folder_exists = !cwd.is_empty() && Path::new(&cwd).is_dir();
+        let folder_exists=!cwd.is_empty() && Path::new(&cwd).is_dir();
         let sess = LocalAgentSession {
             session_id: session_id.clone(),
             forked_from: None,
@@ -2842,11 +2525,7 @@ impl QuixiEngine {
             home_path: home,
             folder_exists,
             pending_tool_permissions: vec![],
-            permission_mode: opts
-                .get("permissionMode")
-                .and_then(Value::as_str)
-                .unwrap_or("default")
-                .to_string(),
+            permission_mode: opts.get("permissionMode").and_then(Value::as_str).unwrap_or("default").to_string(),
             error: None,
             initial_message: if message.is_empty() {
                 None
@@ -2861,7 +2540,9 @@ impl QuixiEngine {
         };
 
         self.persist_agent_session(&sess);
-        self.agent_sessions.write().insert(session_id.clone(), sess);
+        self.agent_sessions
+            .write()
+            .insert(session_id.clone(), sess);
 
         self.emit_eipc(
             "quixi.web",
@@ -2890,21 +2571,10 @@ impl QuixiEngine {
         prompt: &str,
         provided_uuid: Option<&str>,
     ) {
-        self.send_agent_message_content(
-            session_id,
-            prompt,
-            provided_uuid,
-            vec![json!({"type":"text","text":prompt})],
-        );
+        self.send_agent_message_content(session_id, prompt, provided_uuid, vec![json!({"type":"text","text":prompt})]);
     }
 
-    fn send_agent_message_content(
-        self: &Arc<Self>,
-        session_id: &str,
-        prompt: &str,
-        provided_uuid: Option<&str>,
-        content: Vec<Value>,
-    ) {
+    fn send_agent_message_content(self: &Arc<Self>, session_id: &str, prompt: &str, provided_uuid: Option<&str>, content: Vec<Value>) {
         let user_msg_uuid = provided_uuid
             .filter(|s| !s.trim().is_empty())
             .map(|s| s.to_string())
@@ -2994,9 +2664,7 @@ impl QuixiEngine {
         std::thread::spawn(move || {
             let turn_start_ms = Utc::now().timestamp_millis();
             std::thread::sleep(std::time::Duration::from_millis(120));
-            if cancelled.load(Ordering::SeqCst) {
-                return;
-            }
+            if cancelled.load(Ordering::SeqCst) { return; }
 
             eng.emit_eipc(
                 "quixi.web",
@@ -3186,9 +2854,7 @@ impl QuixiEngine {
                         );
                     }
                     if let Some(sess) = eng_tools.agent_sessions.write().get_mut(&sid_tools) {
-                        if cancelled.load(Ordering::SeqCst) {
-                            return;
-                        }
+                        if cancelled.load(Ordering::SeqCst) { return; }
                         sess.buffered_messages.push(msg.clone());
                         eng_tools.persist_agent_session(sess);
                     }
@@ -3206,9 +2872,7 @@ impl QuixiEngine {
                 },
             );
 
-            if cancelled.load(Ordering::SeqCst) {
-                return;
-            }
+            if cancelled.load(Ordering::SeqCst) { return; }
 
             // 3. Emit `content_block_stop`
             eng.emit_eipc(
@@ -3265,9 +2929,7 @@ impl QuixiEngine {
 
             let _submission = eng.chat_submission.lock();
             if let Some(sess) = eng.agent_sessions.write().get_mut(&sid) {
-                if cancelled.load(Ordering::SeqCst) {
-                    return;
-                }
+                if cancelled.load(Ordering::SeqCst) { return; }
                 sess.is_running = false;
                 sess.model = final_model;
                 sess.last_activity_at = Utc::now().timestamp_millis() as u64;
@@ -3275,7 +2937,7 @@ impl QuixiEngine {
                 sess.buffered_messages.push(result_msg.clone());
                 eng.persist_agent_session(sess);
             }
-            eng.clear_partial_reply(&sid, &cancelled);
+            eng.clear_partial_reply(&sid,&cancelled);
 
             eng.emit_eipc(
                 "quixi.web",
@@ -3326,13 +2988,10 @@ impl QuixiEngine {
                     "sessionId": sid
                 }),
             );
-            eng.emit_eipc(
-                "quixi.web",
-                "LocalAgentModeSessions",
-                "onEvent",
-                json!({"type":"close", "sessionId":sid, "code":0}),
-            );
+            eng.emit_eipc("quixi.web", "LocalAgentModeSessions", "onEvent",
+                json!({"type":"close", "sessionId":sid, "code":0}));
             eng.start_next_pending(&sid);
+
         });
     }
 
@@ -3389,11 +3048,7 @@ impl QuixiEngine {
             .filter(|s| !s.is_empty())
             .unwrap_or("default")
             .to_string();
-        let branch = if cwd.trim().is_empty() {
-            None
-        } else {
-            quixi_workspace::GitPoolEngine::inspect_repo(Path::new(&cwd)).branch
-        };
+        let branch = if cwd.trim().is_empty() {None} else {quixi_workspace::GitPoolEngine::inspect_repo(Path::new(&cwd)).branch};
         let requested_model = opts.get("model").and_then(|v| v.as_str());
         let model = self
             .provider_manager
@@ -3464,21 +3119,10 @@ impl QuixiEngine {
         prompt: &str,
         provided_uuid: Option<&str>,
     ) {
-        self.send_code_message_content(
-            session_id,
-            prompt,
-            provided_uuid,
-            vec![json!({"type":"text","text":prompt})],
-        );
+        self.send_code_message_content(session_id, prompt, provided_uuid, vec![json!({"type":"text","text":prompt})]);
     }
 
-    fn send_code_message_content(
-        self: &Arc<Self>,
-        session_id: &str,
-        prompt: &str,
-        provided_uuid: Option<&str>,
-        content: Vec<Value>,
-    ) {
+    fn send_code_message_content(self: &Arc<Self>, session_id: &str, prompt: &str, provided_uuid: Option<&str>, content: Vec<Value>) {
         let user_msg_uuid = provided_uuid
             .filter(|s| !s.trim().is_empty())
             .map(|s| s.to_string())
@@ -3539,9 +3183,7 @@ impl QuixiEngine {
         std::thread::spawn(move || {
             let turn_start_ms = Utc::now().timestamp_millis();
             std::thread::sleep(std::time::Duration::from_millis(120));
-            if cancelled.load(Ordering::SeqCst) {
-                return;
-            }
+            if cancelled.load(Ordering::SeqCst) { return; }
 
             eng.emit_eipc(
                 "quixi.web",
@@ -3688,14 +3330,9 @@ impl QuixiEngine {
                 },
                 |msg| {
                     {
-                        let mut transcripts = eng_tools.code_transcripts.write();
-                        if cancelled.load(Ordering::SeqCst) {
-                            return;
-                        }
-                        transcripts
-                            .entry(sid_tools.clone())
-                            .or_default()
-                            .push(msg.clone());
+                        let mut transcripts=eng_tools.code_transcripts.write();
+                        if cancelled.load(Ordering::SeqCst) { return; }
+                        transcripts.entry(sid_tools.clone()).or_default().push(msg.clone());
                     }
                     if let Some(session) = eng_tools.code_sessions.read().get(&sid_tools) {
                         eng_tools.persist_code_session(session);
@@ -3713,9 +3350,7 @@ impl QuixiEngine {
                 },
             );
 
-            if cancelled.load(Ordering::SeqCst) {
-                return;
-            }
+            if cancelled.load(Ordering::SeqCst) { return; }
 
             eng.emit_eipc(
                 "quixi.web",
@@ -3770,14 +3405,8 @@ impl QuixiEngine {
             let _submission = eng.chat_submission.lock();
             let mut updated_sess = None;
             if let Some(sess) = eng.code_sessions.write().get_mut(&sid) {
-                if cancelled.load(Ordering::SeqCst) {
-                    return;
-                }
-                eng.code_transcripts
-                    .write()
-                    .entry(sid.clone())
-                    .or_default()
-                    .extend([assistant_msg.clone(), result_msg.clone()]);
+                if cancelled.load(Ordering::SeqCst) { return; }
+                eng.code_transcripts.write().entry(sid.clone()).or_default().extend([assistant_msg.clone(), result_msg.clone()]);
                 sess.turn_running = false;
                 sess.model = final_model;
                 sess.last_activity_at = Utc::now().timestamp_millis() as u64;
@@ -3785,7 +3414,7 @@ impl QuixiEngine {
                 updated_sess = Some(sess.clone());
             }
 
-            eng.clear_partial_reply(&sid, &cancelled);
+            eng.clear_partial_reply(&sid,&cancelled);
             eng.emit_eipc(
                 "quixi.web",
                 "LocalSessions",
@@ -3858,12 +3487,8 @@ mod cancellation_regression_tests {
     use super::*;
     #[test]
     fn stopping_and_replacing_turns_invalidates_old_workers() {
-        let test_data =
-            std::env::temp_dir().join(format!("quixi-isolated-test-{}", uuid::Uuid::new_v4()));
-        let engine = QuixiEngine::new_with_data_dir(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../resources"),
-            test_data,
-        );
+        let test_data = std::env::temp_dir().join(format!("quixi-isolated-test-{}", uuid::Uuid::new_v4()));
+        let engine = QuixiEngine::new_with_data_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../resources"), test_data);
         let first = engine.begin_turn("cancel-test");
         engine.cancel_turn("cancel-test");
         assert!(first.load(Ordering::SeqCst));
@@ -3877,14 +3502,10 @@ mod cancellation_regression_tests {
     }
     #[test]
     fn new_agent_session_retains_permission_mode() {
-        let test_data =
-            std::env::temp_dir().join(format!("quixi-isolated-test-{}", uuid::Uuid::new_v4()));
-        let engine = QuixiEngine::new_with_data_dir(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../resources"),
-            test_data,
-        );
+        let test_data = std::env::temp_dir().join(format!("quixi-isolated-test-{}", uuid::Uuid::new_v4()));
+        let engine = QuixiEngine::new_with_data_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../resources"), test_data);
         let sid = engine.start_agent_session(&json!({"permissionMode":"auto"}));
-        assert_eq!(engine.agent_sessions.read()[&sid].permission_mode, "auto");
+        assert_eq!(engine.agent_sessions.read()[&sid].permission_mode,"auto");
         engine.agent_sessions.write().remove(&sid);
         let _ = std::fs::remove_file(engine.data_dir.join("sessions").join(format!("{sid}.json")));
     }

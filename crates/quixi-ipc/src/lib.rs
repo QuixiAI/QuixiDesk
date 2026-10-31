@@ -54,11 +54,7 @@ impl EipcRouter {
                 .mcp_host
                 .list_server_statuses()
                 .into_iter()
-                .filter_map(|s| {
-                    s.get("name")
-                        .and_then(|n| n.as_str())
-                        .map(|s| s.to_string())
-                })
+                .filter_map(|s| s.get("name").and_then(|n| n.as_str()).map(|s| s.to_string()))
                 .collect();
             return EipcReplyPayload::ok(json!(names));
         }
@@ -66,9 +62,7 @@ impl EipcRouter {
             let result = self.mcp_control("MCP", "connect", &req.args);
             return if let Some(error) = result["error"].as_str() {
                 EipcReplyPayload::err(error.to_owned())
-            } else {
-                EipcReplyPayload::ok(result)
-            };
+            } else { EipcReplyPayload::ok(result) };
         }
         if ch == "request-open-mcp-settings" {
             self.engine.emit("quixi:open-tools", json!({}));
@@ -121,22 +115,12 @@ impl EipcRouter {
             &parsed.member,
             &req.args,
         );
-        if (parsed.service == "MCP"
-            || parsed.member.contains("Mcp")
-            || matches!(
-                parsed.member.as_str(),
-                "sendMessage" | "sendMessageV2" | "forkMessage"
-            ))
-            && raw_res["error"].is_string()
-        {
+        if (parsed.service == "MCP" || parsed.member.contains("Mcp") || matches!(parsed.member.as_str(),"sendMessage"|"sendMessageV2"|"forkMessage")) && raw_res["error"].is_string() {
             return EipcReplyPayload::err(raw_res["error"].as_str().unwrap().to_owned());
         }
         // Chrome extension failures must reject invoke(), not resolve with a
         // truthy error object (or be filled in by an exact success schema).
-        if matches!(
-            parsed.service.as_str(),
-            "ChromeExtension" | "ComputerUseTcc"
-        ) {
+        if matches!(parsed.service.as_str(), "ChromeExtension" | "ComputerUseTcc") {
             if let Some(error) = raw_res["error"].as_str() {
                 return EipcReplyPayload::err(error.to_owned());
             }
@@ -166,48 +150,16 @@ impl EipcRouter {
     fn mcp_control(&self, service: &str, action: &str, args: &[Value]) -> Value {
         let first = args.first().and_then(Value::as_str).unwrap_or_default();
         let session_cwd = if service != "MCP" {
-            self.engine
-                .agent_sessions
-                .read()
-                .get(first)
-                .map(|session| session.cwd.clone())
-                .or_else(|| {
-                    self.engine
-                        .code_sessions
-                        .read()
-                        .get(first)
-                        .map(|session| session.cwd.clone())
-                })
-        } else {
-            None
-        };
-        let name = if session_cwd.is_some() {
-            args.get(1).and_then(Value::as_str)
-        } else {
-            args.first().and_then(Value::as_str)
-        }
-        .or_else(|| {
-            args.first()
-                .and_then(|value| value.get("serverName").or_else(|| value.get("name")))
-                .and_then(Value::as_str)
-        })
-        .unwrap_or_default();
-        if name.trim().is_empty() {
-            return json!({"error":"An MCP server name is required."});
-        }
-        let cwd = session_cwd
-            .as_deref()
-            .or_else(|| {
-                if service == "MCP" {
-                    args.get(1)
-                        .and_then(Value::as_str)
-                        .filter(|s| !s.is_empty())
-                } else {
-                    None
-                }
-            })
+            self.engine.agent_sessions.read().get(first).map(|session| session.cwd.clone())
+                .or_else(|| self.engine.code_sessions.read().get(first).map(|session| session.cwd.clone()))
+        } else { None };
+        let name = if session_cwd.is_some() { args.get(1).and_then(Value::as_str) } else { args.first().and_then(Value::as_str) }
+            .or_else(|| args.first().and_then(|value| value.get("serverName").or_else(|| value.get("name"))).and_then(Value::as_str))
+            .unwrap_or_default();
+        if name.trim().is_empty() { return json!({"error":"An MCP server name is required."}); }
+        let cwd = session_cwd.as_deref().or_else(|| if service == "MCP" { args.get(1).and_then(Value::as_str).filter(|s| !s.is_empty()) } else { None })
             .unwrap_or("");
-        let cwd = self.engine.mcp_workspace(cwd);
+        let cwd=self.engine.mcp_workspace(cwd);
         if action == "authenticate" {
             return match self.engine.mcp_host.authenticate_server(name, &cwd) {
                 Ok(result) => result,
@@ -276,7 +228,13 @@ impl EipcRouter {
         }
     }
 
-    fn dispatch_service(&self, _ns: &str, service: &str, member: &str, args: &[Value]) -> Value {
+    fn dispatch_service(
+        &self,
+        _ns: &str,
+        service: &str,
+        member: &str,
+        args: &[Value],
+    ) -> Value {
         let now_ms = Utc::now().timestamp_millis() as u64;
 
         match (service, member) {
@@ -332,19 +290,19 @@ impl EipcRouter {
             ("Startup", "isMenuBarEnabled") | ("Startup", "isStartupOnLoginEnabled") => json!(true),
             ("GlobalShortcut", "getGlobalShortcut") => json!("Alt+Space"),
             ("WakeScheduler", "getStatus") => json!({ "enabled": false, "nextWakeAt": null }),
-            ("MCP", "getMcpServersConfig") => {
-                match self.engine.mcp_host.read_config_value_checked() {
-                    Ok(cfg) => cfg.get("mcpServers").cloned().unwrap_or_else(|| json!({})),
-                    Err(error) => json!({"error":format!("{error:#}")}),
+            ("MCP", "getMcpServersConfig") => match self.engine.mcp_host.read_config_value_checked() {
+                Ok(cfg) => cfg.get("mcpServers").cloned().unwrap_or_else(|| json!({})),
+                Err(error) => json!({"error":format!("{error:#}")}),
+            },
+            ("MCP", "setMcpServerConfigs") => {
+                match args.first() {
+                    Some(value) => match self.engine.mcp_host.write_config(value) {
+                        Ok(()) => json!({"ok":true}),
+                        Err(error) => json!({"error":format!("{error:#}")}),
+                    },
+                    None => json!({"error":"Server configuration is required."}),
                 }
             }
-            ("MCP", "setMcpServerConfigs") => match args.first() {
-                Some(value) => match self.engine.mcp_host.write_config(value) {
-                    Ok(()) => json!({"ok":true}),
-                    Err(error) => json!({"error":format!("{error:#}")}),
-                },
-                None => json!({"error":"Server configuration is required."}),
-            },
             ("MCP", "getMcpServersConfigWithStatus") => {
                 let cfg = match self.engine.mcp_host.read_config_value_checked() {
                     Ok(cfg) => cfg,
@@ -352,26 +310,10 @@ impl EipcRouter {
                 };
                 let statuses = self.engine.mcp_host.list_local_mcp_servers();
                 let mut map = serde_json::Map::new();
-                for (name, entry) in cfg
-                    .get("mcpServers")
-                    .and_then(Value::as_object)
-                    .cloned()
-                    .unwrap_or_default()
-                {
-                    let mut value = if entry.is_object() {
-                        entry
-                    } else {
-                        json!({"invalidConfig":entry})
-                    };
+                for (name, entry) in cfg.get("mcpServers").and_then(Value::as_object).cloned().unwrap_or_default() {
+                    let mut value = if entry.is_object() { entry } else { json!({"invalidConfig":entry}) };
                     if let Some(status) = statuses.iter().find(|status| status["name"] == name) {
-                        for key in [
-                            "status",
-                            "isConnected",
-                            "toolsEnumerated",
-                            "catalogStale",
-                            "error",
-                            "generation",
-                        ] {
+                        for key in ["status", "isConnected", "toolsEnumerated", "catalogStale", "error", "generation"] {
                             value[key] = status[key].clone();
                         }
                     } else {
@@ -383,125 +325,43 @@ impl EipcRouter {
                 }
                 Value::Object(map)
             }
-            (
-                "MCP",
-                "connect"
-                | "reconnect"
-                | "refresh"
-                | "disconnect"
-                | "authenticate"
-                | "cancelAuthentication"
-                | "forgetAuthentication",
-            ) => self.mcp_control(service, member, args),
+            ("MCP", "connect" | "reconnect" | "refresh" | "disconnect" | "authenticate" | "cancelAuthentication" | "forgetAuthentication") => self.mcp_control(service, member, args),
             ("MCP", "pendingInteractions") => json!(self.engine.mcp_host.pending_interactions()),
             ("MCP", "resourceUpdates") => json!(self.engine.mcp_host.resource_updates()),
-            (
-                "MCP",
-                "respondInteraction"
-                | "setToolEnabled"
-                | "browseResources"
-                | "readResource"
-                | "getPrompt"
-                | "expandResourceTemplate"
-                | "subscribeResource"
-                | "setRoots",
-            ) => {
+            ("MCP", "respondInteraction" | "setToolEnabled" | "browseResources" | "readResource" | "getPrompt" | "expandResourceTemplate" | "subscribeResource" | "setRoots") => {
                 let result = (|| -> anyhow::Result<Value> {
                     let string = |index: usize| -> anyhow::Result<&str> {
-                        args.get(index)
-                            .and_then(Value::as_str)
-                            .filter(|s| !s.trim().is_empty())
-                            .ok_or_else(|| {
-                                anyhow::anyhow!("Missing or invalid MCP argument {}", index + 1)
-                            })
+                        args.get(index).and_then(Value::as_str).filter(|s| !s.trim().is_empty())
+                            .ok_or_else(|| anyhow::anyhow!("Missing or invalid MCP argument {}", index + 1))
                     };
-                    let cwd = |index: usize| -> &Path {
-                        Path::new(
-                            args.get(index)
-                                .and_then(Value::as_str)
-                                .filter(|s| !s.is_empty())
-                                .unwrap_or(quixi_proto::paths::default_workspace_str()),
-                        )
-                    };
+                    let cwd = |index: usize| -> &Path { Path::new(args.get(index).and_then(Value::as_str).filter(|s| !s.is_empty()).unwrap_or(quixi_proto::paths::default_workspace_str())) };
                     let host = &self.engine.mcp_host;
                     match member {
-                        "respondInteraction" => host.respond_interaction(
-                            string(0)?,
-                            string(1)?,
-                            args.get(2).filter(|v| !v.is_null()).cloned(),
-                        ),
+                        "respondInteraction" => host.respond_interaction(string(0)?, string(1)?, args.get(2).filter(|v| !v.is_null()).cloned()),
                         "setToolEnabled" => {
-                            let enabled = args
-                                .get(2)
-                                .and_then(Value::as_bool)
-                                .ok_or_else(|| anyhow::anyhow!("Tool enabled must be a boolean"))?;
-                            host.set_tool_enabled(string(0)?, string(1)?, enabled)?;
-                            Ok(json!({"ok":true}))
+                            let enabled = args.get(2).and_then(Value::as_bool).ok_or_else(|| anyhow::anyhow!("Tool enabled must be a boolean"))?;
+                            host.set_tool_enabled(string(0)?, string(1)?, enabled)?; Ok(json!({"ok":true}))
                         }
                         "browseResources" => host.browse_resources(string(0)?, cwd(1)),
-                        "readResource" => host.read_resource_checked(
-                            string(0)?,
-                            string(1)?,
-                            cwd(2),
-                            &std::sync::atomic::AtomicBool::new(false),
-                        ),
+                        "readResource" => host.read_resource_checked(string(0)?, string(1)?, cwd(2), &std::sync::atomic::AtomicBool::new(false)),
                         "getPrompt" | "expandResourceTemplate" => {
-                            let parameters =
-                                args.get(2).filter(|v| v.is_object()).ok_or_else(|| {
-                                    anyhow::anyhow!("Context arguments must be an object")
-                                })?;
-                            if member == "getPrompt" {
-                                host.get_prompt(
-                                    string(0)?,
-                                    string(1)?,
-                                    parameters,
-                                    cwd(3),
-                                    &std::sync::atomic::AtomicBool::new(false),
-                                )
-                            } else {
-                                host.expand_resource_template(
-                                    string(0)?,
-                                    string(1)?,
-                                    parameters,
-                                    cwd(3),
-                                )
-                            }
+                            let parameters = args.get(2).filter(|v| v.is_object()).ok_or_else(|| anyhow::anyhow!("Context arguments must be an object"))?;
+                            if member == "getPrompt" { host.get_prompt(string(0)?, string(1)?, parameters, cwd(3), &std::sync::atomic::AtomicBool::new(false)) }
+                            else { host.expand_resource_template(string(0)?, string(1)?, parameters, cwd(3)) }
                         }
                         "subscribeResource" => {
-                            let enabled =
-                                args.get(3).and_then(Value::as_bool).ok_or_else(|| {
-                                    anyhow::anyhow!("Subscription enabled must be a boolean")
-                                })?;
-                            host.subscribe_resource(string(0)?, string(1)?, cwd(2), enabled)?;
-                            Ok(json!({"ok":true}))
+                            let enabled = args.get(3).and_then(Value::as_bool).ok_or_else(|| anyhow::anyhow!("Subscription enabled must be a boolean"))?;
+                            host.subscribe_resource(string(0)?, string(1)?, cwd(2), enabled)?; Ok(json!({"ok":true}))
                         }
                         "setRoots" => {
-                            let values =
-                                args.get(2).and_then(Value::as_array).ok_or_else(|| {
-                                    anyhow::anyhow!("Workspace roots must be an array")
-                                })?;
-                            let roots = values
-                                .iter()
-                                .map(|value| {
-                                    value
-                                        .as_str()
-                                        .filter(|path| !path.is_empty())
-                                        .map(std::path::PathBuf::from)
-                                        .ok_or_else(|| {
-                                            anyhow::anyhow!("Each root must be a folder path")
-                                        })
-                                })
-                                .collect::<anyhow::Result<Vec<_>>>()?;
-                            host.set_roots(string(0)?, cwd(1), &roots)?;
-                            Ok(json!({"ok":true}))
+                            let values = args.get(2).and_then(Value::as_array).ok_or_else(|| anyhow::anyhow!("Workspace roots must be an array"))?;
+                            let roots = values.iter().map(|value| value.as_str().filter(|path| !path.is_empty()).map(std::path::PathBuf::from).ok_or_else(|| anyhow::anyhow!("Each root must be a folder path"))).collect::<anyhow::Result<Vec<_>>>()?;
+                            host.set_roots(string(0)?, cwd(1), &roots)?; Ok(json!({"ok":true}))
                         }
                         _ => unreachable!(),
                     }
                 })();
-                match result {
-                    Ok(value) => value,
-                    Err(error) => json!({"error":format!("{error:#}")}),
-                }
+                match result { Ok(value) => value, Err(error) => json!({"error":format!("{error:#}")}) }
             }
             ("MCP", "isLocalDevMcpEnabled") => json!(true),
             ("Extensions", "getInstalledExtensionsWithState") => {
@@ -681,8 +541,8 @@ impl EipcRouter {
 
             // --- WindowControl & WindowManager & WindowLayout ---
             ("WindowControl", "captureScreenshot") => {
-                let b64 =
-                    quixi_platform::ComputerUse::capture_screenshot_base64().unwrap_or_default();
+                let b64 = quixi_platform::ComputerUse::capture_screenshot_base64()
+                    .unwrap_or_default();
                 json!(b64)
             }
             ("WindowManager", "GetWindowState") => json!({
@@ -696,15 +556,8 @@ impl EipcRouter {
             }
             ("SessionPopouts", "takeRestorablePopouts") => json!([]),
 
-            ("LocalAgentModeSessions" | "LocalSessions", "listSubagents") => self
-                .engine
-                .list_subagents(args.first().and_then(Value::as_str).unwrap_or("")),
-            ("LocalAgentModeSessions" | "LocalSessions", "getSubagent") => {
-                self.engine.get_subagent(
-                    args.first().and_then(Value::as_str).unwrap_or(""),
-                    args.get(1).and_then(Value::as_str).unwrap_or(""),
-                )
-            }
+            ("LocalAgentModeSessions" | "LocalSessions", "listSubagents") => self.engine.list_subagents(args.first().and_then(Value::as_str).unwrap_or("")),
+            ("LocalAgentModeSessions" | "LocalSessions", "getSubagent") => self.engine.get_subagent(args.first().and_then(Value::as_str).unwrap_or(""),args.get(1).and_then(Value::as_str).unwrap_or("")),
             // --- LocalAgentModeSessions (Cowork, Skills & 3P Chat) ---
             ("LocalAgentModeSessions", "getAll") => {
                 let mut list: Vec<_> = self
@@ -791,13 +644,10 @@ impl EipcRouter {
                     .map(|s| json!(s))
                     .unwrap_or_else(|| json!({ "sessionId": session_id }))
             }
-            ("LocalAgentModeSessions" | "LocalSessions", "getPendingMessages") => self
-                .engine
-                .get_pending_messages(args.first().and_then(Value::as_str).unwrap_or_default()),
-            (
-                "LocalAgentModeSessions" | "LocalSessions",
-                "cancelPendingMessage" | "guidePendingMessage",
-            ) => {
+            ("LocalAgentModeSessions" | "LocalSessions", "getPendingMessages") => {
+                self.engine.get_pending_messages(args.first().and_then(Value::as_str).unwrap_or_default())
+            }
+            ("LocalAgentModeSessions" | "LocalSessions", "cancelPendingMessage" | "guidePendingMessage") => {
                 let sid = args.first().and_then(Value::as_str).unwrap_or_default();
                 let uuid = args.get(1).and_then(Value::as_str).unwrap_or_default();
                 let result = if member == "cancelPendingMessage" {
@@ -808,16 +658,12 @@ impl EipcRouter {
                 result.unwrap_or_else(|error| json!({"error":error}))
             }
             ("LocalAgentModeSessions" | "LocalSessions", "sendMessageV2") => {
-                let sid = args.first().and_then(Value::as_str).unwrap_or_default();
-                self.engine
-                    .send_chat_message(sid, args.get(1).unwrap_or(&Value::Null))
-                    .unwrap_or_else(|error| json!({"error":error}))
+                let sid=args.first().and_then(Value::as_str).unwrap_or_default();
+                self.engine.send_chat_message(sid,args.get(1).unwrap_or(&Value::Null)).unwrap_or_else(|error|json!({"error":error}))
             }
             ("LocalAgentModeSessions" | "LocalSessions", "forkMessage") => {
-                let sid = args.first().and_then(Value::as_str).unwrap_or_default();
-                self.engine
-                    .fork_chat_message(sid, args.get(1).unwrap_or(&Value::Null))
-                    .unwrap_or_else(|error| json!({"error":error}))
+                let sid=args.first().and_then(Value::as_str).unwrap_or_default();
+                self.engine.fork_chat_message(sid,args.get(1).unwrap_or(&Value::Null)).unwrap_or_else(|error|json!({"error":error}))
             }
             ("LocalAgentModeSessions", "sendMessage") => {
                 if args.is_empty() {
@@ -826,9 +672,7 @@ impl EipcRouter {
                 let sid = args.first().and_then(|v| v.as_str()).unwrap_or("");
                 let msg = args.get(1).and_then(|v| v.as_str()).unwrap_or("");
                 let msg_uuid = args.get(4).and_then(|v| v.as_str());
-                self.engine
-                    .send_chat_message(sid, &json!({"text":msg,"messageUuid":msg_uuid}))
-                    .unwrap_or_else(|error| json!({"error":error}))
+                self.engine.send_chat_message(sid,&json!({"text":msg,"messageUuid":msg_uuid})).unwrap_or_else(|error|json!({"error":error}))
             }
             ("LocalAgentModeSessions", "updateSession") => {
                 let sid = args.first().and_then(|v| v.as_str()).unwrap_or("");
@@ -871,13 +715,8 @@ impl EipcRouter {
                                         .iter()
                                         .filter_map(|x| x.as_str().map(|s| s.to_string()))
                                         .collect();
-                                    sess.cwd = sess
-                                        .user_selected_folders
-                                        .first()
-                                        .cloned()
-                                        .unwrap_or_default();
-                                    sess.folder_exists =
-                                        !sess.cwd.is_empty() && Path::new(&sess.cwd).is_dir();
+                                    sess.cwd=sess.user_selected_folders.first().cloned().unwrap_or_default();
+                                    sess.folder_exists=!sess.cwd.is_empty() && Path::new(&sess.cwd).is_dir();
                                 }
                                 if let Some(projs) = opts
                                     .get("userSelectedProjectUuids")
@@ -952,16 +791,13 @@ impl EipcRouter {
                 }
                 Value::Null
             }
-            ("LocalAgentModeSessions", "getToolPermissions")
-            | ("LocalSessions", "getToolPermissions") => self
-                .engine
-                .pending_tool_approvals(args.first().and_then(Value::as_str).unwrap_or("")),
-            ("LocalAgentModeSessions", "resolveToolPermission")
-            | ("LocalSessions", "resolveToolPermission") => self.engine.resolve_tool_approval(
-                args.first().and_then(Value::as_str).unwrap_or(""),
-                args.get(1).and_then(Value::as_str).unwrap_or(""),
-                args.get(2).and_then(Value::as_str).unwrap_or(""),
-            ),
+            ("LocalAgentModeSessions", "getToolPermissions") | ("LocalSessions", "getToolPermissions") => {
+                self.engine.pending_tool_approvals(args.first().and_then(Value::as_str).unwrap_or(""))
+            }
+            ("LocalAgentModeSessions", "resolveToolPermission") | ("LocalSessions", "resolveToolPermission") => {
+                self.engine.resolve_tool_approval(args.first().and_then(Value::as_str).unwrap_or(""),
+                    args.get(1).and_then(Value::as_str).unwrap_or(""),args.get(2).and_then(Value::as_str).unwrap_or(""))
+            }
             ("LocalAgentModeSessions", "setPermissionMode") => {
                 let sid = args.first().and_then(|v| v.as_str()).unwrap_or("");
                 let mode = args.get(1).and_then(|v| v.as_str()).unwrap_or("default");
@@ -1007,12 +843,8 @@ impl EipcRouter {
                     );
                 }
                 if found {
-                    self.engine.emit_eipc(
-                        "quixi.web",
-                        "LocalAgentModeSessions",
-                        "onEvent",
-                        json!({"type":"close","sessionId":sid,"code":0}),
-                    );
+                    self.engine.emit_eipc("quixi.web", "LocalAgentModeSessions", "onEvent",
+                        json!({"type":"close","sessionId":sid,"code":0}));
                 }
                 Value::Null
             }
@@ -1092,11 +924,10 @@ impl EipcRouter {
             | ("LocalSessions", "getLocalMcpServers") => {
                 json!(self.engine.mcp_host.list_local_mcp_servers())
             }
-            ("LocalAgentModeSessions", "getDirectMcpServerStatuses") => {
-                json!(self.engine.mcp_host.list_server_statuses())
-            }
+            ("LocalAgentModeSessions", "getDirectMcpServerStatuses") => json!(self.engine.mcp_host.list_server_statuses()),
             ("LocalSessions", "getSessionCliMcpServers") => json!([]),
-            ("LocalAgentModeSessions", "mcpCallTool") | ("LocalSessions", "mcpCallTool") => {
+            ("LocalAgentModeSessions", "mcpCallTool")
+            | ("LocalSessions", "mcpCallTool") => {
                 if args.is_empty() {
                     json!({ "content": [{"type":"text","text":"An MCP server and tool name are required."}], "isError": true })
                 } else {
@@ -1140,40 +971,29 @@ impl EipcRouter {
                     if tool.is_empty() {
                         json!({ "content": [{"type":"text","text":"An MCP server and tool name are required."}], "isError": true })
                     } else {
-                        let session_cwd = if args.len() >= 4 {
-                            let sid = args[0].as_str().unwrap_or_default();
-                            self.engine
-                                .agent_sessions
-                                .read()
-                                .get(sid)
-                                .map(|session| session.cwd.clone())
-                                .or_else(|| {
-                                    self.engine
-                                        .code_sessions
-                                        .read()
-                                        .get(sid)
-                                        .map(|session| session.cwd.clone())
-                                })
-                        } else {
-                            None
-                        };
-                        let cwd = self
-                            .engine
-                            .mcp_workspace(session_cwd.as_deref().unwrap_or_default());
+                        let session_cwd=if args.len()>=4 {
+                            let sid=args[0].as_str().unwrap_or_default();
+                            self.engine.agent_sessions.read().get(sid).map(|session|session.cwd.clone())
+                                .or_else(||self.engine.code_sessions.read().get(sid).map(|session|session.cwd.clone()))
+                        } else {None};
+                        let cwd=self.engine.mcp_workspace(session_cwd.as_deref().unwrap_or_default());
                         let out = self
                             .engine
                             .mcp_host
-                            .call_tool(server, tool, &tool_args, &cwd)
+                            .call_tool(
+                                server,
+                                tool,
+                                &tool_args,
+                                &cwd,
+                            )
                             .unwrap_or_else(|e| {
                                 json!({
                                     "content": [{ "type": "text", "text": e.to_string() }],
                                     "isError": true
                                 })
                             });
-                        self.engine.emit(
-                            "quixi:browser-updated",
-                            quixi_platform::BrowserUse::get_full_state(),
-                        );
+                        self.engine
+                            .emit("quixi:browser-updated", quixi_platform::BrowserUse::get_full_state());
                         out
                     }
                 }
@@ -1227,10 +1047,8 @@ impl EipcRouter {
                                     "isError": true
                                 })
                             });
-                        self.engine.emit(
-                            "quixi:browser-updated",
-                            quixi_platform::BrowserUse::get_full_state(),
-                        );
+                        self.engine
+                            .emit("quixi:browser-updated", quixi_platform::BrowserUse::get_full_state());
                         out
                     }
                 }
@@ -1307,47 +1125,24 @@ impl EipcRouter {
                     .unwrap_or("quixi://workspace/readme");
                 self.engine.mcp_host.read_resource(server, uri)
             }
-            ("LocalAgentModeSessions" | "LocalSessions", "reconnectMcpServer") => {
-                self.mcp_control(service, "reconnect", args)
-            }
-            ("LocalAgentModeSessions" | "LocalSessions", "refreshMcpServer") => {
-                self.mcp_control(service, "refresh", args)
-            }
-            ("LocalAgentModeSessions" | "LocalSessions", "connectMcpServer") => {
-                self.mcp_control(service, "connect", args)
-            }
-            (
-                "LocalAgentModeSessions",
-                "disconnectDirectMcpServer" | "disconnectDirectMcpServerV2",
-            )
-            | ("LocalSessions", "disconnectMcpServer") => {
-                self.mcp_control(service, "disconnect", args)
-            }
+            ("LocalAgentModeSessions" | "LocalSessions", "reconnectMcpServer") => self.mcp_control(service, "reconnect", args),
+            ("LocalAgentModeSessions" | "LocalSessions", "refreshMcpServer") => self.mcp_control(service, "refresh", args),
+            ("LocalAgentModeSessions" | "LocalSessions", "connectMcpServer") => self.mcp_control(service, "connect", args),
+            ("LocalAgentModeSessions", "disconnectDirectMcpServer" | "disconnectDirectMcpServerV2")
+            | ("LocalSessions", "disconnectMcpServer") => self.mcp_control(service, "disconnect", args),
             ("LocalAgentModeSessions" | "LocalSessions", "toggleMcpServer") => {
                 let enabled = args.last().and_then(Value::as_bool);
                 match enabled {
                     Some(true) => self.mcp_control(service, "connect", args),
                     Some(false) => self.mcp_control(service, "disconnect", args),
-                    None => {
-                        json!({"error":"Specify whether to connect or disconnect this server."})
-                    }
+                    None => json!({"error":"Specify whether to connect or disconnect this server."}),
                 }
             }
             ("LocalAgentModeSessions" | "LocalSessions", "authenticateMcpServer")
-            | (
-                "LocalAgentModeSessions",
-                "authorizeDirectMcpServer" | "authorizeDirectMcpServerWithAccountPicker",
-            ) => self.mcp_control(service, "authenticate", args),
-            ("LocalAgentModeSessions" | "LocalSessions", "cancelMcpServerAuthentication") => {
-                self.mcp_control(service, "cancelAuthentication", args)
-            }
-            ("LocalAgentModeSessions" | "LocalSessions", "clearMcpServerAuth") => {
-                self.mcp_control(service, "forgetAuthentication", args)
-            }
-            (
-                "LocalAgentModeSessions" | "LocalSessions",
-                "setMcpServers" | "replaceEnabledMcpTools" | "replaceRemoteMcpServers",
-            ) => {
+            | ("LocalAgentModeSessions", "authorizeDirectMcpServer" | "authorizeDirectMcpServerWithAccountPicker") => self.mcp_control(service, "authenticate", args),
+            ("LocalAgentModeSessions" | "LocalSessions", "cancelMcpServerAuthentication") => self.mcp_control(service, "cancelAuthentication", args),
+            ("LocalAgentModeSessions" | "LocalSessions", "clearMcpServerAuth") => self.mcp_control(service, "forgetAuthentication", args),
+            ("LocalAgentModeSessions" | "LocalSessions", "setMcpServers" | "replaceEnabledMcpTools" | "replaceRemoteMcpServers") => {
                 json!({"error":"Use MCP connection configuration to change servers. Session-specific server overrides are unavailable."})
             }
             ("LocalAgentModeSessions", "listLocalSkills") => {
@@ -1399,11 +1194,7 @@ impl EipcRouter {
                 }
             }
             ("LocalAgentModeSessions", "addTrustedFolder") => {
-                if let Some(folder) = args
-                    .first()
-                    .and_then(|v| v.as_str())
-                    .filter(|s| !s.is_empty())
-                {
+                if let Some(folder) = args.first().and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
                     let mut trusted = self.engine.trusted_folders.write();
                     if !trusted.contains(&folder.to_string()) {
                         trusted.push(folder.to_string());
@@ -1436,9 +1227,7 @@ impl EipcRouter {
                     .get(1)
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string())
-                    .or_else(|| {
-                        quixi_platform::ComputerUse::pick_folder(Some("Add folder to session"))
-                    });
+                    .or_else(|| quixi_platform::ComputerUse::pick_folder(Some("Add folder to session")));
                 if let Some(folder_path) = folder {
                     {
                         let mut trusted = self.engine.trusted_folders.write();
@@ -1551,9 +1340,7 @@ impl EipcRouter {
                 let sid = args.first().and_then(|v| v.as_str()).unwrap_or("");
                 let msg = args.get(1).and_then(|v| v.as_str()).unwrap_or("");
                 let msg_uuid = args.get(7).and_then(|v| v.as_str());
-                self.engine
-                    .send_chat_message(sid, &json!({"text":msg,"messageUuid":msg_uuid}))
-                    .unwrap_or_else(|error| json!({"error":error}))
+                self.engine.send_chat_message(sid,&json!({"text":msg,"messageUuid":msg_uuid})).unwrap_or_else(|error|json!({"error":error}))
             }
             ("LocalSessions", "updateSession") => {
                 let sid = args.first().and_then(|v| v.as_str()).unwrap_or("");
@@ -1912,7 +1699,8 @@ impl EipcRouter {
                 }
                 json!(projects)
             }
-            ("LocalSessions", "listDirectoryAtCwd") | ("LocalSessions", "listSessionDirectory") => {
+            ("LocalSessions", "listDirectoryAtCwd")
+            | ("LocalSessions", "listSessionDirectory") => {
                 let dir_str = args
                     .first()
                     .and_then(|v| v.as_str())
@@ -2023,7 +1811,13 @@ impl EipcRouter {
 
             // --- CoworkSpaces ---
             ("CoworkSpaces", "getAllSpaces") => {
-                let mut list: Vec<_> = self.engine.cowork_spaces.read().values().cloned().collect();
+                let mut list: Vec<_> = self
+                    .engine
+                    .cowork_spaces
+                    .read()
+                    .values()
+                    .cloned()
+                    .collect();
                 list.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
                 json!(list)
             }
@@ -2053,13 +1847,7 @@ impl EipcRouter {
                     .unwrap_or("New Project");
                 let safe_name: String = raw_name
                     .chars()
-                    .map(|c| {
-                        if c == '/' || c == '\\' || c == ':' {
-                            '-'
-                        } else {
-                            c
-                        }
-                    })
+                    .map(|c| if c == '/' || c == '\\' || c == ':' { '-' } else { c })
                     .collect();
                 let full_path = Path::new(location).join(safe_name.trim());
                 let _ = fs::create_dir_all(&full_path);
@@ -2116,10 +1904,11 @@ impl EipcRouter {
                     links: vec![],
                     projects: vec![],
                 };
-                if let Err(error) = self.engine.save_space_checked(&sp) {
-                    return json!({"error":error});
-                }
-                self.engine.cowork_spaces.write().insert(id, sp.clone());
+                if let Err(error)=self.engine.save_space_checked(&sp) { return json!({"error":error}); }
+                self.engine
+                    .cowork_spaces
+                    .write()
+                    .insert(id, sp.clone());
                 self.engine.emit_eipc(
                     "quixi.web",
                     "CoworkSpaces",
@@ -2152,10 +1941,8 @@ impl EipcRouter {
                             sp.color = col.to_string();
                         }
                         sp.updated_at = now_ms;
-                        if let Err(error) = self.engine.save_space_checked(&sp) {
-                            return json!({"error":error});
-                        }
-                        spaces.insert(id.to_owned(), sp.clone());
+                        if let Err(error)=self.engine.save_space_checked(&sp) { return json!({"error":error}); }
+                        spaces.insert(id.to_owned(),sp.clone());
                         updated_sp = Some(sp);
                     }
                 }
@@ -2173,21 +1960,11 @@ impl EipcRouter {
             }
             ("CoworkSpaces", "deleteSpace") => {
                 let id = args.first().and_then(|v| v.as_str()).unwrap_or("");
-                if !id.starts_with("space_") || id.contains(['/', '\\']) {
-                    return json!({"error":"Invalid project identifier."});
-                }
-                if !self.engine.cowork_spaces.read().contains_key(id) {
-                    return json!(false);
-                }
-                let path = self
-                    .engine
-                    .data_dir
-                    .join("spaces")
-                    .join(format!("{id}.json"));
-                if let Err(error) = fs::remove_file(&path) {
-                    if error.kind() != std::io::ErrorKind::NotFound {
-                        return json!({"error":format!("Project was not removed: {error}")});
-                    }
+                if !id.starts_with("space_") || id.contains(['/', '\\']) { return json!({"error":"Invalid project identifier."}); }
+                if !self.engine.cowork_spaces.read().contains_key(id) { return json!(false); }
+                let path=self.engine.data_dir.join("spaces").join(format!("{id}.json"));
+                if let Err(error)=fs::remove_file(&path) {
+                    if error.kind()!=std::io::ErrorKind::NotFound {return json!({"error":format!("Project was not removed: {error}")});}
                 }
                 let removed = self.engine.cowork_spaces.write().remove(id);
                 if removed.is_some() {
@@ -2207,11 +1984,8 @@ impl EipcRouter {
                 let folder_path = args
                     .get(1)
                     .and_then(|v| v.as_str())
-                    .filter(|s| !s.trim().is_empty())
-                    .unwrap_or("");
-                if !Path::new(folder_path).is_absolute() || !Path::new(folder_path).is_dir() {
-                    return json!({"error":"Choose an existing folder."});
-                }
+                    .filter(|s| !s.trim().is_empty()).unwrap_or("");
+                if !Path::new(folder_path).is_absolute() || !Path::new(folder_path).is_dir() { return json!({"error":"Choose an existing folder."}); }
                 {
                     let mut trusted = self.engine.trusted_folders.write();
                     if !trusted.contains(&folder_path.to_string()) {
@@ -2235,10 +2009,8 @@ impl EipcRouter {
                             });
                         }
                         sp.updated_at = now_ms;
-                        if let Err(error) = self.engine.save_space_checked(&sp) {
-                            return json!({"error":error});
-                        }
-                        spaces.insert(id.to_owned(), sp.clone());
+                        if let Err(error)=self.engine.save_space_checked(&sp) { return json!({"error":error}); }
+                        spaces.insert(id.to_owned(),sp.clone());
                         updated_sp = Some(sp);
                     }
                 }
@@ -2263,10 +2035,8 @@ impl EipcRouter {
                         let mut sp = current.clone();
                         sp.folders.retain(|f| f.path != folder_path);
                         sp.updated_at = now_ms;
-                        if let Err(error) = self.engine.save_space_checked(&sp) {
-                            return json!({"error":error});
-                        }
-                        spaces.insert(id.to_owned(), sp.clone());
+                        if let Err(error)=self.engine.save_space_checked(&sp) { return json!({"error":error}); }
+                        spaces.insert(id.to_owned(),sp.clone());
                         updated_sp = Some(sp);
                     }
                 }
@@ -2487,32 +2257,18 @@ impl EipcRouter {
                 json!(self.engine.write_global_memory(content))
             }
             ("CoworkMemory", "listAccountMemories") => json!(self.engine.list_account_memories()),
-            ("CoworkArtifacts", "isSharingEnabled")
-            | ("CoworkArtifacts", "isAutoPublishEnabled") => json!(false),
+            ("CoworkArtifacts", "isSharingEnabled") | ("CoworkArtifacts", "isAutoPublishEnabled") => json!(false),
             ("CoworkArtifacts", "getArtifactHtml") => {
                 let id = args.first().and_then(Value::as_str).unwrap_or("");
-                self.engine
-                    .artifacts
-                    .read()
-                    .get(id)
-                    .map(|a| a["html"].clone())
-                    .unwrap_or(Value::Null)
+                self.engine.artifacts.read().get(id).map(|a| a["html"].clone()).unwrap_or(Value::Null)
             }
             ("CoworkArtifacts", "getAllArtifacts") => {
                 let list: Vec<Value> = self.engine.artifacts.read().values().cloned().collect();
                 json!(list)
             }
-            ("CoworkArtifacts", "duplicateArtifact") => self
-                .engine
-                .duplicate_local_artifact(args.first().and_then(Value::as_str).unwrap_or_default()),
-            ("CoworkArtifacts", "restoreArtifactVersion") => self.engine.restore_local_artifact(
-                args.first().and_then(Value::as_str).unwrap_or_default(),
-                args.get(1).and_then(Value::as_u64).unwrap_or_default(),
-            ),
-            ("CoworkArtifacts", "exportArtifactHtml") => self.engine.export_local_artifact(
-                args.first().and_then(Value::as_str).unwrap_or_default(),
-                args.get(1).and_then(Value::as_str).unwrap_or_default(),
-            ),
+            ("CoworkArtifacts", "duplicateArtifact") => self.engine.duplicate_local_artifact(args.first().and_then(Value::as_str).unwrap_or_default()),
+            ("CoworkArtifacts", "restoreArtifactVersion") => self.engine.restore_local_artifact(args.first().and_then(Value::as_str).unwrap_or_default(),args.get(1).and_then(Value::as_u64).unwrap_or_default()),
+            ("CoworkArtifacts", "exportArtifactHtml") => self.engine.export_local_artifact(args.first().and_then(Value::as_str).unwrap_or_default(),args.get(1).and_then(Value::as_str).unwrap_or_default()),
             ("CoworkArtifacts", "deleteArtifact") => {
                 let id = args.first().and_then(|v| v.as_str()).unwrap_or("");
                 json!(self.engine.delete_local_artifact(id))
@@ -2525,16 +2281,14 @@ impl EipcRouter {
             ("CoworkArtifacts", "setArtifactStarred") => {
                 let id = args.first().and_then(Value::as_str).unwrap_or("");
                 let starred = args.get(1).and_then(Value::as_bool).unwrap_or(false);
-                json!(self
-                    .engine
-                    .update_local_artifact(id, "isStarred", json!(starred)))
+                json!(self.engine.update_local_artifact(id, "isStarred", json!(starred)))
             }
-            ("CoworkScheduledTasks", "runScheduledTask") => self
-                .engine
-                .run_scheduled_task(args.first().and_then(Value::as_str).unwrap_or_default()),
-            ("CoworkScheduledTasks", "previewSchedule") => self
-                .engine
-                .preview_schedule(args.first().and_then(Value::as_str).unwrap_or_default()),
+            ("CoworkScheduledTasks", "runScheduledTask") => {
+                self.engine.run_scheduled_task(args.first().and_then(Value::as_str).unwrap_or_default())
+            }
+            ("CoworkScheduledTasks", "previewSchedule") => {
+                self.engine.preview_schedule(args.first().and_then(Value::as_str).unwrap_or_default())
+            }
             ("CoworkScheduledTasks", "getAllScheduledTasks")
             | ("CCDScheduledTasks", "getAllScheduledTasks") => {
                 json!(self.engine.scheduled_task_list())
@@ -2648,9 +2402,8 @@ impl EipcRouter {
             ("QuixiVM", "getRunningStatus") => json!("ready"),
             ("QuixiVM", "getDownloadStatus") => json!("ready"),
             ("QuixiVM", "isSupported") => json!({ "status": "supported" }),
-            ("QuixiVM", "isHostLoopModeEnabled") | ("QuixiVM", "isHostLoopDevOverrideActive") => {
-                json!(false)
-            }
+            ("QuixiVM", "isHostLoopModeEnabled")
+            | ("QuixiVM", "isHostLoopDevOverrideActive") => json!(false),
 
             // --- ComputerUseTcc & ChromeExtension ---
             ("ComputerUseTcc", "getState") => {
@@ -2783,38 +2536,13 @@ impl EipcRouter {
                     .and_then(|v| v.as_str())
                     .unwrap_or("documents")
                     .to_lowercase();
-                let home = Some(quixi_proto::paths::account_home())
-                    .unwrap_or_else(quixi_proto::paths::home_dir);
+                let home = Some(quixi_proto::paths::account_home()).unwrap_or_else(quixi_proto::paths::home_dir);
                 let resolved = match kind.as_str() {
-                    "documents" => {
-                        if quixi_proto::paths::test_profile().is_some() {
-                            home.join("Documents")
-                        } else {
-                            dirs::document_dir().unwrap_or_else(|| home.join("Documents"))
-                        }
-                    }
-                    "downloads" => {
-                        if quixi_proto::paths::test_profile().is_some() {
-                            home.join("Downloads")
-                        } else {
-                            dirs::download_dir().unwrap_or_else(|| home.join("Downloads"))
-                        }
-                    }
-                    "desktop" => {
-                        if quixi_proto::paths::test_profile().is_some() {
-                            home.join("Desktop")
-                        } else {
-                            dirs::desktop_dir().unwrap_or_else(|| home.join("Desktop"))
-                        }
-                    }
+                    "documents" => if quixi_proto::paths::test_profile().is_some() { home.join("Documents") } else { dirs::document_dir().unwrap_or_else(|| home.join("Documents")) },
+                    "downloads" => if quixi_proto::paths::test_profile().is_some() { home.join("Downloads") } else { dirs::download_dir().unwrap_or_else(|| home.join("Downloads")) },
+                    "desktop" => if quixi_proto::paths::test_profile().is_some() { home.join("Desktop") } else { dirs::desktop_dir().unwrap_or_else(|| home.join("Desktop")) },
                     "home" => home,
-                    _ => {
-                        if quixi_proto::paths::test_profile().is_some() {
-                            home.join("Documents")
-                        } else {
-                            dirs::document_dir().unwrap_or_else(|| home.join("Documents"))
-                        }
-                    }
+                    _ => if quixi_proto::paths::test_profile().is_some() { home.join("Documents") } else { dirs::document_dir().unwrap_or_else(|| home.join("Documents")) },
                 };
                 json!(resolved.to_string_lossy().to_string())
             }
@@ -2933,10 +2661,7 @@ mod tests {
 
     fn make_router() -> (Arc<QuixiEngine>, EipcRouter) {
         let res = workspace_root().join("resources");
-        let engine = QuixiEngine::new_with_data_dir(
-            res,
-            std::env::temp_dir().join(format!("quixi-ipc-test-{}", uuid::Uuid::new_v4())),
-        );
+        let engine = QuixiEngine::new_with_data_dir(res, std::env::temp_dir().join(format!("quixi-ipc-test-{}", uuid::Uuid::new_v4())));
         *engine.user_locale.write() = "en-US".to_string();
         {
             let mut st = engine.provider_manager.state.write();
@@ -2962,27 +2687,20 @@ mod tests {
             ("ComputerUseTcc", "unknownMethod"),
         ] {
             let reply = router.dispatch(&EipcInvokePayload {
-                channel: format!(
-                    "$eipc_message$_{}_$_quixi.settings_$_{}_$_{}",
-                    EIPC_UUID_MAIN, service, member
-                ),
+                channel: format!("$eipc_message$_{}_$_quixi.settings_$_{}_$_{}", EIPC_UUID_MAIN, service, member),
                 args: vec![],
             });
             assert!(reply.error.is_some(), "{service}.{member}: {reply:?}");
             assert!(reply.result.is_none());
         }
         let reply = router.dispatch(&EipcInvokePayload {
-            channel: format!(
-                "$eipc_message$_{}_$_quixi.settings_$_ComputerUseTcc_$_getState",
-                EIPC_UUID_MAIN
-            ),
+            channel: format!("$eipc_message$_{}_$_quixi.settings_$_ComputerUseTcc_$_getState", EIPC_UUID_MAIN),
             args: vec![],
         });
         let state = reply.result.unwrap();
         assert_eq!(state["microphone"], "unknown");
         assert_eq!(state["automation"], "unknown");
-        assert!(["granted", "not_granted", "unknown"]
-            .contains(&state["accessibility"].as_str().unwrap()));
+        assert!(["granted", "not_granted", "unknown"].contains(&state["accessibility"].as_str().unwrap()));
     }
 
     #[test]
@@ -2990,60 +2708,24 @@ mod tests {
         let (_engine, router) = make_router();
         for (service, member, args) in [
             ("MCP", "connect", vec![]),
-            (
-                "MCP",
-                "respondInteraction",
-                vec![json!("unknown"), json!("accept"), json!({})],
-            ),
-            (
-                "MCP",
-                "setToolEnabled",
-                vec![json!("server"), json!("tool"), json!("true")],
-            ),
-            (
-                "MCP",
-                "setRoots",
-                vec![json!("server"), json!("/tmp"), json!([null])],
-            ),
-            (
-                "MCP",
-                "getPrompt",
-                vec![json!("server"), json!("prompt"), json!([])],
-            ),
+            ("MCP", "respondInteraction", vec![json!("unknown"), json!("accept"), json!({})]),
+            ("MCP", "setToolEnabled", vec![json!("server"), json!("tool"), json!("true")]),
+            ("MCP", "setRoots", vec![json!("server"), json!("/tmp"), json!([null])]),
+            ("MCP", "getPrompt", vec![json!("server"), json!("prompt"), json!([])]),
             ("MCP", "setMcpServerConfigs", vec![]),
-            (
-                "MCP",
-                "setMcpServerConfigs",
-                vec![json!({"bad":{"command":""}})],
-            ),
-            (
-                "LocalAgentModeSessions",
-                "authenticateMcpServer",
-                vec![json!("missing")],
-            ),
+            ("MCP", "setMcpServerConfigs", vec![json!({"bad":{"command":""}})]),
+            ("LocalAgentModeSessions", "authenticateMcpServer", vec![json!("missing")]),
             ("LocalSessions", "toggleMcpServer", vec![json!("missing")]),
         ] {
             let reply = router.dispatch(&EipcInvokePayload {
-                channel: format!(
-                    "$eipc_message$_{}_$_quixi.settings_$_{}_$_{}",
-                    EIPC_UUID_MAIN, service, member
-                ),
+                channel: format!("$eipc_message$_{}_$_quixi.settings_$_{}_$_{}", EIPC_UUID_MAIN, service, member),
                 args,
             });
-            assert!(
-                reply.error.is_some(),
-                "{service}.{member} should return an IPC error: {reply:?}"
-            );
-            assert!(
-                reply.result.is_none(),
-                "{service}.{member} must not fabricate a result on error"
-            );
+            assert!(reply.error.is_some(), "{service}.{member} should return an IPC error: {reply:?}");
+            assert!(reply.result.is_none(), "{service}.{member} must not fabricate a result on error");
         }
         let missing_tool = router.dispatch(&EipcInvokePayload {
-            channel: format!(
-                "$eipc_message$_{}_$_quixi.web_$_LocalAgentModeSessions_$_mcpCallTool",
-                EIPC_UUID_MAIN
-            ),
+            channel: format!("$eipc_message$_{}_$_quixi.web_$_LocalAgentModeSessions_$_mcpCallTool", EIPC_UUID_MAIN),
             args: vec![],
         });
         assert_eq!(missing_tool.result.unwrap()["isError"], true);
@@ -3053,37 +2735,16 @@ mod tests {
     fn invalid_server_entries_remain_editable_without_hiding_healthy_servers() {
         let (engine, router) = make_router();
         let raw = json!({"mcpServers":{"invalid":{"command":9},"healthy":{"command":"example-server","args":[]}}});
-        std::fs::write(
-            &engine.mcp_host.config_path,
-            serde_json::to_vec(&raw).unwrap(),
-        )
-        .unwrap();
-        let read = |member: &str| {
-            router.dispatch(&EipcInvokePayload {
-                channel: format!(
-                    "$eipc_message$_{}_$_quixi.settings_$_MCP_$_{}",
-                    EIPC_UUID_MAIN, member
-                ),
-                args: vec![],
-            })
-        };
-        assert_eq!(
-            read("getMcpServersConfig").result.unwrap(),
-            raw["mcpServers"]
-        );
+        std::fs::write(&engine.mcp_host.config_path, serde_json::to_vec(&raw).unwrap()).unwrap();
+        let read = |member: &str| router.dispatch(&EipcInvokePayload {
+            channel: format!("$eipc_message$_{}_$_quixi.settings_$_MCP_$_{}", EIPC_UUID_MAIN, member), args: vec![],
+        });
+        assert_eq!(read("getMcpServersConfig").result.unwrap(), raw["mcpServers"]);
         let statuses = read("getMcpServersConfigWithStatus").result.unwrap();
         assert_eq!(statuses["invalid"]["command"], 9);
         assert_eq!(statuses["invalid"]["status"], "failed");
         assert_eq!(statuses["healthy"]["status"], "configured");
-        assert_eq!(
-            engine
-                .mcp_host
-                .read_config_checked()
-                .unwrap()
-                .mcp_servers
-                .len(),
-            1
-        );
+        assert_eq!(engine.mcp_host.read_config_checked().unwrap().mcp_servers.len(), 1);
     }
 
     #[test]
@@ -3093,22 +2754,13 @@ mod tests {
         std::fs::write(&engine.mcp_host.config_path, malformed).unwrap();
         for member in ["getMcpServersConfig", "getMcpServersConfigWithStatus"] {
             let reply = router.dispatch(&EipcInvokePayload {
-                channel: format!(
-                    "$eipc_message$_{}_$_quixi.settings_$_MCP_$_{}",
-                    EIPC_UUID_MAIN, member
-                ),
+                channel: format!("$eipc_message$_{}_$_quixi.settings_$_MCP_$_{}", EIPC_UUID_MAIN, member),
                 args: vec![],
             });
-            assert!(
-                reply.error.is_some(),
-                "{member} should surface the malformed configuration"
-            );
+            assert!(reply.error.is_some(), "{member} should surface the malformed configuration");
             assert!(reply.result.is_none());
         }
-        assert_eq!(
-            std::fs::read_to_string(&engine.mcp_host.config_path).unwrap(),
-            malformed
-        );
+        assert_eq!(std::fs::read_to_string(&engine.mcp_host.config_path).unwrap(), malformed);
     }
 
     #[test]
@@ -3243,14 +2895,7 @@ mod tests {
         assert!(agent_sid.starts_with("local_"));
 
         for _ in 0..100 {
-            if _engine
-                .agent_sessions
-                .read()
-                .get(&agent_sid)
-                .is_some_and(|session| !session.is_running)
-            {
-                break;
-            }
+            if _engine.agent_sessions.read().get(&agent_sid).is_some_and(|session| !session.is_running) { break; }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
 
@@ -3285,14 +2930,7 @@ mod tests {
         assert!(!code_sid.starts_with("local_cli_"));
 
         for _ in 0..100 {
-            if _engine
-                .code_sessions
-                .read()
-                .get(&code_sid)
-                .is_some_and(|session| !session.turn_running)
-            {
-                break;
-            }
+            if _engine.code_sessions.read().get(&code_sid).is_some_and(|session| !session.turn_running) { break; }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
 
@@ -3330,10 +2968,7 @@ mod tests {
                     "$eipc_message$_{}_$_quixi.web_$_LocalAgentModeSessions_$_getSession",
                     EIPC_UUID_MAIN
                 ),
-                args: vec![
-                    json!(agent_sid),
-                    json!({ "skipReplay": true, "metadataOnly": true }),
-                ],
+                args: vec![json!(agent_sid), json!({ "skipReplay": true, "metadataOnly": true })],
             })
             .result
             .unwrap();
@@ -3367,10 +3002,7 @@ mod tests {
     fn test_mcp_builtin_catalog_and_unknown_tool_failure() {
         let (_engine, router) = make_router();
         let reply = router.dispatch(&EipcInvokePayload {
-            channel: format!(
-                "$eipc_message$_{}_$_quixi.web_$_LocalAgentModeSessions_$_getLocalMcpServers",
-                EIPC_UUID_MAIN
-            ),
+            channel: format!("$eipc_message$_{}_$_quixi.web_$_LocalAgentModeSessions_$_getLocalMcpServers", EIPC_UUID_MAIN),
             args: vec![],
         });
         let servers = reply.result.unwrap();
@@ -3386,29 +3018,14 @@ mod tests {
                 assert!(tool["inputSchema"].is_object());
             }
         }
-        for (name, required_tool) in [
-            ("computer-use", "cursor_position"),
-            ("quixi-in-chrome", "read_page"),
-            ("QuixiDesk Browser", "tabs_context_mcp"),
-        ] {
+        for (name, required_tool) in [("computer-use", "cursor_position"), ("quixi-in-chrome", "read_page"), ("QuixiDesk Browser", "tabs_context_mcp")] {
             let server = builtins.iter().find(|s| s["name"] == name).unwrap();
-            assert!(server["tools"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|tool| tool["name"] == required_tool));
+            assert!(server["tools"].as_array().unwrap().iter().any(|tool| tool["name"] == required_tool));
         }
         // Verify dispatch without driving the user's operating system or browser.
         let reply = router.dispatch(&EipcInvokePayload {
-            channel: format!(
-                "$eipc_message$_{}_$_quixi.web_$_LocalAgentModeSessions_$_directMcpCallTool",
-                EIPC_UUID_MAIN
-            ),
-            args: vec![
-                json!("quixi-workspace"),
-                json!("nonexistent_tool"),
-                json!({}),
-            ],
+            channel: format!("$eipc_message$_{}_$_quixi.web_$_LocalAgentModeSessions_$_directMcpCallTool", EIPC_UUID_MAIN),
+            args: vec![json!("quixi-workspace"), json!("nonexistent_tool"), json!({})],
         });
         assert_eq!(reply.result.unwrap()["isError"], true);
     }
@@ -3610,43 +3227,22 @@ mod session_control_regression_tests {
     use super::*;
     #[test]
     fn permission_changes_and_stop_publish_renderer_events() {
-        let test_data =
-            std::env::temp_dir().join(format!("quixi-isolated-test-{}", uuid::Uuid::new_v4()));
-        let engine = QuixiEngine::new_with_data_dir(
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../resources"),
-            test_data,
-        );
+        let test_data = std::env::temp_dir().join(format!("quixi-isolated-test-{}", uuid::Uuid::new_v4()));
+        let engine = QuixiEngine::new_with_data_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../resources"), test_data);
         let router = EipcRouter::new(engine.clone());
         let events = Arc::new(std::sync::Mutex::new(Vec::new()));
         let recorded = events.clone();
-        engine.set_emitter(Arc::new(move |_, event| {
-            recorded.lock().unwrap().push(event)
-        }));
+        engine.set_emitter(Arc::new(move |_, event| recorded.lock().unwrap().push(event)));
         let sid = engine.start_agent_session(&json!({"permissionMode":"auto"}));
-        let call = |method: &str, args: Vec<Value>| {
-            router.dispatch(&EipcInvokePayload {
-                channel: format!(
-                    "$eipc_message$_{}_$_quixi.web_$_LocalAgentModeSessions_$_{}",
-                    quixi_proto::EIPC_UUID_MAIN,
-                    method
-                ),
-                args,
-            })
-        };
-        assert_eq!(
-            call("setPermissionMode", vec![json!(sid), json!("default")]).result,
-            Some(json!(true))
-        );
-        call("stop", vec![json!(sid)]);
+        let call = |method: &str, args: Vec<Value>| router.dispatch(&EipcInvokePayload {
+            channel: format!("$eipc_message$_{}_$_quixi.web_$_LocalAgentModeSessions_$_{}", quixi_proto::EIPC_UUID_MAIN, method), args,
+        });
+        assert_eq!(call("setPermissionMode",vec![json!(sid),json!("default")]).result,Some(json!(true)));
+        call("stop",vec![json!(sid)]);
         let events = events.lock().unwrap();
-        assert!(events
-            .iter()
-            .any(|event| event["type"] == "permission_mode_changed"
-                && event["permissionMode"] == "default"));
-        assert!(events
-            .iter()
-            .any(|event| event["type"] == "close" && event["code"] == 0));
+        assert!(events.iter().any(|event| event["type"] == "permission_mode_changed" && event["permissionMode"] == "default"));
+        assert!(events.iter().any(|event| event["type"] == "close" && event["code"] == 0));
         drop(events);
-        call("delete", vec![json!(sid)]);
+        call("delete",vec![json!(sid)]);
     }
 }

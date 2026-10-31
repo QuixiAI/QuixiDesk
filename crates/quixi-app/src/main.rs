@@ -40,12 +40,8 @@ fn exit_event_loop(control_flow: &mut ControlFlow) {
         // Called on the UI thread, WM_QUIT lets its native message pump finish
         // normally, including LoopDestroyed, without waiting for a repaint.
         #[link(name = "user32")]
-        extern "system" {
-            fn PostQuitMessage(exit_code: i32);
-        }
-        unsafe {
-            PostQuitMessage(0);
-        }
+        extern "system" { fn PostQuitMessage(exit_code: i32); }
+        unsafe { PostQuitMessage(0); }
     }
 }
 
@@ -56,55 +52,33 @@ mod origin_tests {
     #[test]
     fn only_the_platform_app_origin_can_access_native_routes() {
         assert!(trusted_app_origin(None));
-        assert!(trusted_app_origin(Some(&http::HeaderValue::from_static(
-            APP_ORIGIN
-        ))));
-        for origin in [
-            "null",
-            "https://example.com",
-            "http://app.localhost.evil",
-            "http://localhost:19458",
-        ] {
-            assert!(!trusted_app_origin(Some(
-                &http::HeaderValue::from_str(origin).unwrap()
-            )));
+        assert!(trusted_app_origin(Some(&http::HeaderValue::from_static(APP_ORIGIN))));
+        for origin in ["null", "https://example.com", "http://app.localhost.evil", "http://localhost:19458"] {
+            assert!(!trusted_app_origin(Some(&http::HeaderValue::from_str(origin).unwrap())));
         }
         let response = build_http_response(200, "application/json", b"{}".to_vec());
-        assert_eq!(
-            response.headers()["Access-Control-Allow-Origin"],
-            APP_ORIGIN
-        );
+        assert_eq!(response.headers()["Access-Control-Allow-Origin"], APP_ORIGIN);
     }
 }
 
 #[cfg(target_os = "macos")]
 use tao::platform::macos::WindowBuilderExtMacOS;
 #[cfg(target_os = "macos")]
-use wry::WebViewBuilderExtDarwin;
-#[cfg(target_os = "macos")]
 use wry::WebViewExtMacOS;
+#[cfg(target_os = "macos")]
+use wry::WebViewBuilderExtDarwin;
 
 #[cfg(target_os = "macos")]
-static MENU_PROXY: std::sync::OnceLock<
-    std::sync::Mutex<tao::event_loop::EventLoopProxy<UserEvent>>,
-> = std::sync::OnceLock::new();
+static MENU_PROXY: std::sync::OnceLock<std::sync::Mutex<tao::event_loop::EventLoopProxy<UserEvent>>> = std::sync::OnceLock::new();
 
 #[cfg(target_os = "macos")]
-extern "C" fn open_settings_menu(
-    _: &objc::runtime::Object,
-    _: objc::runtime::Sel,
-    _: cocoa::base::id,
-) {
-    if let Some(proxy) = MENU_PROXY.get() {
-        let _ = proxy.lock().unwrap().send_event(UserEvent::OpenSettings);
-    }
+extern "C" fn open_settings_menu(_: &objc::runtime::Object, _: objc::runtime::Sel, _: cocoa::base::id) {
+    if let Some(proxy) = MENU_PROXY.get() { let _ = proxy.lock().unwrap().send_event(UserEvent::OpenSettings); }
 }
 
 #[cfg(target_os = "macos")]
 extern "C" fn quit_menu(_: &objc::runtime::Object, _: objc::runtime::Sel, _: cocoa::base::id) {
-    if let Some(proxy) = MENU_PROXY.get() {
-        let _ = proxy.lock().unwrap().send_event(UserEvent::CloseWindow);
-    }
+    if let Some(proxy) = MENU_PROXY.get() { let _ = proxy.lock().unwrap().send_event(UserEvent::CloseWindow); }
 }
 
 /// Installs a native macOS `NSMenu` bar (`QuixiDesk`, `Edit`, `Window`) on `NSApp` so that
@@ -136,36 +110,20 @@ fn setup_macos_main_menu() {
             .initWithTitle_(NSString::alloc(nil).init_str("QuixiDesk"))
             .autorelease();
 
-        let about = NSMenuItem::alloc(nil)
-            .initWithTitle_action_keyEquivalent_(
-                NSString::alloc(nil).init_str("About QuixiDesk"),
-                sel!(orderFrontStandardAboutPanel:),
-                NSString::alloc(nil).init_str(""),
-            )
-            .autorelease();
+        let about = NSMenuItem::alloc(nil).initWithTitle_action_keyEquivalent_(
+            NSString::alloc(nil).init_str("About QuixiDesk"), sel!(orderFrontStandardAboutPanel:),
+            NSString::alloc(nil).init_str("")).autorelease();
         app_menu.addItem_(about);
         let cls = objc::runtime::Class::get("QuixiDeskMenuActions").unwrap_or_else(|| {
-            let mut decl =
-                objc::declare::ClassDecl::new("QuixiDeskMenuActions", objc::class!(NSObject))
-                    .unwrap();
-            decl.add_method(
-                sel!(openSettings:),
-                open_settings_menu as extern "C" fn(&objc::runtime::Object, objc::runtime::Sel, id),
-            );
-            decl.add_method(
-                sel!(quitSafely:),
-                quit_menu as extern "C" fn(&objc::runtime::Object, objc::runtime::Sel, id),
-            );
+            let mut decl = objc::declare::ClassDecl::new("QuixiDeskMenuActions", objc::class!(NSObject)).unwrap();
+            decl.add_method(sel!(openSettings:), open_settings_menu as extern "C" fn(&objc::runtime::Object, objc::runtime::Sel, id));
+            decl.add_method(sel!(quitSafely:), quit_menu as extern "C" fn(&objc::runtime::Object, objc::runtime::Sel, id));
             decl.register()
         });
         let target: id = msg_send![cls, new];
-        let settings = NSMenuItem::alloc(nil)
-            .initWithTitle_action_keyEquivalent_(
-                NSString::alloc(nil).init_str("Settings…"),
-                sel!(openSettings:),
-                NSString::alloc(nil).init_str(","),
-            )
-            .autorelease();
+        let settings = NSMenuItem::alloc(nil).initWithTitle_action_keyEquivalent_(
+            NSString::alloc(nil).init_str("Settings…"), sel!(openSettings:),
+            NSString::alloc(nil).init_str(",")).autorelease();
         let _: () = msg_send![settings, setTarget: target];
         app_menu.addItem_(settings);
         app_menu.addItem_(NSMenuItem::separatorItem(nil));
@@ -186,8 +144,8 @@ fn setup_macos_main_menu() {
                 hide_others_key,
             )
             .autorelease();
-        let cmd_opt =
-            NSEventModifierFlags::NSCommandKeyMask | NSEventModifierFlags::NSAlternateKeyMask;
+        let cmd_opt = NSEventModifierFlags::NSCommandKeyMask
+            | NSEventModifierFlags::NSAlternateKeyMask;
         let _: () = msg_send![hide_others_item, setKeyEquivalentModifierMask: cmd_opt];
         app_menu.addItem_(hide_others_item);
 
@@ -311,24 +269,17 @@ fn setup_macos_main_menu() {
 /// Present an app-owned sheet, without AppleScript/Finder automation permissions.
 #[cfg(target_os = "macos")]
 #[allow(deprecated, unexpected_cfgs)]
-fn show_folder_sheet(
-    window: &tao::window::Window,
-    prompt: &str,
-    multiple: bool,
-    tx: std::sync::mpsc::Sender<Vec<String>>,
-) {
+fn show_folder_sheet(window: &tao::window::Window, prompt: &str, multiple: bool,
+    tx: std::sync::mpsc::Sender<Vec<String>>) {
     use cocoa::appkit::{NSApp, NSApplication};
-    use cocoa::base::{id, nil, NO, YES};
+    use cocoa::base::{id, nil, YES, NO};
     use cocoa::foundation::NSString;
     use objc::{class, msg_send, sel, sel_impl};
     use tao::platform::macos::WindowExtMacOS;
     unsafe {
         let parent = window.ns_window() as id;
         let existing: id = msg_send![parent, attachedSheet];
-        if existing != nil {
-            let _ = tx.send(vec![]);
-            return;
-        }
+        if existing != nil { let _ = tx.send(vec![]); return; }
         let panel: id = msg_send![class!(NSOpenPanel), openPanel];
         let _: () = msg_send![panel, setCanChooseDirectories: YES];
         let _: () = msg_send![panel, setCanChooseFiles: NO];
@@ -348,18 +299,11 @@ fn show_folder_sheet(
                     let url: id = msg_send![urls, objectAtIndex: index];
                     let path: id = msg_send![url, path];
                     let utf8: *const std::ffi::c_char = msg_send![path, UTF8String];
-                    if !utf8.is_null() {
-                        paths.push(
-                            std::ffi::CStr::from_ptr(utf8)
-                                .to_string_lossy()
-                                .into_owned(),
-                        );
-                    }
+                    if !utf8.is_null() { paths.push(std::ffi::CStr::from_ptr(utf8).to_string_lossy().into_owned()); }
                 }
             }
             let _ = tx.send(paths);
-        })
-        .copy();
+        }).copy();
         let _: () = msg_send![panel, beginSheetModalForWindow: parent completionHandler: &*handler];
     }
 }
@@ -469,9 +413,7 @@ fn unwrap_webview_eval_json(raw: &str) -> Value {
     serde_json::json!({ "ok": true, "raw": trimmed })
 }
 
-fn start_automation_http_server(
-    proxy: tao::event_loop::EventLoopProxy<UserEvent>,
-) -> anyhow::Result<()> {
+fn start_automation_http_server(proxy: tao::event_loop::EventLoopProxy<UserEvent>) -> anyhow::Result<()> {
     let addr = format!("127.0.0.1:{}", quixi_proto::paths::automation_port());
     // Fail startup rather than attach to another process's automation bridge.
     let listener = std::net::TcpListener::bind(&addr)?;
@@ -479,10 +421,7 @@ fn start_automation_http_server(
         use std::io::{Read, Write};
         use std::time::Duration;
 
-        tracing::info!(
-            "QuixiDesk native UI & screenshot bridge listening on http://{}",
-            addr
-        );
+        tracing::info!("QuixiDesk native UI & screenshot bridge listening on http://{}", addr);
 
         for stream in listener.incoming().flatten() {
             let proxy = proxy.clone();
@@ -532,13 +471,8 @@ fn start_automation_http_server(
                 let hdr_end = header_end.unwrap_or(buf.len());
                 let req_header = String::from_utf8_lossy(&buf[..hdr_end]);
                 // The local automation bridge is for native clients, never web content.
-                if req_header.lines().any(|line| {
-                    line.split_once(':')
-                        .is_some_and(|(key, _)| key.trim().eq_ignore_ascii_case("origin"))
-                }) {
-                    let _ = stream.write_all(
-                        b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                    );
+                if req_header.lines().any(|line| line.split_once(':').is_some_and(|(key, _)| key.trim().eq_ignore_ascii_case("origin"))) {
+                    let _ = stream.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
                     return;
                 }
                 let first_line = req_header.lines().next().unwrap_or("");
@@ -551,20 +485,18 @@ fn start_automation_http_server(
                     &[][..]
                 };
 
-                let write_resp = |stream: &mut std::net::TcpStream,
-                                  status: &str,
-                                  ct: &str,
-                                  body: &[u8]| {
-                    let hdr = format!(
+                let write_resp =
+                    |stream: &mut std::net::TcpStream, status: &str, ct: &str, body: &[u8]| {
+                        let hdr = format!(
                             "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",
                             status,
                             ct,
                             body.len()
                         );
-                    let _ = stream.write_all(hdr.as_bytes());
-                    let _ = stream.write_all(body);
-                    let _ = stream.flush();
-                };
+                        let _ = stream.write_all(hdr.as_bytes());
+                        let _ = stream.write_all(body);
+                        let _ = stream.flush();
+                    };
 
                 if method == "GET" && path.starts_with("/screenshot") {
                     let (tx, rx) = std::sync::mpsc::channel();
@@ -611,8 +543,8 @@ fn start_automation_http_server(
                 }
 
                 if method == "POST" && path.starts_with("/action") {
-                    let payload: Value = serde_json::from_slice(body_bytes)
-                        .unwrap_or_else(|_| serde_json::json!({}));
+                    let payload: Value =
+                        serde_json::from_slice(body_bytes).unwrap_or_else(|_| serde_json::json!({}));
                     let payload_str =
                         serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
                     let script = format!(
@@ -663,9 +595,7 @@ fn locate_resources_dir() -> PathBuf {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(exe_dir) = exe.parent() {
             let portable = exe_dir.join("resources");
-            if portable.join("ui/index.html").exists() {
-                return portable;
-            }
+            if portable.join("ui/index.html").exists() { return portable; }
             // macOS .app bundle: QuixiDesk.app/Contents/MacOS/QuixiDesk -> ../Resources
             let bundle_res = exe_dir.join("../Resources");
             if bundle_res.join("ui/index.html").exists() {
@@ -727,10 +657,7 @@ fn build_http_response(
         .status(StatusCode::from_u16(status).unwrap_or(StatusCode::OK))
         .header(CONTENT_TYPE, content_type)
         .header("Access-Control-Allow-Origin", APP_ORIGIN)
-        .header(
-            "Access-Control-Allow-Methods",
-            "GET, POST, PUT, PATCH, DELETE, OPTIONS",
-        )
+        .header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
         .header("Access-Control-Allow-Headers", "*")
         .header("Cache-Control", "no-cache")
         .body(Cow::Owned(body))
@@ -739,12 +666,7 @@ fn build_http_response(
 
 fn serve_static_or_spa(resources_dir: &Path, req_path: &str) -> Response<Cow<'static, [u8]>> {
     let clean_path = req_path.trim_start_matches('/');
-    if Path::new(clean_path).components().any(|part| {
-        matches!(
-            part,
-            std::path::Component::ParentDir | std::path::Component::Prefix(_)
-        )
-    }) {
+    if Path::new(clean_path).components().any(|part| matches!(part, std::path::Component::ParentDir | std::path::Component::Prefix(_))) {
         return build_http_response(404, "text/plain", b"Not found".to_vec());
     }
     let ui_dir = resources_dir.join("ui");
@@ -771,16 +693,7 @@ fn serve_static_or_spa(resources_dir: &Path, req_path: &str) -> Response<Cow<'st
         let ext_lower = ext.to_ascii_lowercase();
         if matches!(
             ext_lower.as_str(),
-            "js" | "css"
-                | "png"
-                | "jpg"
-                | "svg"
-                | "woff2"
-                | "woff"
-                | "ttf"
-                | "wasm"
-                | "ico"
-                | "map"
+            "js" | "css" | "png" | "jpg" | "svg" | "woff2" | "woff" | "ttf" | "wasm" | "ico" | "map"
         ) {
             return build_http_response(404, "text/plain; charset=utf-8", b"Not Found".to_vec());
         }
@@ -819,52 +732,26 @@ fn main() -> anyhow::Result<()> {
 
     let args: Vec<String> = std::env::args().collect();
     let option_value = |name: &str| -> anyhow::Result<Option<String>> {
-        let mut matches = args
-            .iter()
-            .enumerate()
-            .filter(|(_, arg)| arg.as_str() == name);
-        let Some((index, _)) = matches.next() else {
-            return Ok(None);
-        };
-        if matches.next().is_some() {
-            anyhow::bail!("Duplicate {name}");
-        }
-        let value = args
-            .get(index + 1)
-            .filter(|value| !value.starts_with("--") && !value.is_empty())
+        let mut matches = args.iter().enumerate().filter(|(_, arg)| arg.as_str() == name);
+        let Some((index, _)) = matches.next() else { return Ok(None); };
+        if matches.next().is_some() { anyhow::bail!("Duplicate {name}"); }
+        let value = args.get(index + 1).filter(|value| !value.starts_with("--") && !value.is_empty())
             .ok_or_else(|| anyhow::anyhow!("{name} requires a path"))?;
         Ok(Some(value.clone()))
     };
     let mock_account = option_value("--mock-account")?;
-    let test_profile =
-        option_value("--test-profile")?.or_else(|| std::env::var("QUIXI_TEST_PROFILE").ok());
+    let test_profile = option_value("--test-profile")?
+        .or_else(|| std::env::var("QUIXI_TEST_PROFILE").ok());
     if let Some(root) = &test_profile {
         #[cfg(target_os = "macos")]
         {
-            let version = std::process::Command::new("/usr/bin/sw_vers")
-                .arg("-productVersion")
-                .output()?;
-            let major: u32 = String::from_utf8_lossy(&version.stdout)
-                .split('.')
-                .next()
-                .unwrap_or("")
-                .trim()
-                .parse()?;
-            if major < 14 {
-                anyhow::bail!("Isolated test web storage requires macOS 14 or later");
-            }
+            let version = std::process::Command::new("/usr/bin/sw_vers").arg("-productVersion").output()?;
+            let major: u32 = String::from_utf8_lossy(&version.stdout).split('.').next().unwrap_or("").trim().parse()?;
+            if major < 14 { anyhow::bail!("Isolated test web storage requires macOS 14 or later"); }
         }
         quixi_proto::paths::configure_test_profile(Path::new(root)).map_err(anyhow::Error::msg)?;
         let profile = quixi_proto::paths::test_profile().unwrap();
-        for sub in [
-            "workspace",
-            "tmp",
-            "home/Documents",
-            "home/Downloads",
-            "home/Desktop",
-        ] {
-            fs::create_dir_all(profile.join(sub))?;
-        }
+        for sub in ["workspace", "tmp", "home/Documents", "home/Downloads", "home/Desktop"] { fs::create_dir_all(profile.join(sub))?; }
     }
     let resources_dir = locate_resources_dir();
     tracing::info!("QuixiDesk booting with resources_dir: {:?}", resources_dir);
@@ -877,17 +764,10 @@ fn main() -> anyhow::Result<()> {
 
     let engine = QuixiEngine::new(resources_dir.clone());
     if let Some(profile) = quixi_proto::paths::test_profile() {
-        let fixture_path = mock_account
-            .as_ref()
-            .map(PathBuf::from)
+        let fixture_path = mock_account.as_ref().map(PathBuf::from)
             .unwrap_or_else(|| profile.join("mock-account.json"));
         if !fixture_path.exists() {
-            if mock_account.is_some() {
-                anyhow::bail!(
-                    "Mock account fixture does not exist: {}",
-                    fixture_path.display()
-                );
-            }
+            if mock_account.is_some() { anyhow::bail!("Mock account fixture does not exist: {}",fixture_path.display()); }
             let mut fixture = engine.build_live_bootstrap();
             let account = &mut fixture["account"];
             account["uuid"] = serde_json::json!(uuid::Uuid::new_v4().to_string());
@@ -896,21 +776,15 @@ fn main() -> anyhow::Result<()> {
             account["display_name"] = serde_json::json!("Mock QA");
             if let Some(memberships) = account["memberships"].as_array_mut() {
                 for (index, member) in memberships.iter_mut().enumerate() {
-                    member["organization"]["name"] =
-                        serde_json::json!(format!("Mock Organization {}", index + 1));
+                    member["organization"]["name"] = serde_json::json!(format!("Mock Organization {}",index+1));
                 }
             }
             let fixture = serde_json::json!({"account":fixture["account"],"current_user_access":fixture["current_user_access"],"featureFlagsOrgUuid":fixture["featureFlagsOrgUuid"]});
             fs::write(&fixture_path, serde_json::to_vec_pretty(&fixture)?)?;
         }
         let fixture: Value = serde_json::from_slice(&fs::read(&fixture_path)?)?;
-        engine
-            .apply_mock_account(&fixture)
-            .map_err(anyhow::Error::msg)?;
-        tracing::info!(
-            "Test profile active: {} (mock account data only; providers configured separately)",
-            profile.display()
-        );
+        engine.apply_mock_account(&fixture).map_err(anyhow::Error::msg)?;
+        tracing::info!("Test profile active: {} (mock account data only; providers configured separately)",profile.display());
     } else if mock_account.is_some() {
         anyhow::bail!("--mock-account requires --test-profile");
     }
@@ -935,11 +809,7 @@ fn main() -> anyhow::Result<()> {
 
     // Build the native workspace window and titlebar inset.
     let mut win_builder = WindowBuilder::new()
-        .with_title(if test_profile.is_some() {
-            "QuixiDesk — Test Profile"
-        } else {
-            "QuixiDesk"
-        })
+        .with_title(if test_profile.is_some() { "QuixiDesk — Test Profile" } else { "QuixiDesk" })
         .with_inner_size(LogicalSize::new(1280.0, 840.0))
         .with_min_inner_size(LogicalSize::new(480.0, 360.0));
 
@@ -963,16 +833,9 @@ fn main() -> anyhow::Result<()> {
         let picker_proxy = proxy.clone();
         quixi_platform::set_folder_picker(Arc::new(move |prompt, multiple| {
             let (tx, rx) = std::sync::mpsc::channel();
-            if picker_proxy
-                .send_event(UserEvent::PickFolders {
-                    prompt: prompt.unwrap_or("Choose a folder").to_string(),
-                    multiple,
-                    tx,
-                })
-                .is_err()
-            {
-                return vec![];
-            }
+            if picker_proxy.send_event(UserEvent::PickFolders {
+                prompt: prompt.unwrap_or("Choose a folder").to_string(), multiple, tx,
+            }).is_err() { return vec![]; }
             rx.recv().unwrap_or_default()
         }));
     }
@@ -984,28 +847,13 @@ fn main() -> anyhow::Result<()> {
 
     let user_agent = concat!("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) QuixiDesk/", env!("CARGO_PKG_VERSION"), " Safari/605.1.15");
 
-    let mut web_context =
-        wry::WebContext::new(quixi_proto::paths::test_profile().map(|p| p.join("website-data")));
-    let mut webview_builder = if test_profile.is_some() {
-        WebViewBuilder::with_web_context(&mut web_context)
-    } else {
-        WebViewBuilder::new()
-    };
+    let mut web_context = wry::WebContext::new(quixi_proto::paths::test_profile().map(|p| p.join("website-data")));
+    let mut webview_builder = if test_profile.is_some() { WebViewBuilder::with_web_context(&mut web_context) } else { WebViewBuilder::new() };
     #[cfg(target_os = "macos")]
     if let Some(profile) = quixi_proto::paths::test_profile() {
         let file = profile.join("web-store-id");
-        let id: [u8; 16] = if file.exists() {
-            fs::read(&file)?
-                .try_into()
-                .map_err(|_| anyhow::anyhow!("Invalid test web store ID"))?
-        } else {
-            let id = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)?
-                .as_nanos()
-                .to_le_bytes();
-            fs::write(file, id)?;
-            id
-        };
+        let id: [u8; 16] = if file.exists() { fs::read(&file)?.try_into().map_err(|_| anyhow::anyhow!("Invalid test web store ID"))? }
+            else { let id = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos().to_le_bytes(); fs::write(file, id)?; id };
         webview_builder = webview_builder.with_data_store_identifier(id);
     }
     let webview_builder = webview_builder
@@ -1029,7 +877,10 @@ fn main() -> anyhow::Result<()> {
                 if !trusted_app_origin(request.headers().get("Origin")) {
                     return build_http_response(403, "text/plain", b"Untrusted origin".to_vec());
                 }
-                let path_and_query = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or(path);
+                let path_and_query = uri
+                    .path_and_query()
+                    .map(|pq| pq.as_str())
+                    .unwrap_or(path);
 
                 if method == "OPTIONS" {
                     return build_http_response(204, "text/plain", Vec::new());
@@ -1037,21 +888,10 @@ fn main() -> anyhow::Result<()> {
 
                 // 1. Native Window Actions, Clipboard & Diagnostics
                 if path == "/__eipc__/open-external" && method == "POST" {
-                    let parsed = serde_json::from_slice::<Value>(request.body())
-                        .ok()
-                        .and_then(|body| {
-                            body["url"].as_str().and_then(|s| url::Url::parse(s).ok())
-                        });
-                    let Some(url) = parsed.filter(|u| {
-                        matches!(u.scheme(), "http" | "https")
-                            && u.username().is_empty()
-                            && u.password().is_none()
-                    }) else {
-                        return build_http_response(
-                            400,
-                            "application/json",
-                            b"{\"error\":\"Only HTTP and HTTPS links are supported\"}".to_vec(),
-                        );
+                    let parsed = serde_json::from_slice::<Value>(request.body()).ok()
+                        .and_then(|body| body["url"].as_str().and_then(|s| url::Url::parse(s).ok()));
+                    let Some(url) = parsed.filter(|u| matches!(u.scheme(), "http" | "https") && u.username().is_empty() && u.password().is_none()) else {
+                        return build_http_response(400, "application/json", b"{\"error\":\"Only HTTP and HTTPS links are supported\"}".to_vec());
                     };
                     #[cfg(target_os = "macos")]
                     let mut command = std::process::Command::new("/usr/bin/open");
@@ -1060,18 +900,11 @@ fn main() -> anyhow::Result<()> {
                     #[cfg(target_os = "windows")]
                     let mut command = {
                         let mut c = std::process::Command::new("rundll32.exe");
-                        c.arg("url.dll,FileProtocolHandler");
-                        c
+                        c.arg("url.dll,FileProtocolHandler"); c
                     };
                     return match command.arg(url.as_str()).spawn() {
-                        Ok(_) => {
-                            build_http_response(200, "application/json", b"{\"ok\":true}".to_vec())
-                        }
-                        Err(_) => build_http_response(
-                            500,
-                            "application/json",
-                            b"{\"error\":\"Could not open the system browser\"}".to_vec(),
-                        ),
+                        Ok(_) => build_http_response(200, "application/json", b"{\"ok\":true}".to_vec()),
+                        Err(_) => build_http_response(500, "application/json", b"{\"error\":\"Could not open the system browser\"}".to_vec()),
                     };
                 }
                 if path == "/__eipc__/diag" {
@@ -1084,37 +917,22 @@ fn main() -> anyhow::Result<()> {
 
                 if path == "/__eipc__/clipboard" {
                     if let Ok(body_val) = serde_json::from_slice::<Value>(request.body()) {
-                        match body_val
-                            .get("action")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                        {
+                        match body_val.get("action").and_then(|v| v.as_str()).unwrap_or("") {
                             "write" => {
-                                let text =
-                                    body_val.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                                let text = body_val
+                                    .get("text")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
                                 #[cfg(target_os = "linux")]
                                 let written = {
                                     let (tx, rx) = std::sync::mpsc::channel();
-                                    protocol_proxy
-                                        .send_event(UserEvent::WriteClipboard {
-                                            text: text.to_string(),
-                                            tx,
-                                        })
-                                        .is_ok()
-                                        && matches!(
-                                            rx.recv_timeout(std::time::Duration::from_secs(5)),
-                                            Ok(Ok(()))
-                                        )
+                                    protocol_proxy.send_event(UserEvent::WriteClipboard { text: text.to_string(), tx }).is_ok()
+                                        && matches!(rx.recv_timeout(std::time::Duration::from_secs(5)), Ok(Ok(())))
                                 };
                                 #[cfg(not(target_os = "linux"))]
-                                let written =
-                                    quixi_platform::ComputerUse::write_clipboard(text).is_ok();
+                                let written = quixi_platform::ComputerUse::write_clipboard(text).is_ok();
                                 if !written {
-                                    return build_http_response(
-                                        500,
-                                        "application/json",
-                                        b"{\"ok\":false}".to_vec(),
-                                    );
+                                    return build_http_response(500, "application/json", b"{\"ok\":false}".to_vec());
                                 }
                                 return build_http_response(
                                     200,
@@ -1139,11 +957,7 @@ fn main() -> anyhow::Result<()> {
 
                 if path == "/__eipc__/window-action" {
                     if let Ok(body_val) = serde_json::from_slice::<Value>(request.body()) {
-                        match body_val
-                            .get("action")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                        {
+                        match body_val.get("action").and_then(|v| v.as_str()).unwrap_or("") {
                             "drag" => {
                                 let _ = protocol_proxy.send_event(UserEvent::DragWindow);
                             }
@@ -1174,13 +988,8 @@ fn main() -> anyhow::Result<()> {
                                 let _ = protocol_proxy.send_event(UserEvent::CloseWindow);
                             }
                             let reply = protocol_router.dispatch(&payload);
-                            let bytes =
-                                serde_json::to_vec(&reply).unwrap_or_else(|_| b"{}".to_vec());
-                            return build_http_response(
-                                200,
-                                "application/json; charset=utf-8",
-                                bytes,
-                            );
+                            let bytes = serde_json::to_vec(&reply).unwrap_or_else(|_| b"{}".to_vec());
+                            return build_http_response(200, "application/json; charset=utf-8", bytes);
                         }
                         Err(err) => {
                             let err_json = serde_json::json!({
@@ -1237,11 +1046,7 @@ fn main() -> anyhow::Result<()> {
     let webview = {
         use tao::platform::unix::WindowExtUnix;
         use wry::WebViewBuilderExtUnix;
-        webview_builder.build_gtk(
-            window
-                .default_vbox()
-                .ok_or_else(|| anyhow::anyhow!("GTK window container unavailable"))?,
-        )?
+        webview_builder.build_gtk(window.default_vbox().ok_or_else(|| anyhow::anyhow!("GTK window container unavailable"))?)?
     };
     #[cfg(not(target_os = "linux"))]
     let webview = webview_builder.build(&window)?;
