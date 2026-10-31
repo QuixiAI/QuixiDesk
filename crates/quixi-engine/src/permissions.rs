@@ -90,8 +90,15 @@ impl QuixiEngine {
         let outside=file_access_outside_workspace(name,input,cwd);
         let needs=|mode:&str| agent_tools::requires_approval_with_host(name,input,mode,&self.mcp_host) || (outside&&!matches!(mode,"auto"|"bypassPermissions"));
         let mode=self.current_permission_mode(session_id,fallback_mode);
+        let execute = |execution_mode: &str| {
+            if name == "Artifact" {
+                self.create_local_artifact(session_id, input)
+            } else {
+                agent_tools::execute_cancellable_with_mcp_identity(name,input,execution_cwd,execution_mode,&self.mcp_host,cancelled,mcp_identity.as_deref())
+            }
+        };
         if !needs(&mode) {
-            return agent_tools::execute_cancellable_with_mcp_identity(name,input,execution_cwd,&mode,&self.mcp_host,cancelled,mcp_identity.as_deref());
+            return execute(&mode);
         }
         if cancelled.load(Ordering::SeqCst) {return ("Task stopped. No action performed.".into(),true);}
         let request_id=Uuid::new_v4().to_string();
@@ -115,7 +122,7 @@ impl QuixiEngine {
         if outcome!=1 || cancelled.load(Ordering::SeqCst) {
             return ("The action was not approved or the task was stopped. No action was performed. Do not retry it without a new user request.".into(),true);
         }
-        agent_tools::execute_cancellable_with_mcp_identity(name,input,execution_cwd,"auto",&self.mcp_host,cancelled,mcp_identity.as_deref())
+        execute("auto")
     }
 }
 
@@ -133,6 +140,24 @@ mod tests {
         let until=Instant::now()+Duration::from_secs(3);
         loop {let p=engine.pending_tool_approvals(sid);if !p.as_array().unwrap().is_empty(){return p[0].clone();}assert!(Instant::now()<until,"approval did not appear");std::thread::sleep(Duration::from_millis(10));}
     }
+    #[test]
+    fn artifact_obeys_manual_denial_and_auto_permission() {
+        let (engine, sid, root) = fixture();
+        let e = engine.clone(); let id = sid.clone();
+        let worker = std::thread::spawn(move || e.execute_tool_with_approval(&id, "preview", "Artifact",
+            &json!({"title":"Preview", "html":"<h1>Local</h1>"}), "", "default", &AtomicBool::new(false)));
+        let request = pending(&engine, &sid);
+        assert!(engine.artifacts.read().is_empty());
+        engine.resolve_tool_approval(&sid, request["requestId"].as_str().unwrap(), "deny");
+        assert!(worker.join().unwrap().1);
+        assert!(engine.artifacts.read().is_empty());
+        // No registered session: the explicit fallback mode is used.
+        assert!(!engine.execute_tool_with_approval("auto-preview", "preview2", "Artifact",
+            &json!({"title":"Preview", "html":"<h1>Local</h1>"}), "", "auto", &AtomicBool::new(false)).1);
+        assert_eq!(engine.artifacts.read().len(), 1);
+        drop(engine); fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn manual_edit_waits_for_exact_approval_and_resumes_once() {
         let (engine,sid,root)=fixture();let cancelled=engine.begin_turn(&sid);let e=engine.clone();let id=sid.clone();let cwd=root.join("work");let path=cwd.join("README.md");

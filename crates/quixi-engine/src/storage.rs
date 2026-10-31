@@ -188,7 +188,9 @@ impl QuixiEngine {
         if id.is_empty() || id.contains(['/', '\\']) || id == "." || id == ".." {
             return Err("Invalid conversation ID".into());
         }
-        self.cancel_turn(id);
+        let _submission = self.chat_submission.lock();
+        self.cancel_turn_signal(id);
+        self.pending_messages.lock().remove(id);
         self.delete_subagents(id)?;
         let mut agents = self.agent_sessions.write();
         let mut codes = self.code_sessions.write();

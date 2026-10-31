@@ -2107,11 +2107,11 @@ dialog:focus {
   margin-top: 14px;
 }
 
-.conversation-find{display:flex;align-items:center;gap:8px;padding:10px 20px;border-bottom:1px solid var(--border);flex-wrap:wrap}.conversation-find input{flex:1;min-width:180px}.conversation-find [role=status]{font-size:12px;white-space:nowrap}mark[data-find]{background:#f5d76e;color:#20252b;border-radius:3px}mark.find-current{background:#ffac42;outline:2px solid #9f6200}.tool-screenshot{display:block;max-width:100%;max-height:480px;object-fit:contain;margin-top:12px;border-radius:8px}
+.conversation-find{display:flex;align-items:center;gap:8px;padding:10px 20px;border-bottom:1px solid var(--line);flex-wrap:wrap}.conversation-find input{flex:1;min-width:180px}.conversation-find [role=status]{font-size:12px;white-space:nowrap}mark[data-find]{background:#f5d76e;color:#20252b;border-radius:3px}mark.find-current{background:#ffac42;outline:2px solid #9f6200}.tool-screenshot{display:block;max-width:100%;max-height:480px;object-fit:contain;margin-top:12px;border-radius:8px}
 .conversation-find{justify-content:flex-end;padding:8px 20px;gap:6px}.conversation-find input{max-width:360px;min-height:32px;padding:6px 10px;font-size:13px}.conversation-find button{font-size:12px;min-height:30px;padding:5px 8px}.conversation-find [role=status]{margin:0 6px}
 .schedule-detail{display:block;margin-top:4px}
 
-.subagent-panel{border:1px solid var(--border);border-radius:12px;padding:12px 16px;margin:16px 0}.subagent-panel>summary{cursor:pointer;font-size:14px}.subagent-row{display:flex;align-items:center;gap:12px;padding:12px 0;border-top:1px solid var(--border);margin-top:10px}.subagent-row p{margin:5px 0}.subagent-history pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:360px;overflow:auto;font-size:12px}.subagent-history details{margin:12px 0}
+.subagent-panel{border:1px solid var(--line);border-radius:12px;padding:12px 16px;margin:16px 0}.subagent-panel>summary{cursor:pointer;font-size:14px}.subagent-row{display:flex;align-items:center;gap:12px;padding:12px 0;border-top:1px solid var(--line);margin-top:10px}.subagent-row p{margin:5px 0}.subagent-history pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:360px;overflow:auto;font-size:12px}.subagent-history details{margin:12px 0}
 
 .mcp-connections { display: grid; gap: 14px; }
 .mcp-connection { border: 1px solid var(--line); border-radius: 14px; padding: 18px 20px; }
@@ -2163,3 +2163,16 @@ dialog:focus {
 
 /* Keep oversized plain-text responses readable without horizontal overflow. */
 .plain-response { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* One primary send action, with secondary delivery options. */
+.send-options { position: relative; }
+.send-options[hidden] { display: none; }
+.send-options summary { cursor: pointer; list-style: none; padding: 8px; border-radius: 6px; }
+.send-options summary::-webkit-details-marker { display: none; }
+.send-options summary:focus-visible { outline: 2px solid var(--accent); }
+.send-options-menu { position: absolute; bottom: calc(100% + 8px); right: 0; z-index: 20; padding: 6px; background: var(--bg); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 8px 24px #0003; white-space: nowrap; }
+.pending-message { display: flex; align-items: center; gap: 8px; padding: 8px 12px; margin-top: 6px; border: 1px solid var(--line); border-radius: 10px; }
+.pending-message-content { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 3px; }
+.pending-message-label { font-size: 11px; color: var(--muted); }
+.pending-message-text { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pending-message button { flex-shrink: 0; font-size: 12px; }

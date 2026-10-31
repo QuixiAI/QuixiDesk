@@ -137,6 +137,15 @@ async function fixture({
           "acceptEdits";
       return { ok: true };
     }
+    if (member === "cancelPendingMessage" || member === "guidePendingMessage") {
+      const index = pendingMessages.findIndex(m => m.messageUuid === args[1]);
+      if (index < 0) return {error:"No longer pending"};
+      const session = sessions.find(s => s.sessionId === args[0]);
+      if (member === "cancelPendingMessage") { pendingMessages.splice(index, 1); return {cancelled:true}; }
+      if (session.isRunning) { pendingMessages[index].delivery = "steer"; pendingMessages[index].held = false; }
+      else { pendingMessages.splice(index, 1); session.isRunning = true; }
+      return {dispatched:true};
+    }
     if (member === "getPendingMessages") return structuredClone(pendingMessages);
     if (member === "sendMessageV2") {
       if(sendGate)await sendGate;
@@ -160,7 +169,7 @@ async function fixture({
       sessions.push(branch);return structuredClone(branch);
     }
     if (member === "stop") {
-      pendingMessages.length = 0;
+      pendingMessages.forEach(m => m.held = true);
       sessions.find((s) => s.sessionId === args[0]).isRunning = false;
       return true;
     }
@@ -370,7 +379,7 @@ test("sending clears the correct draft and leaves Stop available during an activ
     assert.equal(call.args[1].text, "A real test prompt");
     assert.equal(f.w.document.querySelector("#prompt").value, "");
     assert.equal(
-      f.w.document.querySelector("#send-button").textContent,
+      f.w.document.querySelector("#stop-button").textContent,
       "Stop",
     );
     await f.click("Stop");
@@ -1427,13 +1436,13 @@ test("composer follow-up controls are visually hidden when idle and track only t
     style.textContent = fs.readFileSync(path.join(__dirname, "../../resources/ui/app.css"), "utf8");
     f.w.document.head.append(style);
     const assertControls = (active) => {
-      for (const id of ["steer-button", "queue-button"]) {
+      for (const id of ["stop-button", "send-options"]) {
         const control = f.w.document.getElementById(id);
         assert.ok(control, id);
         assert.equal(control.hidden, !active, id + " hidden state");
         assert.equal(f.w.getComputedStyle(control).display === "none", !active, id + " computed visibility");
       }
-      assert.equal(f.w.document.getElementById("send-button").textContent, active ? "Stop" : "Send");
+      assert.equal(f.w.document.getElementById("send-button").textContent, active ? "Queue" : "Send");
     };
     const notify = async (session, active, type) => {
       session.isRunning = active;
@@ -1474,14 +1483,15 @@ test("active composer sends steering immediately and queues followups without st
     f.sessions[0].isRunning = true;
     await f.click("Existing conversation");
     f.type("#prompt", "Use the smaller change instead");
-    await f.click("Steer now");
+    f.w.document.querySelector("#send-options").open = true;
+    await f.click("Guide current task");
     let sent = f.calls.filter(c => c.member === "sendMessageV2");
     assert.equal(sent.length, 1);
     assert.equal(sent[0].args[1].delivery, "steer");
     assert.equal(f.w.document.querySelector("#prompt").value, "");
-    assert.match(f.w.document.querySelector("#pending-messages").textContent, /Steering pending/);
+    assert.match(f.w.document.querySelector("#pending-messages").textContent, /Guidance pending/);
     f.type("#prompt", "Then write a summary");
-    await f.click("Queue follow-up");
+    await f.click("Queue");
     sent = f.calls.filter(c => c.member === "sendMessageV2");
     assert.equal(sent.length, 2);
     assert.equal(sent[1].args[1].delivery, "queue");
@@ -1492,8 +1502,31 @@ test("active composer sends steering immediately and queues followups without st
     await wait();
     assert.equal(f.calls.filter(c => c.member === "sendMessageV2").length, 3);
     await f.click("Stop");
-    assert.equal(f.w.document.querySelector("#pending-messages").textContent, "");
-    assert.equal(f.w.document.querySelector("#steer-button").hidden, true);
+    assert.match(f.w.document.querySelector("#pending-messages").textContent, /On hold/);
+    assert.equal(f.w.document.querySelector("#send-options").hidden, true);
+    assert.equal(f.w.document.querySelectorAll(".pending-message").length, 3);
+    await f.click("Remove");
+    assert.equal(f.w.document.querySelectorAll(".pending-message").length, 2);
+    await f.click("Send now");
+    assert.equal(f.w.document.querySelectorAll(".pending-message").length, 1);
+    assert.match(f.w.document.querySelector("#pending-messages").textContent, /On hold/);
+  } finally { f.close(); }
+});
+
+test("queued cards can guide the current task or be removed without stopping", async () => {
+  const f = await fixture();
+  try {
+    f.sessions[0].isRunning = true;
+    await f.click("Existing conversation");
+    f.type("#prompt", "A queued correction");
+    await f.click("Queue");
+    await f.click("Guide task");
+    assert.match(f.w.document.querySelector("#pending-messages").textContent, /Guidance pending/);
+    assert.equal(f.calls.filter(c => c.member === "guidePendingMessage").length, 1);
+    await f.click("Remove");
+    assert.equal(f.w.document.querySelectorAll(".pending-message").length, 0);
+    assert.equal(f.calls.filter(c => c.member === "stop").length, 0);
+    assert.equal(f.w.document.querySelector("#send-button").textContent, "Queue");
   } finally { f.close(); }
 });
 

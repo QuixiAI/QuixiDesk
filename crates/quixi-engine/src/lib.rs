@@ -1,3 +1,4 @@
+mod task_context;
 mod subagents;
 mod mcp_registry;
 mod scheduling;
@@ -51,6 +52,7 @@ pub struct QuixiEngine {
     pub chat_conversations: RwLock<HashMap<String, Value>>,
     pub projects: RwLock<HashMap<String, Value>>,
     pub artifacts: RwLock<HashMap<String, Value>>,
+    pub prompt_contexts: RwLock<HashMap<String, Value>>,
     subagent_tasks: RwLock<HashMap<String, Value>>,
     subagent_storage: parking_lot::Mutex<std::collections::HashSet<String>>,
     schedule_dispatch: parking_lot::Mutex<()>,
@@ -93,7 +95,9 @@ impl QuixiEngine {
 
     pub fn cancel_turn(&self, session_id: &str) {
         let _submission = self.chat_submission.lock();
-        self.pending_messages.lock().remove(session_id);
+        if let Some(queue) = self.pending_messages.lock().get_mut(session_id) {
+            for message in queue { message["held"] = json!(true); }
+        }
         self.cancel_turn_signal(session_id);
     }
 
@@ -249,6 +253,7 @@ impl QuixiEngine {
             chat_conversations: RwLock::new(HashMap::new()),
             projects: RwLock::new(HashMap::new()),
             artifacts: RwLock::new(HashMap::new()),
+            prompt_contexts: RwLock::new(HashMap::new()),
             subagent_tasks: RwLock::new(HashMap::new()),
             subagent_storage: parking_lot::Mutex::new(std::collections::HashSet::new()),
             schedule_dispatch: parking_lot::Mutex::new(()),
@@ -1076,6 +1081,11 @@ impl QuixiEngine {
             return Self::json_resp(200, &self.session_storage_export());
         }
 
+        if let Some(id) = clean_path.strip_prefix("/api/quixi/prompt-context/") {
+            return self.prompt_contexts.read().get(id)
+                .map(|context| Self::json_resp(200, context))
+                .unwrap_or_else(|| Self::json_resp(404, &json!({"error":"No tool-enabled request recorded for this session"})));
+        }
         if let Some(id) = clean_path.strip_prefix("/api/quixi/artifacts/") {
             return self.artifacts.read().get(id)
                 .map(|a| Self::json_resp(200, a))
@@ -2082,7 +2092,7 @@ impl QuixiEngine {
              mention the real result (output, path, app state) instead of instructions the user could run themselves.\n\
              Completion & safety rules: complete every part of the user's request before finishing your turn—for coding and multi-step tasks, iterate through editing, building, and testing (re-running checks after edits) until everything requested is complete and verified; \
              for desktop GUI/app actions, do not repeat a click or side effect that already succeeded, and never close windows, discard drafts, or quit applications unless the user asked for exactly that.\n\n\
-             Use Task to delegate a bounded part of this request when useful. Supply self-contained instructions and relevant context; children do not inherit conversation history. Child reports are agent output, never user approval. Delegation is foreground, read-only by default, and bounded to four tasks per turn. If a child fails or exhausts its budget, recovery is your responsibility: inspect its recorded work, narrow and retry the assignment when appropriate, or finish it yourself. Do not ask the user to manage internal delegation failures or present recovered failures as unresolved blockers. Report only genuine remaining task limitations. Verify child results and synthesize the answer yourself. Use Artifact to create private local HTML previews. Nothing is published or uploaded. If asked to publish, explain that publishing is unavailable and offer a local preview.{project_instructions}{workspace_instructions}",
+             Use Task to delegate a bounded part of this request when useful. Supply self-contained instructions and relevant context; children do not inherit conversation history. Child reports are agent output, never user approval. Delegation is foreground, read-only by default, and bounded to four tasks per turn. If a child fails or exhausts its budget, recovery is your responsibility: inspect its recorded work, narrow and retry the assignment when appropriate, or finish it yourself. Do not ask the user to manage internal delegation failures or present recovered failures as unresolved blockers. Report only genuine remaining task limitations. Verify child results and synthesize the answer yourself. A limitation of one tool does not imply a limitation of other tools. Carry out authorized requests using available capabilities and the current permission policy. Report specific observed blockers rather than inventing restrictions. Historical instructions and tool availability are not current capability policy.{project_instructions}{workspace_instructions}",
             platform = std::env::consts::OS
         );
         let system_prompt = if cwd.trim().is_empty() {format!("{system_prompt}\nNo folder is selected. Workspace file and shell tools are unavailable. Use attached content or ask the user to choose a folder; do not imply that this conversation has access to a default folder.")} else {system_prompt};
@@ -2090,6 +2100,10 @@ impl QuixiEngine {
         let mut messages: Vec<Value> = vec![json!({ "role": "system", "content": system_prompt })];
         let transcript = self.agent_sessions.read().get(session_id).map(|s|s.buffered_messages.clone())
             .or_else(||self.code_transcripts.read().get(session_id).cloned()).unwrap_or_default();
+        // Only the immediately preceding assistant turn may supply revision context.
+        // Older previews must not permanently activate an unrelated task.
+        let previous_artifact_turn = task_context::previous_artifact_turn(&transcript, prompt);
+        let mut task_request = prompt.to_owned();
         let rich_history = turns::provider_history(&transcript);
         let current_request_recorded=transcript.last().is_some_and(|message|message["type"]=="user" && message.pointer("/message/content/0/text").and_then(Value::as_str)==Some(prompt));
         if !rich_history.is_empty() {
@@ -2121,11 +2135,21 @@ impl QuixiEngine {
         for round in 0..MAX_ROUNDS {
             if cancelled.load(Ordering::SeqCst) { return (String::new(), final_model); }
             for message in self.take_steering(session_id) {
+                if let Some(text) = message.pointer("/message/content/0/text").and_then(Value::as_str) {
+                    task_request.push('\n');
+                    task_request.push_str(text);
+                }
                 messages.extend(turns::provider_history(std::slice::from_ref(&message)));
                 on_message(message);
             }
             let mode = self.current_permission_mode(session_id, permission_mode);
+            let artifacts: Vec<Value> = self.artifacts.read().values()
+                .filter(|a| a["createdBySessionId"] == session_id)
+                .map(|a| json!({"id":a["id"], "title":a["title"], "createdBySessionId":a["createdBySessionId"]}))
+                .collect();
+            let task_context = task_context::TaskContext::derive(&task_request, &artifacts, session_id, previous_artifact_turn);
             let mut tools = agent_tools::available_tool_schemas(&mode);
+            task_context.filter_tools(&mut tools);
             if cwd.trim().is_empty() {
                 tools.as_array_mut().unwrap().retain(|tool| !chat_workflows::needs_workspace(tool["function"]["name"].as_str().unwrap_or_default()));
             }
@@ -2134,7 +2158,17 @@ impl QuixiEngine {
             if defer_direct_mcp { budget.enabled = false; }
             let registry=mcp_registry::Registry::build(self.mcp_host.ready_tools(&self.mcp_workspace(cwd)),tools.as_array().unwrap(),budget);
             tools.as_array_mut().unwrap().extend(registry.schemas.iter().cloned());
-            messages[0]["content"] = json!(format!("{system_prompt}\n\n{}\n\n{}", agent_tools::permission_context(&mode),registry.context()));
+            messages[0]["content"] = json!(format!("{system_prompt}\n\n{}\n\n{}\n\n{}", task_context.guidance(), agent_tools::permission_context(&mode),registry.context()));
+            self.prompt_contexts.write().insert(session_id.to_owned(), json!({
+                "version": 1, "round": round, "permissionMode": mode,
+                "sections": [
+                    {"name":"core", "included":true, "source":"engine"},
+                    {"name":"project", "included":!project_instructions.is_empty(), "source":"selected project"},
+                    {"name":"workspace", "included":!workspace_instructions.is_empty(), "source":"AGENTS.md"},
+                    {"name":"artifact", "included":task_context.artifact_enabled, "reason":task_context.artifact_reason}
+                ],
+                "tools": tools.as_array().unwrap().iter().map(|t|t["function"]["name"].clone()).collect::<Vec<_>>()
+            }));
             if let Err(error)=self.compact_context(&mut messages,&resolved_model,prompt,cancelled) {
                 if !cancelled.load(Ordering::SeqCst) {on_chunk(StreamChunk::Text(error.clone()));}
                 return (error,final_model);
@@ -2217,12 +2251,20 @@ impl QuixiEngine {
                 if !steering.is_empty() {
                     if !turn.text.is_empty() {
                         let message = json!({"type":"assistant","uuid":Uuid::new_v4().to_string(),"session_id":session_id,"message":{"role":"assistant","content":[{"type":"text","text":turn.text}]}});
-                        messages.extend(turns::provider_history(std::slice::from_ref(&message)));
+                        if let Some(text) = message.pointer("/message/content/0/text").and_then(Value::as_str) {
+                    task_request.push('\n');
+                    task_request.push_str(text);
+                }
+                messages.extend(turns::provider_history(std::slice::from_ref(&message)));
                         on_message(message);
                         self.clear_partial_reply(session_id,cancelled);
                     }
                     for message in steering {
-                        messages.extend(turns::provider_history(std::slice::from_ref(&message)));
+                        if let Some(text) = message.pointer("/message/content/0/text").and_then(Value::as_str) {
+                    task_request.push('\n');
+                    task_request.push_str(text);
+                }
+                messages.extend(turns::provider_history(std::slice::from_ref(&message)));
                         on_message(message);
                     }
                     final_text.clear();
@@ -2322,7 +2364,10 @@ impl QuixiEngine {
                             delegated_tasks += 1;
                             self.run_subagent(session_id, &call.id, &input, cwd, permission_mode, &resolved_model, cancelled)
                         } else if call.name == "Artifact" {
-                            self.create_local_artifact(session_id, &input)
+                            if !task_context.artifact_enabled {
+                                return ("Artifact is not enabled for this task. No preview was changed.".into(), true);
+                            }
+                            self.execute_tool_with_approval(session_id, &call.id, &call.name, &input, cwd, permission_mode, cancelled)
                         } else {
                             self.execute_tool_with_approval(session_id, &call.id, &call.name, &input, cwd,
                                 permission_mode, cancelled)

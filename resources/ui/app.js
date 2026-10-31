@@ -841,21 +841,22 @@
       },
       { "aria-label": "Tool permission mode" },
     );
-    const send = button(
-      running(s) ? "Stop" : "Send",
-      () => (running(session()) ? stopTask() : sendPrompt()),
-      running(s) ? "danger" : "primary",
-      running(s) ? "stop" : "arrow",
-    );
+    const send = button(running(s) ? "Queue" : "Send", () => sendPrompt(), "primary", "arrow");
     send.id = "send-button";
-    const steer = button("Steer now", () => sendPrompt("steer"), "quiet");
+    const stop = button("Stop", () => stopTask(), "quiet", "stop");
+    stop.id = "stop-button";
+    stop.title = "Stop this response. Pending messages are kept on hold.";
+    stop.hidden = !running(s);
+    const steer = button("Guide current task", () => {
+      document.getElementById("send-options")?.removeAttribute("open");
+      sendPrompt("steer");
+    }, "quiet");
     steer.id = "steer-button";
-    steer.title = "Guide the active task at the next safe boundary; running tools finish first.";
-    steer.hidden = !running(s);
-    const queue = button("Queue follow-up", () => sendPrompt("queue"), "primary");
-    queue.id = "queue-button";
-    queue.title = "Run as a separate turn after the current task completes. Enter queues a follow-up.";
-    queue.hidden = !running(s);
+    steer.title = "Apply at the next safe boundary; running tools finish first.";
+    const options = el("details", {id:"send-options", class:"send-options"},
+      el("summary", {"aria-label":"More send options", title:"More send options"}, "⌄"),
+      el("div", {class:"send-options-menu"}, steer));
+    options.hidden = !running(s);
     const chooseModel = button(
       [
         el("span", {}, state.providers?.activeModel || "Choose model"),
@@ -894,15 +895,14 @@
           mode,
           el("span", { class: "spacer" }),
           el("span", { class: "model-control" }, chooseModel),
-          steer,
-          queue,
+          stop,
           send,
+          options,
         ),
       ),
-      el("div", {id:"pending-messages", role:"status", "aria-live":"polite"},
-        ...(state.pendingMessages.get(s?.sessionId) || []).map(m => el("p", {class:"composer-note"}, `${m.delivery === "steer" ? "Steering pending" : "Queued follow-up"}: ${m.text || "Attachments"}`))),
+      el("div", {id:"pending-messages", "aria-label":"Pending messages"}, ...pendingMessageRows(s)),
       el("p", { class: "composer-note", id:"composer-note" },
-        running(s) ? "Enter to queue · Steer now guides the active task · Stop clears pending messages" : "Enter to send · Shift+Enter for a new line"),
+        running(s) ? "Enter to queue · Shift+Enter for a new line" : "Enter to send · Shift+Enter for a new line"),
     );
   }
   function renderChips() {
@@ -1089,29 +1089,47 @@
     renderTranscript();
     updateSendButton();
   }
+  function pendingMessageRows(s) {
+    return (state.pendingMessages.get(s?.sessionId) || []).map(m => {
+      const act = async (method, control) => {
+        control.disabled = true;
+        try {
+          const result = await rpc(service(s), method, [s.sessionId, m.messageUuid]);
+          if (result?.error) throw new Error(result.error);
+          if (result?.cancelled === false) toast("This message has already been delivered.");
+          await refreshSession(s.sessionId);
+          if (session()?.sessionId === s.sessionId) { renderTranscript(); updateSendButton(); }
+        } catch (error) { toast(error.message, true); }
+        finally { control.disabled = false; }
+      };
+      const remove = button("Remove", () => act("cancelPendingMessage", remove), "quiet");
+      const guide = button(running(s) ? "Guide task" : "Send now", () => act("guidePendingMessage", guide), "quiet");
+      guide.title = running(s) ? "Apply at the next safe boundary; running tools finish first." : "Send this held message; other held messages stay on hold.";
+      return el("div", {class:"pending-message"},
+        el("div", {class:"pending-message-content"},
+          el("span", {class:"pending-message-label"}, m.held ? "On hold" : m.delivery === "steer" ? "Guidance pending" : "Up next"),
+          el("span", {class:"pending-message-text"}, m.text || "Attachments")),
+        ...(m.delivery !== "steer" || m.held || !running(s) ? [guide] : []), remove);
+    });
+  }
   function updateSendButton() {
     const b = document.getElementById("send-button");
     if (!b) return;
     const active = running(session());
-    b.className = active ? "danger" : "primary";
-    b.replaceChildren(
-      icon(active ? "stop" : "arrow"),
-      active ? "Stop" : "Send",
-    );
+    b.className = "primary";
+    b.replaceChildren(icon("arrow"), active ? "Queue" : "Send");
     b.disabled = pendingSubmissions.has(draftKey());
-    for (const id of ["steer-button", "queue-button"]) {
-      const control = document.getElementById(id);
-      if (control) {control.hidden = !active; control.disabled = pendingSubmissions.has(draftKey());}
-    }
+    const stop = document.getElementById("stop-button");
+    if (stop) stop.hidden = !active;
+    const options = document.getElementById("send-options");
+    if (options) { options.hidden = !active; if (!active) options.removeAttribute("open"); }
+    const steer = document.getElementById("steer-button");
+    if (steer) steer.disabled = b.disabled;
     const note = document.getElementById("composer-note");
-    if (note) note.textContent = active ? "Enter to queue · Steer now guides the active task · Stop clears pending messages" : "Enter to send · Shift+Enter for a new line";
-    const pending = document.getElementById("pending-messages");
-    pending?.replaceChildren(...(state.pendingMessages.get(state.id) || []).map(m => el("p", {class:"composer-note"}, `${m.delivery === "steer" ? "Steering pending" : "Queued follow-up"}: ${m.text || "Attachments"}`)));
+    if (note) note.textContent = active ? "Enter to queue · Shift+Enter for a new line" : "Enter to send · Shift+Enter for a new line";
+    document.getElementById("pending-messages")?.replaceChildren(...pendingMessageRows(session()));
     const input = document.getElementById("prompt");
-    if (input)
-      input.placeholder = active
-        ? "Write a follow-up while this task runs…"
-        : "Write your prompt to QuixiDesk";
+    if (input) input.placeholder = active ? "Add a follow-up…" : "Write your prompt to QuixiDesk";
   }
   async function refreshSession(id) {
     let old = state.sessions.find((s) => s.sessionId === id);
@@ -1737,6 +1755,17 @@
       el(
         "div",
         { class: "field-stack" },
+        button("Prompt diagnostics", async () => {
+          try {
+            const response = await fetch(`/api/quixi/prompt-context/${encodeURIComponent(s.sessionId)}`);
+            const context = await response.json();
+            if (!response.ok) throw Error(context.error || "Diagnostics unavailable");
+            dialog("Prompt diagnostics", [
+              el("p", {class:"hint"}, "Latest tool-enabled model request. Instruction text and tool arguments are not stored here."),
+              el("pre", {class:"code-preview"}, JSON.stringify(context, null, 2)),
+            ], {wide:true});
+          } catch (error) { toast(error.message); }
+        }),
         button("Rename", () => {
           d.close();
           formDialog(

@@ -102,7 +102,8 @@ impl QuixiEngine {
         if queue.iter().any(|m|m["messageUuid"]==uuid) {return Ok(json!({"dispatched":true,"duplicate":true,"queued":true,"delivery":delivery,"messageUuid":uuid}));}
         if agent.as_ref().is_some_and(|s|s.is_running) || code.as_ref().is_some_and(|s|s.turn_running) {
             if queue.len() >= 32 {return Err("This conversation already has 32 pending messages.".into());}
-            queue.push_back(json!({"text":text,"content":content,"messageUuid":uuid,"delivery":delivery}));
+            let held = self.turn_cancellations.read().get(session_id).is_some_and(|signal| signal.load(Ordering::SeqCst));
+            queue.push_back(json!({"text":text,"content":content,"messageUuid":uuid,"delivery":delivery,"held":held}));
             return Ok(json!({"dispatched":true,"queued":true,"delivery":delivery,"messageUuid":uuid}));
         }
         drop(pending);
@@ -112,7 +113,51 @@ impl QuixiEngine {
     }
 
     pub fn get_pending_messages(&self, sid: &str) -> Value {
-        json!(self.pending_messages.lock().get(sid).map(|q|q.iter().map(|m|json!({"messageUuid":m["messageUuid"],"text":m["text"],"delivery":m["delivery"]})).collect::<Vec<_>>()).unwrap_or_default())
+        json!(self.pending_messages.lock().get(sid).map(|q|q.iter().map(|m|json!({"messageUuid":m["messageUuid"],"text":m["text"],"delivery":m["delivery"],"held":m["held"].as_bool().unwrap_or(false)})).collect::<Vec<_>>()).unwrap_or_default())
+    }
+
+    /// Remove only a still-pending message. Consumed IDs are harmless no-ops.
+    pub fn cancel_pending_message(&self, sid: &str, uuid: &str) -> Result<Value, String> {
+        let _submission = self.chat_submission.lock();
+        if uuid.trim().is_empty() { return Err("Choose a pending message.".into()); }
+        if !self.agent_sessions.read().contains_key(sid) && !self.code_sessions.read().contains_key(sid) {
+            return Err("This conversation no longer exists.".into());
+        }
+        let mut pending = self.pending_messages.lock();
+        let removed = pending.get_mut(sid).and_then(|queue| {
+            let index = queue.iter().position(|m| m["messageUuid"] == uuid)?;
+            queue.remove(index)
+        }).is_some();
+        Ok(json!({"cancelled":removed,"messageUuid":uuid}))
+    }
+
+    /// Explicitly release one message, never the other held entries.
+    pub fn guide_pending_message(self: &Arc<Self>, sid: &str, uuid: &str) -> Result<Value, String> {
+        let _submission = self.chat_submission.lock();
+        if uuid.trim().is_empty() { return Err("Choose a pending message.".into()); }
+        let agent = self.agent_sessions.read().get(sid).cloned();
+        let code = self.code_sessions.read().get(sid).cloned();
+        if agent.is_none() && code.is_none() { return Err("This conversation no longer exists.".into()); }
+        let running = agent.as_ref().is_some_and(|s| s.is_running) || code.as_ref().is_some_and(|s| s.turn_running);
+        // Stopped workers can still be unwinding; never release a message to them.
+        if running && self.turn_cancellations.read().get(sid).is_some_and(|s| s.load(Ordering::SeqCst)) {
+            return Err("The response is stopping. Try again when it has stopped.".into());
+        }
+        let mut pending = self.pending_messages.lock();
+        let queue = pending.get_mut(sid).ok_or("This message is no longer pending.")?;
+        let index = queue.iter().position(|m| m["messageUuid"] == uuid).ok_or("This message is no longer pending.")?;
+        if running {
+            queue[index]["delivery"] = json!("steer");
+            queue[index]["held"] = json!(false);
+            return Ok(json!({"dispatched":false,"queued":true,"delivery":"steer","messageUuid":uuid}));
+        }
+        let next = queue.remove(index).unwrap();
+        drop(pending);
+        let text = next["text"].as_str().unwrap_or_default();
+        let content = next["content"].as_array().cloned().unwrap_or_default();
+        if agent.is_some() { self.send_agent_message_content(sid,text,Some(uuid),content); }
+        else { self.send_code_message_content(sid,text,Some(uuid),content); }
+        Ok(json!({"dispatched":true,"queued":false,"messageUuid":uuid}))
     }
 
     pub(crate) fn take_steering(&self, sid: &str) -> Vec<Value> {
@@ -120,7 +165,7 @@ impl QuixiEngine {
         let Some(queue) = pending.get_mut(sid) else {return Vec::new();};
         let mut messages = Vec::new();
         queue.retain(|m| {
-            if m["delivery"] != "steer" {return true;}
+            if m["held"] == true || m["delivery"] != "steer" {return true;}
             messages.push(json!({"type":"user","uuid":m["messageUuid"],"session_id":sid,"timestamp":Utc::now().to_rfc3339(),"delivery":"steer","message":{"role":"user","content":m["content"]}}));
             false
         });
@@ -129,7 +174,7 @@ impl QuixiEngine {
 
     // Caller holds chat_submission across completion and dispatch, avoiding an idle race.
     pub(crate) fn start_next_pending(self: &Arc<Self>, sid: &str) {
-        let next = self.pending_messages.lock().get_mut(sid).and_then(|q|q.pop_front());
+        let next = self.pending_messages.lock().get_mut(sid).and_then(|q| { let index = q.iter().position(|m| m["held"] != true)?; q.remove(index) });
         let Some(next) = next else {return;};
         let text = next["text"].as_str().unwrap_or_default();
         let uuid = next["messageUuid"].as_str();
@@ -268,7 +313,17 @@ mod tests {
         assert_eq!(engine.get_pending_messages(&sid)[0]["messageUuid"],"new");
         assert_eq!(engine.get_pending_messages(&sid)[1]["messageUuid"],"second");
         engine.cancel_turn(&sid);
-        assert!(engine.get_pending_messages(&sid).as_array().unwrap().is_empty());
+        assert_eq!(engine.get_pending_messages(&sid)[0]["held"], true);
+        assert!(engine.take_steering(&sid).is_empty());
+        engine.start_next_pending(&sid);
+        assert_eq!(engine.get_pending_messages(&sid).as_array().unwrap().len(), 2);
+        assert_eq!(engine.cancel_pending_message(&sid, "new").unwrap()["cancelled"], true);
+        assert_eq!(engine.cancel_pending_message(&sid, "new").unwrap()["cancelled"], false);
+        assert!(engine.guide_pending_message(&sid, "missing").is_err());
+        // A held message can be explicitly promoted without releasing other messages.
+        engine.turn_cancellations.write().remove(&sid);
+        assert_eq!(engine.guide_pending_message(&sid, "second").unwrap()["delivery"], "steer");
+        assert_eq!(engine.take_steering(&sid)[0]["uuid"], "second");
         assert_eq!(engine.send_chat_message(&sid,&json!({"text":"first","messageUuid":"u1"})).unwrap()["duplicate"],true);
         assert_eq!(engine.agent_sessions.read()[&sid].buffered_messages,original);
         std::thread::sleep(std::time::Duration::from_millis(150));drop(engine);fs::remove_dir_all(root).unwrap();

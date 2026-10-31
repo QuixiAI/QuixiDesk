@@ -127,9 +127,9 @@ fn steering_wire(code: bool) {
     assert_eq!(
         engine.get_pending_messages(&sid),
         json!([
-            {"messageUuid":"followup-id","text":"queued followup","delivery":"queue"},
-            {"messageUuid":"steering-id","text":"steering correction","delivery":"steer"},
-            {"messageUuid":"followup-2","text":"second followup","delivery":"queue"}
+            {"messageUuid":"followup-id","text":"queued followup","delivery":"queue","held":false},
+            {"messageUuid":"steering-id","text":"steering correction","delivery":"steer","held":false},
+            {"messageUuid":"followup-2","text":"second followup","delivery":"queue","held":false}
         ])
     );
     release_tx.send(()).unwrap();
@@ -143,8 +143,8 @@ fn steering_wire(code: bool) {
     assert_eq!(
         engine.get_pending_messages(&sid),
         json!([
-            {"messageUuid":"followup-id","text":"queued followup","delivery":"queue"},
-            {"messageUuid":"followup-2","text":"second followup","delivery":"queue"}
+            {"messageUuid":"followup-id","text":"queued followup","delivery":"queue","held":false},
+            {"messageUuid":"followup-2","text":"second followup","delivery":"queue","held":false}
         ])
     );
     release_tx.send(()).unwrap();

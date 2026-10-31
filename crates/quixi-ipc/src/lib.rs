@@ -647,6 +647,16 @@ impl EipcRouter {
             ("LocalAgentModeSessions" | "LocalSessions", "getPendingMessages") => {
                 self.engine.get_pending_messages(args.first().and_then(Value::as_str).unwrap_or_default())
             }
+            ("LocalAgentModeSessions" | "LocalSessions", "cancelPendingMessage" | "guidePendingMessage") => {
+                let sid = args.first().and_then(Value::as_str).unwrap_or_default();
+                let uuid = args.get(1).and_then(Value::as_str).unwrap_or_default();
+                let result = if member == "cancelPendingMessage" {
+                    self.engine.cancel_pending_message(sid, uuid)
+                } else {
+                    self.engine.guide_pending_message(sid, uuid)
+                };
+                result.unwrap_or_else(|error| json!({"error":error}))
+            }
             ("LocalAgentModeSessions" | "LocalSessions", "sendMessageV2") => {
                 let sid=args.first().and_then(Value::as_str).unwrap_or_default();
                 self.engine.send_chat_message(sid,args.get(1).unwrap_or(&Value::Null)).unwrap_or_else(|error|json!({"error":error}))

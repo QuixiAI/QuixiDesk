@@ -166,7 +166,7 @@ pub fn tool_schemas() -> Value {
             "type":"function",
             "function":{
                 "name":"Artifact",
-                "description":"Create or update a private local HTML artifact and open its preview. For revisions, pass the artifact id from the earlier result; the same title in this conversation also updates the existing preview. Use self-contained HTML with inline CSS; no external resources. Does not publish, upload, or modify project files. Publishing is unavailable.",
+                "description":"Create or update a private local HTML artifact and open its preview. For revisions, pass the artifact id from the earlier result; the same title in this conversation also updates the existing preview. Use self-contained HTML with inline CSS; no external resources. This tool does not upload, deploy, or modify project files.",
                 "parameters":{"type":"object","properties":{
                     "title":{"type":"string"},"html":{"type":"string"},"id":{"type":"string","description":"Existing artifact id in this conversation to update; omit for a new artifact."}
                 },"required":["title","html"],"additionalProperties":false}
@@ -179,7 +179,7 @@ pub fn tool_schemas() -> Value {
 fn action_allowed(name: &str, mode: &str) -> bool {
     matches!(mode, "auto" | "bypassPermissions")
         || (mode == "acceptEdits" && matches!(name, TOOL_WRITE | TOOL_EDIT))
-        || !matches!(name, TOOL_BASH | TOOL_WRITE | TOOL_EDIT | TOOL_WEB_FETCH)
+        || !matches!(name, TOOL_BASH | TOOL_WRITE | TOOL_EDIT | TOOL_WEB_FETCH | "Artifact")
 }
 
 pub fn available_tool_schemas(_mode: &str) -> Value { tool_schemas() }
