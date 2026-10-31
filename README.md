@@ -2,8 +2,6 @@
 
 <img src="resources/quixi-logo.svg" alt="QuixiDesk Logo" width="220" />
 
-# QuixiDesk
-
 **A Native Rust Desktop Workspace for AI — macOS, Windows & Linux**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-14B8A6.svg)](LICENSE)
