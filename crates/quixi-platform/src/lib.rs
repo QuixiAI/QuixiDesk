@@ -33,7 +33,10 @@ impl SafeFs {
         for comp in rel_path.components() {
             match comp {
                 Component::Prefix(_) | Component::RootDir => {
-                    bail!("SafeFs rejected absolute path component in {}", rel_path.display());
+                    bail!(
+                        "SafeFs rejected absolute path component in {}",
+                        rel_path.display()
+                    );
                 }
                 Component::CurDir => continue,
                 Component::ParentDir => {
@@ -362,7 +365,9 @@ impl ComputerUse {
         #[cfg(target_os = "macos")]
         {
             let status = Command::new("/usr/bin/open")
-                .arg(format!("x-apple.systempreferences:com.apple.preference.security?{pane}"))
+                .arg(format!(
+                    "x-apple.systempreferences:com.apple.preference.security?{pane}"
+                ))
                 .status()?;
             if !status.success() {
                 anyhow::bail!("Could not open macOS privacy settings: {status}");
@@ -675,22 +680,14 @@ impl ComputerUse {
                 CGEventPost(0, down);
                 CFRelease(down);
             }
-            let drag = CGEventCreateMouseEvent(
-                std::ptr::null(),
-                6,
-                CGPoint { x: end_x, y: end_y },
-                0,
-            );
+            let drag =
+                CGEventCreateMouseEvent(std::ptr::null(), 6, CGPoint { x: end_x, y: end_y }, 0);
             if !drag.is_null() {
                 CGEventPost(0, drag);
                 CFRelease(drag);
             }
-            let up = CGEventCreateMouseEvent(
-                std::ptr::null(),
-                2,
-                CGPoint { x: end_x, y: end_y },
-                0,
-            );
+            let up =
+                CGEventCreateMouseEvent(std::ptr::null(), 2, CGPoint { x: end_x, y: end_y }, 0);
             if !up.is_null() {
                 CGEventPost(0, up);
                 CFRelease(up);
@@ -705,7 +702,9 @@ impl ComputerUse {
 
     pub fn read_clipboard() -> String {
         #[cfg(target_os = "windows")]
-        if let Ok(text) = windows_clipboard::read() { return text; }
+        if let Ok(text) = windows_clipboard::read() {
+            return text;
+        }
         #[cfg(target_os = "macos")]
         {
             if let Ok(out) = Command::new("/usr/bin/pbpaste").output() {
@@ -729,12 +728,19 @@ impl ComputerUse {
             let mut child = Command::new("/usr/bin/pbcopy")
                 .stdin(Stdio::piped())
                 .spawn()?;
-            let write = child.stdin.take().ok_or_else(|| anyhow::anyhow!("Clipboard input unavailable"))?
+            let write = child
+                .stdin
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("Clipboard input unavailable"))?
                 .write_all(text.as_bytes());
             if let Err(error) = write {
-                let _ = child.kill(); let _ = child.wait(); return Err(error.into());
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error.into());
             }
-            if !child.wait()?.success() { anyhow::bail!("System clipboard rejected the copy"); }
+            if !child.wait()?.success() {
+                anyhow::bail!("System clipboard rejected the copy");
+            }
         }
         if let Ok(mut st) = cu_state().lock() {
             st.clipboard_fallback = text.to_string();
@@ -822,10 +828,7 @@ impl ComputerUse {
             {
                 if out.status.success() {
                     let s = String::from_utf8_lossy(&out.stdout);
-                    return s
-                        .lines()
-                        .filter_map(Self::normalize_posix_path)
-                        .collect();
+                    return s.lines().filter_map(Self::normalize_posix_path).collect();
                 }
             }
             return Vec::new();
@@ -890,10 +893,7 @@ impl ComputerUse {
             {
                 if out.status.success() {
                     let s = String::from_utf8_lossy(&out.stdout);
-                    return s
-                        .lines()
-                        .filter_map(Self::normalize_posix_path)
-                        .collect();
+                    return s.lines().filter_map(Self::normalize_posix_path).collect();
                 }
             }
             return Vec::new();
@@ -1326,7 +1326,11 @@ impl BrowserUse {
   }}, true);
 }})();
 </script>"#,
-            url = url.replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;").replace('>', "&gt;"),
+            url = url
+                .replace('&', "&amp;")
+                .replace('"', "&quot;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;"),
             tid = tid
         );
 
@@ -1512,9 +1516,18 @@ impl BrowserUse {
 
         let is_reload = url_raw.eq_ignore_ascii_case("reload");
         let reload_url = if is_reload {
-            browser_state().lock().unwrap().tabs.get(&target_tab_id).map(|t| t.url.clone())
-        } else { None };
-        if is_reload && reload_url.is_none() { return Self::get_full_state(); }
+            browser_state()
+                .lock()
+                .unwrap()
+                .tabs
+                .get(&target_tab_id)
+                .map(|t| t.url.clone())
+        } else {
+            None
+        };
+        if is_reload && reload_url.is_none() {
+            return Self::get_full_state();
+        }
         let url_raw = reload_url.as_deref().unwrap_or(url_raw);
 
         if url_raw.eq_ignore_ascii_case("back") || url_raw.eq_ignore_ascii_case("forward") {
@@ -1588,27 +1601,36 @@ impl BrowserUse {
         let mut mgr = browser_state().lock().unwrap();
         mgr.pane_open = true;
         mgr.revision += 1;
-        let tab = mgr.tabs.entry(target_tab_id).or_insert_with(|| BrowserTabState {
-            tab_id: target_tab_id,
-            url: normalized_url.clone(),
-            title: title.clone(),
-            history: vec![],
-            history_idx: 0,
-            page_text: String::new(),
-            raw_html: String::new(),
-            elements: vec![],
-            console_messages: vec![],
-            network_requests: vec![],
-            viewport_width: 1280,
-            viewport_height: 800,
-            color_scheme: "dark".to_string(),
-        });
+        let tab = mgr
+            .tabs
+            .entry(target_tab_id)
+            .or_insert_with(|| BrowserTabState {
+                tab_id: target_tab_id,
+                url: normalized_url.clone(),
+                title: title.clone(),
+                history: vec![],
+                history_idx: 0,
+                page_text: String::new(),
+                raw_html: String::new(),
+                elements: vec![],
+                console_messages: vec![],
+                network_requests: vec![],
+                viewport_width: 1280,
+                viewport_height: 800,
+                color_scheme: "dark".to_string(),
+            });
 
         tab.url = normalized_url.clone();
         tab.title = title.clone();
         if !is_reload {
-            tab.history.truncate(if tab.history.is_empty() { 0 } else { tab.history_idx + 1 });
-            if tab.history.last() != Some(&normalized_url) { tab.history.push(normalized_url.clone()); }
+            tab.history.truncate(if tab.history.is_empty() {
+                0
+            } else {
+                tab.history_idx + 1
+            });
+            if tab.history.last() != Some(&normalized_url) {
+                tab.history.push(normalized_url.clone());
+            }
             tab.history_idx = tab.history.len().saturating_sub(1);
         }
         tab.page_text = page_text;
@@ -1641,20 +1663,27 @@ impl BrowserUse {
 
     fn fetch_and_parse_html(url: &str) -> (String, String, String, Vec<BrowserElementRef>, u16) {
         #[cfg(target_os = "windows")]
-        let curl = PathBuf::from(std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into()))
-            .join("System32/curl.exe");
+        let curl =
+            PathBuf::from(std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into()))
+                .join("System32/curl.exe");
         #[cfg(not(target_os = "windows"))]
         let curl = PathBuf::from("/usr/bin/curl");
         let out = Command::new(curl)
             .args([
                 "-sL",
-                "--proto", "=http,https",
-                "--proto-redir", "=http,https",
-                "--write-out", "\nQUIXI_HTTP_STATUS:%{http_code}",
+                "--proto",
+                "=http,https",
+                "--proto-redir",
+                "=http,https",
+                "--write-out",
+                "\nQUIXI_HTTP_STATUS:%{http_code}",
                 "--max-time",
                 "5",
                 "-A",
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) QuixiDesk/3.6556.10",
+                concat!(
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) QuixiDesk/",
+                    env!("CARGO_PKG_VERSION")
+                ),
                 url,
             ])
             .output();
@@ -1663,12 +1692,18 @@ impl BrowserUse {
         let html = match out {
             Ok(o) if o.status.success() && !o.stdout.is_empty() => {
                 let output = String::from_utf8_lossy(&o.stdout);
-                let (body, status) = output.rsplit_once("\nQUIXI_HTTP_STATUS:").unwrap_or((&output, "0"));
+                let (body, status) = output
+                    .rsplit_once("\nQUIXI_HTTP_STATUS:")
+                    .unwrap_or((&output, "0"));
                 status_code = status.trim().parse().unwrap_or(0);
                 body.to_string()
             }
             _ => {
-                let safe_url = url.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;");
+                let safe_url = url
+                    .replace('&', "&amp;")
+                    .replace('<', "&lt;")
+                    .replace('>', "&gt;")
+                    .replace('"', "&quot;");
                 return (
                     "Unable to load page".to_string(),
                     format!("Unable to load {url}. Check the address and connection, then retry."),
@@ -1910,12 +1945,7 @@ impl BrowserUse {
                 el.text.to_lowercase().contains(&q)
                     || el.role.to_lowercase().contains(&q)
                     || el.tag.to_lowercase().contains(&q)
-                    || el
-                        .href
-                        .as_deref()
-                        .unwrap_or("")
-                        .to_lowercase()
-                        .contains(&q)
+                    || el.href.as_deref().unwrap_or("").to_lowercase().contains(&q)
             })
             .take(20)
             .map(|el| {
@@ -2022,11 +2052,27 @@ mod tests {
         let server = std::thread::spawn(move || {
             for _ in 0..6 {
                 let (mut socket, _) = listener.accept().unwrap();
-                let mut buf = [0; 4096]; let n = socket.read(&mut buf).unwrap();
+                let mut buf = [0; 4096];
+                let n = socket.read(&mut buf).unwrap();
                 let request = String::from_utf8_lossy(&buf[..n]);
                 let failure = request.starts_with("GET /error ");
-                let body = if failure { "<title>Service unavailable</title><h1>503 fixture</h1>" } else { "<title>Fixture</title><form action='/next'><input name='q'></form>" };
-                write!(socket,"HTTP/1.1 {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", if failure {"503 Service Unavailable"} else {"200 OK"},body.len(),body).unwrap();
+                let body = if failure {
+                    "<title>Service unavailable</title><h1>503 fixture</h1>"
+                } else {
+                    "<title>Fixture</title><form action='/next'><input name='q'></form>"
+                };
+                write!(
+                    socket,
+                    "HTTP/1.1 {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    if failure {
+                        "503 Service Unavailable"
+                    } else {
+                        "200 OK"
+                    },
+                    body.len(),
+                    body
+                )
+                .unwrap();
             }
         });
         let id = BrowserUse::tabs_create()["tabId"].as_u64().unwrap() as u32;
@@ -2035,20 +2081,26 @@ mod tests {
         BrowserUse::navigate("back", Some(id));
         BrowserUse::navigate("reload", Some(id));
         {
-            let mgr = browser_state().lock().unwrap(); let tab = &mgr.tabs[&id];
-            assert_eq!(tab.url, base); assert_eq!(tab.history_idx, 1);
+            let mgr = browser_state().lock().unwrap();
+            let tab = &mgr.tabs[&id];
+            assert_eq!(tab.url, base);
+            assert_eq!(tab.history_idx, 1);
             assert_eq!(tab.history.len(), 3);
         }
         BrowserUse::navigate(&format!("{base}/error"), Some(id));
         {
-            let mgr = browser_state().lock().unwrap(); let tab = &mgr.tabs[&id];
+            let mgr = browser_state().lock().unwrap();
+            let tab = &mgr.tabs[&id];
             assert_eq!(tab.network_requests.last().unwrap()["status"], 503);
             assert!(!tab.history.iter().any(|u| u.ends_with("/next")));
         }
-        BrowserUse::navigate("reload", Some(id)); server.join().unwrap();
+        BrowserUse::navigate("reload", Some(id));
+        server.join().unwrap();
         BrowserUse::navigate("http://127.0.0.1:1/unreachable", Some(id));
-        let mgr = browser_state().lock().unwrap(); let tab = &mgr.tabs[&id];
-        assert_eq!(tab.title, "Unable to load page"); assert!(tab.elements.is_empty());
+        let mgr = browser_state().lock().unwrap();
+        let tab = &mgr.tabs[&id];
+        assert_eq!(tab.title, "Unable to load page");
+        assert!(tab.elements.is_empty());
         assert_eq!(tab.network_requests.last().unwrap()["status"], 0);
     }
 
@@ -2093,13 +2145,13 @@ mod tests {
     #[test]
     fn test_spawn_disclaimed_computer_use_and_browser_use() {
         #[cfg(target_os = "windows")]
-        let (program, args) = (std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".into()),
-            vec!["/D".into(), "/C".into(), "echo quixi-ok".into()]);
+        let (program, args) = (
+            std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".into()),
+            vec!["/D".into(), "/C".into(), "echo quixi-ok".into()],
+        );
         #[cfg(not(target_os = "windows"))]
         let (program, args) = ("/bin/echo".to_string(), vec!["quixi-ok".into()]);
-        let mut child =
-            SecurityAndSpawn::spawn_disclaimed(&program, &args, None)
-                .unwrap();
+        let mut child = SecurityAndSpawn::spawn_disclaimed(&program, &args, None).unwrap();
         let status = child.wait().unwrap();
         assert!(status.success());
 
