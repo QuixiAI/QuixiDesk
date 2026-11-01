@@ -29,6 +29,11 @@
       "name": "frontend-design",
       "description": "Design original interfaces around the product task, accessibility, and responsive behavior.",
       "tier": "always"
+    },
+    {
+      "name": "browser-driving",
+      "description": "Drive a real installed browser (CDP or WebDriver BiDi) on macOS, Windows or Linux, and verify fetch results before reporting them.",
+      "tier": "always"
     }
   ]
 }
