@@ -197,7 +197,14 @@
       ctx.updateMcpConnections(); enhanceConnections();
     }
 
-    function speechSupported() { return typeof window.SpeechSynthesisUtterance === "function" && typeof window.speechSynthesis?.speak === "function"; }
+    // The webview provides no Web Speech API on Linux, so the engine offers voice over HTTP.
+    // Probe once; until the answer arrives, fall back to what the webview reports.
+    const engineVoice = { tts: false, stt: false, probed: false };
+    Promise.resolve().then(() => api("/api/quixi/voice/status"))
+      .then((s) => { engineVoice.tts = !!s?.tts?.available; engineVoice.stt = !!s?.stt?.available; engineVoice.probed = true; })
+      .catch(() => { engineVoice.probed = true; });
+    const webviewSpeech = () => typeof window.SpeechSynthesisUtterance === "function" && typeof window.speechSynthesis?.speak === "function";
+    function speechSupported() { return engineVoice.tts || webviewSpeech(); }
     function syncSpeechControls() {
       for (const control of speechControls) {
         if (!control.node.isConnected) { speechControls.delete(control); continue; }
@@ -216,6 +223,14 @@
           if (generation !== speechGeneration) return;
           const part = chunks.shift();
           if (!part) { speakingText = null; syncSpeechControls(); return; }
+          if (engineVoice.tts) {
+            // One chunk in flight at a time: the endpoint answers when playback finishes, so
+            // ordering holds and "stop reading" takes effect between chunks.
+            api("/api/quixi/voice/speak", { text: part })
+              .then(() => { if (generation === speechGeneration) next(); })
+              .catch(() => { if (generation === speechGeneration) { stopSpeaking(); toast("Read aloud could not play. Check the voice endpoint and audio output.", true); } });
+            return;
+          }
           const utterance = new window.SpeechSynthesisUtterance(part);
           utterance.onend = next;
           utterance.onerror = (event) => { if (generation !== speechGeneration) return; stopSpeaking(); if (!["canceled", "interrupted"].includes(event.error)) toast("Read aloud could not play. Check your system voice and audio settings.", true); };
@@ -231,7 +246,9 @@
     function dictationControl(textarea) {
       const node = button("Dictate", () => {
         if (activeRecognition) { activeRecognition.stop(); return; }
+        if (engineSttStop) { engineSttStop(); return; }
         const Recognition = recognitionConstructor();
+        if (typeof Recognition !== "function" && engineVoice.stt) { startEngineDictation(textarea, node); return; }
         if (typeof Recognition !== "function") {
           dialog("Use system dictation", [el("p", {}, "This webview does not provide in-app speech recognition. You can still use your operating system’s dictation in the prompt."),
             el("p", {}, "Focus the prompt, then use Dictation from macOS Keyboard settings, Windows voice typing (Win+H), or your Linux desktop’s speech-input tool."),
@@ -271,8 +288,48 @@
       }
       return node;
     }
+    let engineSttStop = null;
+    // Engine-side dictation for webviews without a recogniser (WebKitGTK on Linux). The engine's
+    // speech service accumulates one transcript; poll it and insert only what is new since start.
+    function startEngineDictation(textarea, node) {
+      if (!textarea.isConnected || engineSttStop) return;
+      node.textContent = "Stop dictation";
+      node.setAttribute("aria-pressed", "true");
+      let seen = "";
+      let baselined = false;
+      let stopped = false;
+      const cleanup = () => { stopped = true; engineSttStop = null; node.textContent = "Dictate"; node.setAttribute("aria-pressed", "false"); };
+      engineSttStop = cleanup;
+      const insert = (spoken) => {
+        const at = textarea.selectionStart ?? textarea.value.length, end = textarea.selectionEnd ?? at;
+        const prefix = at && !/\s/.test(textarea.value[at - 1]) ? " " : "";
+        const suffix = end < textarea.value.length && !/\s/.test(textarea.value[end]) ? " " : "";
+        textarea.setRangeText(prefix + spoken + suffix, at, end, "end");
+        textarea.dispatchEvent(new Event("input", { bubbles: true }));
+      };
+      // The first successful read is the baseline: anything already transcribed predates this prompt.
+      const tick = async () => {
+        if (stopped) return;
+        if (!textarea.isConnected) { cleanup(); return; }
+        try {
+          const result = await api("/api/quixi/voice/transcript");
+          const full = typeof result?.transcript === "string" ? result.transcript : "";
+          if (stopped) return;
+          if (!baselined) { seen = full; baselined = true; }
+          else if (full.length > seen.length && full.startsWith(seen)) {
+            const fresh = full.slice(seen.length).trim();
+            seen = full;
+            if (fresh) insert(fresh);
+          } else if (full !== seen) { seen = full; }
+        } catch { /* service down; keep polling while the control stays active */ }
+        if (!stopped) setTimeout(tick, 700);
+      };
+      tick();
+    }
+
     function stopAudio() {
       stopSpeaking();
+      if (engineSttStop) engineSttStop();
       const recognition = activeRecognition; activeRecognition = null;
       if (recognition) try { recognition.abort(); } catch { /* Already ended. */ }
     }
@@ -280,8 +337,8 @@
     async function renderDesktopStatus(host) {
       const status = el("p", { role: "status", class: "hint" }, "Reading application status…");
       host.append(el("section", { class: "desktop-status" }, el("h2", {}, "Application & audio"), status,
-        el("p", {}, speechSupported() ? "Read aloud is available on assistant messages through the system webview’s speech service." : "Read aloud is not available in this webview. Your system’s accessibility reader may still be available."),
-        el("p", {}, typeof recognitionConstructor() === "function" ? "Dictation is available from the composer. The speech service may require network access and microphone permission." : "Use system dictation in the prompt. This webview does not expose in-app speech recognition."),
+        el("p", {}, engineVoice.tts ? "Read aloud uses the configured voice backend." : speechSupported() ? "Read aloud is available on assistant messages through the system webview’s speech service." : "Read aloud is not available: no voice backend is configured and this webview has no speech service."),
+        el("p", {}, typeof recognitionConstructor() === "function" ? "Dictation is available from the composer. The speech service may require network access and microphone permission." : engineVoice.stt ? "Dictation uses the configured speech-to-text backend; audio does not leave this machine." : "Dictation is not available: no speech-to-text backend is configured and this webview has no recogniser."),
         el("p", { class: "hint" }, "Keyboard shortcuts work while QuixiDesk is focused: ⌘/Ctrl+N new task · ⌘/Ctrl+K search · ⌘/Ctrl+, settings."),
         button("View available releases", () => ctx.openExternal("https://github.com/QuixiAI/QuixiDesk/releases"), "quiet")));
       const results = await Promise.allSettled([rpc("AboutWindow", "getBuildProps"), api("/api/quixi/storage/status")]);

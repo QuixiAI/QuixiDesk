@@ -165,6 +165,27 @@ pub fn tool_schemas() -> Value {
         {
             "type":"function",
             "function":{
+                "name":"ListSkills",
+                "description":"Search the installed skill library. Returns 50 results per page with a page counter, ranked so an id match beats a passing mention in a description. Call this when a request might match a stored procedure: search with a short query (pdf, browser, kanban), page through if needed, then LoadSkill with an exact id. Skills are named area/name.",
+                "parameters":{"type":"object","properties":{
+                    "query":{"type":"string","description":"Optional search terms, matched against skill id and description. One broad word works best, e.g. pdf, browser, deploy."},
+                    "page":{"type":"integer","description":"Page of results, 1-based. 50 results per page."}
+                },"required":[],"additionalProperties":false}
+            }
+        },
+        {
+            "type":"function",
+            "function":{
+                "name":"LoadSkill",
+                "description":"Read one skill's full instructions before starting work that matches it. The system prompt lists the skills available on this machine with a one-line description each; call this with the exact skillId to load the body, then follow it. Never claim to have followed a skill you have not loaded.",
+                "parameters":{"type":"object","properties":{
+                    "skillId":{"type":"string","description":"Exact skill id as listed in the system prompt, e.g. pdf or frontend-design."}
+                },"required":["skillId"],"additionalProperties":false}
+            }
+        },
+        {
+            "type":"function",
+            "function":{
                 "name":"Artifact",
                 "description":"Create or update a private local HTML artifact and open its preview. For revisions, pass the artifact id from the earlier result; the same title in this conversation also updates the existing preview. Use self-contained HTML with inline CSS; no external resources. This tool does not upload, deploy, or modify project files.",
                 "parameters":{"type":"object","properties":{
@@ -367,10 +388,15 @@ pub fn validate_input(name: &str, input: &Value) -> Result<(), String> {
         .ok_or_else(|| format!("Unknown tool `{name}`."))?;
     let object = input.as_object().ok_or("Tool arguments must be an object.")?;
     let params = &schema["function"]["parameters"];
-    for key in params["required"].as_array().unwrap() {
-        let key = key.as_str().unwrap();
-        if !object.contains_key(key) {
-            return Err(format!("Missing required argument `{key}`."));
+    // A tool may legitimately declare no required arguments (ListSkills takes an optional filter),
+    // so a missing `required` is not an error - and unwrapping schema introspection here turned an
+    // optional-argument tool into a panic instead of a tool call.
+    if let Some(required) = params["required"].as_array() {
+        for key in required {
+            let Some(key) = key.as_str() else { continue };
+            if !object.contains_key(key) {
+                return Err(format!("Missing required argument `{key}`."));
+            }
         }
     }
     for (key, value) in object {

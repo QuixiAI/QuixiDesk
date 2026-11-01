@@ -4,6 +4,7 @@ mod mcp_registry;
 mod scheduling;
 mod context;
 mod credentials;
+pub mod voice;
 mod tool_media;
 pub mod agent_tools;
 pub mod providers;
@@ -484,6 +485,95 @@ impl QuixiEngine {
     // =========================================================================
     // Bundled & User Skills Subsystem
     // =========================================================================
+    /// Directories that may hold skills, most specific first.
+    ///
+    /// Anything that speaks the SKILL.md convention can be mounted here: a skills tree, a shared
+    /// directory, or an extra checkout named in QUIXI_SKILL_ROOTS. The environment roots are used
+    /// together with the two above, so a shared checkout needs no copying and no symlinks.
+    /// Nothing outside the paths named here is searched.
+    fn skill_roots(&self) -> Vec<PathBuf> {
+        let mut roots = vec![
+            // the user's own skills win over anything shipped
+            self.data_dir.join("skills"),
+            self.resources_dir.join("bundled-skills-extracted"),
+        ];
+        // Roots named in the environment come after the two defaults, so an explicit checkout
+        // cannot shadow the user's own skills and cannot make the result depend on the machine.
+        // Platform list separator (`:` on Unix, `;` on Windows): splitting on `:` cut Windows
+        // paths at the drive letter, turning `C:\skills` into `C` and `\skills`.
+        if let Some(extra) = std::env::var_os("QUIXI_SKILL_ROOTS") {
+            roots.extend(std::env::split_paths(&extra).filter(|p| !p.as_os_str().is_empty()));
+        }
+        roots
+    }
+
+    /// Find every SKILL.md under a root.
+    ///
+    /// A directory containing SKILL.md is treated as a complete skill and not descended into, so
+    /// references/ and scripts/ beside it are support files rather than skills of their own.
+    fn collect_skill_files(root: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+        if depth == 0 {
+            return;
+        }
+        let Ok(entries) = fs::read_dir(root) else { return };
+        for entry in entries.flatten() {
+            let dir = entry.path();
+            if !dir.is_dir() {
+                continue;
+            }
+            // Skip dot-directories and build output: .archive holds dated backups of superseded
+            // skills, and listing those would offer the model stale procedures alongside the live
+            // ones under the same name.
+            let hidden = dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.starts_with('.') || n == "target" || n == "node_modules")
+                .unwrap_or(false);
+            if hidden {
+                continue;
+            }
+            if dir.join("SKILL.md").is_file() {
+                out.push(dir.join("SKILL.md"));
+            } else {
+                Self::collect_skill_files(&dir, depth - 1, out);
+            }
+        }
+    }
+
+    /// Pull a one-line description out of a SKILL.md.
+    ///
+    /// Prefers `description:` in the YAML frontmatter, then the first prose line that is not the
+    /// frontmatter fence, a heading, or blank.
+    fn skill_description(content: &str) -> String {
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if let Some(rest) = trimmed.strip_prefix("description:") {
+                let val = rest.trim().trim_matches('"').trim_matches('\'').trim();
+                if !val.is_empty() && val != "|" && val != ">" {
+                    return val.chars().take(200).collect();
+                }
+            }
+        }
+        let mut in_frontmatter = false;
+        for (i, line) in content.lines().enumerate() {
+            let t = line.trim();
+            if i == 0 && t == "---" {
+                in_frontmatter = true;
+                continue;
+            }
+            if in_frontmatter {
+                if t == "---" {
+                    in_frontmatter = false;
+                }
+                continue;
+            }
+            if !t.is_empty() && !t.starts_with('#') && !t.starts_with("---") {
+                return t.chars().take(200).collect();
+            }
+        }
+        "Custom QuixiDesk skill".to_string()
+    }
+
     pub fn list_local_skills(&self) -> Vec<Value> {
         let mut skills = Vec::new();
         let now_iso = Utc::now().to_rfc3339();
@@ -511,69 +601,277 @@ impl QuixiEngine {
             }
         }
 
-        // 2. Load user skills from ~/.quixi/skills/<skillId>/
-        let user_skills_dir = self.data_dir.join("skills");
-        if let Ok(entries) = fs::read_dir(&user_skills_dir) {
-            for entry in entries.flatten() {
-                if entry.path().is_dir() {
-                    let skill_id = entry.file_name().to_string_lossy().to_string();
-                    if skills
-                        .iter()
-                        .any(|s| s.get("skillId").and_then(|v| v.as_str()) == Some(&skill_id))
-                    {
-                        continue;
-                    }
-                    let md_path = entry.path().join("SKILL.md");
-                    let desc = fs::read_to_string(&md_path)
-                        .ok()
-                        .and_then(|c| {
-                            // First look for `description:` inside YAML frontmatter
-                            for line in c.lines() {
-                                let trimmed = line.trim();
-                                if let Some(rest) = trimmed.strip_prefix("description:") {
-                                    let val = rest.trim().trim_matches('"').trim_matches('\'').trim();
-                                    if !val.is_empty() && val != "|" && val != ">" {
-                                        return Some(val.to_string());
-                                    }
-                                }
-                            }
-                            // Otherwise skip YAML frontmatter (`--- ... ---`) and pick the first prose line
-                            let mut lines = c.lines();
-                            let mut in_frontmatter = false;
-                            if let Some(first) = lines.next() {
-                                if first.trim() == "---" {
-                                    in_frontmatter = true;
-                                } else if !first.trim().is_empty() && !first.trim().starts_with('#') {
-                                    return Some(first.trim().to_string());
-                                }
-                            }
-                            for line in lines {
-                                let t = line.trim();
-                                if in_frontmatter {
-                                    if t == "---" {
-                                        in_frontmatter = false;
-                                    }
-                                    continue;
-                                }
-                                if !t.is_empty() && !t.starts_with('#') && !t.starts_with("---") {
-                                    return Some(t.to_string());
-                                }
-                            }
-                            None
-                        })
-                        .unwrap_or_else(|| "Custom QuixiDesk skill".to_string());
-                    skills.push(json!({
-                        "skillId": skill_id,
-                        "name": skill_id,
-                        "displayName": skill_id,
-                        "description": desc,
-                        "updatedAt": now_iso,
-                        "enabled": true,
-                    }));
+        // 2. Every skill root: the user's own directory plus any configured extra roots.
+        //
+        // A categorised tree keeps skills one level deeper (skills/<category>/<name>/SKILL.md) and
+        // often carries references/ and scripts/ beside the SKILL.md. Walking for SKILL.md instead
+        // of assuming a flat layout lets one loader serve both trees, and keeping the category in
+        // the id stops two skills with the same name from shadowing each other.
+        for root in self.skill_roots() {
+            let mut files = Vec::new();
+            Self::collect_skill_files(&root, 4, &mut files);
+            for md_path in files {
+                let Some(dir) = md_path.parent() else { continue };
+                let skill_id = dir
+                    .strip_prefix(&root)
+                    .map(|r| r.to_string_lossy().replace('\\', "/"))
+                    .unwrap_or_default();
+                if skill_id.is_empty() {
+                    continue;
                 }
+                if skills
+                    .iter()
+                    .any(|s| s.get("skillId").and_then(|v| v.as_str()) == Some(&skill_id))
+                {
+                    continue;
+                }
+                let desc = fs::read_to_string(&md_path)
+                    .map(|c| Self::skill_description(&c))
+                    .unwrap_or_else(|_| "Custom QuixiDesk skill".to_string());
+                skills.push(json!({
+                    "skillId": skill_id,
+                    "name": skill_id,
+                    "displayName": skill_id,
+                    "description": desc,
+                    "path": dir.display().to_string(),
+                    "updatedAt": now_iso,
+                    "enabled": true,
+                }));
             }
         }
         skills
+    }
+
+    /// Render the skills index into the system prompt.
+    ///
+    /// Skills already existed and were manageable, but nothing ever told the model they were
+    /// there — `/skills` served the UI only, so a skill was invisible unless the user pasted it
+    /// in. Listing name and description (never the bodies) lets the model decide when to pull one
+    /// in, and keeps the prompt flat no matter how many skills accumulate.
+    pub fn skills_index_block(&self) -> String {
+        let (total, areas) = self.skill_ids_by_area();
+        if total == 0 {
+            return String::new();
+        }
+        // The full index is 26,000+ characters, so the prompt carries only its shape: how many,
+        // which areas, and how to ask for the rest.
+        let listing = areas
+            .iter()
+            .map(|(a, n)| format!("{a} ({n})"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "\n\nSkills: {total} installed across {} areas — {listing}. Call ListSkills for names and \
+             descriptions, then LoadSkill with an exact id before starting work that matches one. \
+             Do not claim to have followed a skill you have not loaded.\n",
+            areas.len()
+        )
+    }
+
+    /// Skill ids per root, without opening a single SKILL.md.
+    ///
+    /// The system prompt only needs a count and an area breakdown, but it is rebuilt on every
+    /// turn. Parsing 314 files to render it measured at 50 ms per turn; walking the tree for names
+    /// alone is the same information for a fraction of the cost.
+    fn skill_ids_by_area(&self) -> (usize, std::collections::BTreeMap<String, usize>) {
+        let mut total = 0usize;
+        let mut areas: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for root in self.skill_roots() {
+            let mut files = Vec::new();
+            Self::collect_skill_files(&root, 4, &mut files);
+            for md_path in files {
+                let Some(dir) = md_path.parent() else { continue };
+                let id = dir
+                    .strip_prefix(&root)
+                    .map(|r| r.to_string_lossy().replace('\\', "/"))
+                    .unwrap_or_default();
+                if id.is_empty() || !seen.insert(id.clone()) {
+                    continue;
+                }
+                total += 1;
+                let area = match id.split_once('/') {
+                    Some((head, _)) => head,
+                    None => "general",
+                };
+                *areas.entry(area.to_string()).or_insert(0) += 1;
+            }
+        }
+        (total, areas)
+    }
+
+    /// The ListSkills tool: a paginated, searchable index over every installed skill.
+    ///
+    /// A library of a few hundred skills is a database, not an answer, so this behaves like a
+    /// search results page: 50 per page, a page counter, and a ranked filter. Dumping the whole
+    /// list in one tool result overflowed the model's window and killed the turn; paging keeps
+    /// every call cheap no matter how large the library grows.
+    pub fn list_skills_tool(&self, input: &Value) -> (String, bool) {
+        const PAGE_SIZE: usize = 50;
+
+        let query = input
+            .get("query")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_lowercase();
+        let page = input
+            .get("page")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(1)
+            .max(1) as usize;
+
+        let all: Vec<(String, String)> = self
+            .list_local_skills()
+            .iter()
+            .filter_map(|s| {
+                let id = s.get("skillId").and_then(|v| v.as_str())?;
+                let desc = s.get("description").and_then(|v| v.as_str()).unwrap_or("");
+                Some((id.to_string(), desc.to_string()))
+            })
+            .collect();
+
+        if all.is_empty() {
+            return ("No skills are installed.".to_string(), true);
+        }
+
+        // Rank hits the way a results page would: an id match beats a description match, and a
+        // whole-word id match beats a substring, so searching "pdf" surfaces the pdf skill first
+        // rather than everything that mentions PDFs in passing.
+        let mut hits: Vec<(u8, &String, &String)> = Vec::new();
+        for (id, desc) in all.iter() {
+            if query.is_empty() {
+                hits.push((0, id, desc));
+                continue;
+            }
+            let id_l = id.to_lowercase();
+            let desc_l = desc.to_lowercase();
+            let rank = if id_l == query {
+                0
+            } else if id_l.rsplit('/').next() == Some(query.as_str()) {
+                0
+            } else if id_l.contains(&query) {
+                1
+            } else if id_l
+                .split(|c: char| !c.is_alphanumeric())
+                .any(|tok| tok == query)
+            {
+                2
+            } else if desc_l.contains(&query) {
+                3
+            } else {
+                continue;
+            };
+            hits.push((rank, id, desc));
+        }
+        hits.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(b.1)));
+
+        if hits.is_empty() {
+            return (
+                format!(
+                    "No skill matches '{query}'. {} skills are installed - try a broader word.",
+                    all.len()
+                ),
+                true,
+            );
+        }
+
+        let total_pages = hits.len().div_ceil(PAGE_SIZE);
+        let page = page.min(total_pages);
+        let first = (page - 1) * PAGE_SIZE;
+        let last = (first + PAGE_SIZE).min(hits.len());
+
+        let mut out = if query.is_empty() {
+            format!("Skills - page {page} of {total_pages} ({} installed)\n", hits.len())
+        } else {
+            format!(
+                "Skills matching '{query}' - page {page} of {total_pages} ({} of {} installed)\n",
+                hits.len(),
+                all.len()
+            )
+        };
+        for (_, id, desc) in &hits[first..last] {
+            out.push_str(&format!("{id}: {desc}\n"));
+        }
+        if page < total_pages {
+            out.push_str(&format!(
+                "\nNext: page {} of {}. Call ListSkills with page {} to continue, or add a query to search.",
+                page + 1,
+                total_pages,
+                page + 1
+            ));
+        } else {
+            out.push_str("\nEnd of results. Use LoadSkill with an exact id to read one.");
+        }
+        (out, false)
+    }
+
+    /// Read one skill's SKILL.md so the model can follow it.
+    pub fn load_skill(&self, input: &Value) -> (String, bool) {
+        let id = input
+            .get("skillId")
+            .or_else(|| input.get("skill_id"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+
+        // The id becomes a path component, so it is validated as one rather than trusted.
+        // The id is a relative path, so validate it as one: a category prefix is allowed,
+        // traversal and absolute paths are not.
+        let safe = !id.is_empty()
+            && !id.starts_with('/')
+            && !id.starts_with('.')
+            && !id.contains("..")
+            && !id.contains('\\')
+            // Alphanumeric rather than ASCII-alphanumeric: a skill directory may legitimately be
+            // named in another script, and rejecting it here listed the skill but made it
+            // impossible to open. Separators stay restricted to '/', so traversal is still shut.
+            && id
+                .chars()
+                .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | '/'));
+        if !safe {
+            return (
+                "LoadSkill needs a skillId made of letters, digits, dash, underscore or dot.".into(),
+                true,
+            );
+        }
+
+        // User skills take precedence over bundled ones, so a user can override a shipped skill.
+        for root in self.skill_roots() {
+            let path = root.join(id).join("SKILL.md");
+            if let Ok(body) = std::fs::read_to_string(&path) {
+                // The body links its support files relatively, so hand the model the absolute
+                // directory and let its own file tools open references/ and scripts/ from there.
+                let dir = path
+                    .parent()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default();
+                return (
+                    format!(
+                        "Skill directory: {dir}\n\n{}",
+                        body.chars().take(60_000).collect::<String>()
+                    ),
+                    false,
+                );
+            }
+        }
+
+        let names: Vec<String> = self
+            .list_local_skills()
+            .iter()
+            .filter_map(|s| s.get("skillId").and_then(|v| v.as_str()).map(str::to_string))
+            .collect();
+        (
+            format!(
+                "No skill named '{id}'. Available skills: {}",
+                if names.is_empty() {
+                    "none".to_string()
+                } else {
+                    names.join(", ")
+                }
+            ),
+            true,
+        )
     }
 
     pub fn get_local_skill_files(&self, skill_id: &str) -> Vec<Value> {
@@ -1077,6 +1375,33 @@ impl QuixiEngine {
         if clean_path == "/api/quixi/storage/retry" && method == "POST" {
             return Self::json_resp(200, &self.retry_session_saves());
         }
+        // ---- voice: the webview has no Web Speech API on Linux, so the UI calls these instead
+        if clean_path == "/api/quixi/voice/status" {
+            let cfg = crate::voice::VoiceConfig::load(&self.data_dir);
+            return Self::json_resp(200, &crate::voice::status(&cfg));
+        }
+        if clean_path == "/api/quixi/voice/transcript" {
+            let cfg = crate::voice::VoiceConfig::load(&self.data_dir);
+            return match crate::voice::transcript(&cfg) {
+                Ok(text) => Self::json_resp(200, &json!({"transcript": text})),
+                Err(e) => Self::json_resp(503, &json!({"error": e})),
+            };
+        }
+        if clean_path == "/api/quixi/voice/speak" && method == "POST" {
+            let text = body_json.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if text.trim().is_empty() {
+                return Self::json_resp(400, &json!({"error": "nothing to say"}));
+            }
+            // Deliberately synchronous: the caller awaits this per chunk, so playback stays in
+            // order and "stop reading" can take effect between chunks. Answering immediately
+            // made every chunk overlap.
+            let cfg = crate::voice::VoiceConfig::load(&self.data_dir);
+            return match crate::voice::speak(&cfg, &text, 250) {
+                Ok(()) => Self::json_resp(200, &json!({"ok": true})),
+                Err(e) => Self::json_resp(503, &json!({"error": e})),
+            };
+        }
+
         if clean_path == "/api/quixi/storage/export" {
             return Self::json_resp(200, &self.session_storage_export());
         }
@@ -2158,14 +2483,16 @@ impl QuixiEngine {
             if defer_direct_mcp { budget.enabled = false; }
             let registry=mcp_registry::Registry::build(self.mcp_host.ready_tools(&self.mcp_workspace(cwd)),tools.as_array().unwrap(),budget);
             tools.as_array_mut().unwrap().extend(registry.schemas.iter().cloned());
-            messages[0]["content"] = json!(format!("{system_prompt}\n\n{}\n\n{}\n\n{}", task_context.guidance(), agent_tools::permission_context(&mode),registry.context()));
+            let skills_block = self.skills_index_block();
+            messages[0]["content"] = json!(format!("{system_prompt}\n\n{}\n\n{}\n\n{}{}", task_context.guidance(), agent_tools::permission_context(&mode),registry.context(),skills_block));
             self.prompt_contexts.write().insert(session_id.to_owned(), json!({
                 "version": 1, "round": round, "permissionMode": mode,
                 "sections": [
                     {"name":"core", "included":true, "source":"engine"},
                     {"name":"project", "included":!project_instructions.is_empty(), "source":"selected project"},
                     {"name":"workspace", "included":!workspace_instructions.is_empty(), "source":"AGENTS.md"},
-                    {"name":"artifact", "included":task_context.artifact_enabled, "reason":task_context.artifact_reason}
+                    {"name":"artifact", "included":task_context.artifact_enabled, "reason":task_context.artifact_reason},
+                    {"name":"skills", "included":!skills_block.is_empty(), "source":"skill library"}
                 ],
                 "tools": tools.as_array().unwrap().iter().map(|t|t["function"]["name"].clone()).collect::<Vec<_>>()
             }));
@@ -2368,6 +2695,10 @@ impl QuixiEngine {
                                 return ("Artifact is not enabled for this task. No preview was changed.".into(), true);
                             }
                             self.execute_tool_with_approval(session_id, &call.id, &call.name, &input, cwd, permission_mode, cancelled)
+                        } else if call.name == "LoadSkill" {
+                            self.load_skill(&input)
+                        } else if call.name == "ListSkills" {
+                            self.list_skills_tool(&input)
                         } else {
                             self.execute_tool_with_approval(session_id, &call.id, &call.name, &input, cwd,
                                 permission_mode, cancelled)

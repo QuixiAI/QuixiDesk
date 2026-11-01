@@ -13,3 +13,8 @@ base64.workspace = true
 tracing.workspace = true
 dirs.workspace = true
 quixi-proto.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+x11rb.workspace = true
+zbus.workspace = true
+png.workspace = true

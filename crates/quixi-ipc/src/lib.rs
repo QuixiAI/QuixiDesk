@@ -274,22 +274,51 @@ impl EipcRouter {
                 "blockedBy": "",
                 "manualCommand": "ln -sf /Applications/QuixiDesk.app/Contents/MacOS/quixi-app /usr/local/bin/quixi"
             }),
-            ("DesktopInfo", "getDefaultBrowserName") => json!("Safari"),
-            ("DesktopInfo", "getSystemInfo") => json!({
-                "app_version": env!("CARGO_PKG_VERSION"),
-                "os_version": "15.0",
-                "os_pretty_name": "macOS Sequoia",
-                "cpu_model": "Apple Silicon",
-                "platform": std::env::consts::OS,
-                "arch": std::env::consts::ARCH,
-                "total_memory": 17179869184u64,
-                "can_elevate_to_admin": true,
-                "is_msix": false,
-                "installer_variant": "dmg"
-            }),
+            ("DesktopInfo", "getDefaultBrowserName") => {
+                #[cfg(target_os = "linux")]
+                {
+                    crate::linux_default_browser()
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    json!("Safari")
+                }
+            }
+            ("DesktopInfo", "getSystemInfo") => {
+                #[cfg(target_os = "linux")]
+                {
+                    crate::linux_system_info()
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    json!({
+                        "app_version": env!("CARGO_PKG_VERSION"),
+                        "os_version": "15.0",
+                        "os_pretty_name": "macOS Sequoia",
+                        "cpu_model": "Apple Silicon",
+                        "platform": std::env::consts::OS,
+                        "arch": std::env::consts::ARCH,
+                        "total_memory": 17179869184u64,
+                        "can_elevate_to_admin": true,
+                        "is_msix": false,
+                        "installer_variant": "dmg"
+                    })
+                }
+            }
             ("Startup", "isMenuBarEnabled") | ("Startup", "isStartupOnLoginEnabled") => json!(true),
             ("GlobalShortcut", "getGlobalShortcut") => json!("Alt+Space"),
             ("WakeScheduler", "getStatus") => json!({ "enabled": false, "nextWakeAt": null }),
+            ("System", "getPlatformCapabilities") => {
+                #[cfg(target_os = "linux")]
+                {
+                    serde_json::to_value(quixi_platform::linux::capabilities())
+                        .unwrap_or_else(|_| json!({"error":"capability probe failed"}))
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    json!({"session_type": std::env::consts::OS, "notes": ["Capability probe is Linux-only."]})
+                }
+            }
             ("MCP", "getMcpServersConfig") => match self.engine.mcp_host.read_config_value_checked() {
                 Ok(cfg) => cfg.get("mcpServers").cloned().unwrap_or_else(|| json!({})),
                 Err(error) => json!({"error":format!("{error:#}")}),
@@ -3244,5 +3273,101 @@ mod session_control_regression_tests {
         assert!(events.iter().any(|event| event["type"] == "close" && event["code"] == 0));
         drop(events);
         call("delete",vec![json!(sid)]);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_os_release() -> (String, String) {
+    let text = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
+    let mut pretty = String::from("Linux");
+    let mut version = String::new();
+    for line in text.lines() {
+        if let Some(v) = line.strip_prefix("PRETTY_NAME=") {
+            pretty = v.trim_matches('"').to_string();
+        } else if let Some(v) = line.strip_prefix("VERSION_ID=") {
+            version = v.trim_matches('"').to_string();
+        }
+    }
+    (pretty, version)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_system_info() -> serde_json::Value {
+    let (pretty, version) = linux_os_release();
+    let cpu = std::fs::read_to_string("/proc/cpuinfo")
+        .ok()
+        .and_then(|t| {
+            t.lines()
+                .find(|l| l.starts_with("model name"))
+                .and_then(|l| l.split(':').nth(1))
+                .map(|s| s.trim().to_string())
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+    let total_memory = std::fs::read_to_string("/proc/meminfo")
+        .ok()
+        .and_then(|t| {
+            t.lines()
+                .find(|l| l.starts_with("MemTotal:"))
+                .and_then(|l| l.split_whitespace().nth(1))
+                .and_then(|n| n.parse::<u64>().ok())
+                .map(|kb| kb * 1024)
+        })
+        .unwrap_or(0);
+    serde_json::json!({
+        "app_version": env!("CARGO_PKG_VERSION"),
+        "os_version": version,
+        "os_pretty_name": pretty,
+        "cpu_model": cpu,
+        "platform": "linux",
+        "arch": std::env::consts::ARCH,
+        "total_memory": total_memory,
+        "can_elevate_to_admin": std::path::Path::new("/usr/bin/sudo").exists(),
+        "is_msix": false,
+        "installer_variant": "tar"
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn linux_default_browser() -> serde_json::Value {
+    let out = std::process::Command::new("xdg-settings")
+        .args(["get", "default-web-browser"])
+        .output();
+    if let Ok(out) = out {
+        if out.status.success() {
+            let raw = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !raw.is_empty() {
+                let name = raw.trim_end_matches(".desktop").to_string();
+                return serde_json::json!(name);
+            }
+        }
+    }
+    serde_json::json!("unknown")
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod linux_info_tests {
+    use super::*;
+
+    #[test]
+    fn linux_system_info_reports_real_host_values() {
+        let info = linux_system_info();
+        assert_eq!(info["platform"], "linux");
+        assert_eq!(info["installer_variant"], "tar");
+        let pretty = info["os_pretty_name"].as_str().unwrap_or_default();
+        assert!(!pretty.is_empty(), "os_pretty_name must not be empty");
+        assert!(!pretty.contains("macOS"), "must not report macOS: {pretty}");
+        let cpu = info["cpu_model"].as_str().unwrap_or_default();
+        assert!(!cpu.is_empty() && cpu != "unknown", "cpu_model must resolve: {cpu}");
+        let mem = info["total_memory"].as_u64().unwrap_or(0);
+        assert!(mem > 1_000_000_000, "total_memory must be real bytes, got {mem}");
+        assert_eq!(info["is_msix"], false);
+    }
+
+    #[test]
+    fn default_browser_is_not_hardcoded_safari() {
+        let value = linux_default_browser();
+        let name = value.as_str().unwrap_or_default();
+        assert!(!name.is_empty(), "browser name must not be empty");
+        assert_ne!(name, "Safari", "must not claim Safari on Linux");
     }
 }

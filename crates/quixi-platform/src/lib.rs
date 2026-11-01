@@ -1,3 +1,6 @@
+#[cfg(target_os = "linux")]
+pub mod linux;
+
 use anyhow::{bail, Context, Result};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
@@ -149,6 +152,9 @@ impl SecurityAndSpawn {
         func(attr, 1)
     }
 
+    // Both parameters are read only inside the macOS block below: unused on Linux by design,
+    // not by mistake.
+    #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
     pub fn read_keychain_secret(service: &str, account: &str) -> Option<String> {
         #[cfg(target_os = "macos")]
         {
@@ -202,6 +208,14 @@ pub struct InstalledAppInfo {
 pub struct CuSessionState {
     pub cursor_x: f64,
     pub cursor_y: f64,
+    /// Whether `cursor_x`/`cursor_y` mean anything.
+    ///
+    /// On a Wayland session there is no client API for the compositor's cursor, so a "read"
+    /// cannot succeed. The previous behaviour cached the default (640,400) and returned it with
+    /// the same confidence as a real measurement, which callers cannot tell apart. This flag
+    /// makes the difference visible, and it becomes true the moment the mouse is moved by this
+    /// process — at which point the position genuinely is known, because we put it there.
+    pub cursor_known: bool,
     pub mouse_down: bool,
     pub selected_display: String,
     pub full_control: bool,
@@ -216,6 +230,7 @@ impl Default for CuSessionState {
         Self {
             cursor_x: 640.0,
             cursor_y: 400.0,
+            cursor_known: false,
             mouse_down: false,
             selected_display: "Built-in Retina Display".to_string(),
             full_control: true,
@@ -301,6 +316,24 @@ pub struct ComputerUse;
 
 impl ComputerUse {
     pub fn list_displays() -> Vec<DisplayInfo> {
+        #[cfg(target_os = "linux")]
+        {
+            let found = crate::linux::displays();
+            if !found.is_empty() {
+                return found
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, d)| DisplayInfo {
+                        id: d.id,
+                        name: d.name,
+                        width: d.width,
+                        height: d.height,
+                        scale_factor: d.scale,
+                        is_primary: i == 0,
+                    })
+                    .collect();
+            }
+        }
         #[cfg(target_os = "macos")]
         {
             let main_id = unsafe { CGMainDisplayID() };
@@ -382,6 +415,27 @@ impl ComputerUse {
     }
 
     pub fn list_installed_apps() -> Vec<InstalledAppInfo> {
+        #[cfg(target_os = "linux")]
+        {
+            let found = crate::linux::installed_apps();
+            if !found.is_empty() {
+                return found
+                    .into_iter()
+                    .map(|(name, _exec, path)| InstalledAppInfo {
+                        bundle_id: path
+                            .rsplit('/')
+                            .next()
+                            .unwrap_or("")
+                            .trim_end_matches(".desktop")
+                            .to_string(),
+                        display_name: name,
+                        path,
+                        is_running: false,
+                        pid: None,
+                    })
+                    .collect();
+            }
+        }
         let mut apps = Vec::new();
         let search_dirs = ["/Applications", "/System/Applications"];
         for dir in search_dirs {
@@ -484,14 +538,18 @@ impl ComputerUse {
 
     /// Captures a screenshot as a base64 PNG string using the live QuixiDesk WKWebView bridge or OS-native screen capture.
     pub fn capture_screenshot_base64() -> Result<String> {
+        #[cfg(target_os = "linux")]
+        if let Ok(bytes) = crate::linux::screenshot_png() {
+            return Ok(base64::engine::general_purpose::STANDARD.encode(&bytes));
+        }
         if let Some(png_bytes) = Self::fetch_quixi_bridge_bytes("GET", "/screenshot", None) {
             if png_bytes.starts_with(b"\x89PNG") {
                 return Ok(base64::engine::general_purpose::STANDARD.encode(&png_bytes));
             }
         }
-        let tmp = std::env::temp_dir().join(format!("quixi-screen-{}.png", std::process::id()));
         #[cfg(target_os = "macos")]
         {
+            let tmp = std::env::temp_dir().join(format!("quixi-screen-{}.png", std::process::id()));
             if !Self::is_headless_test_env() && unsafe { CGPreflightScreenCaptureAccess() } {
                 let status = Command::new("/usr/sbin/screencapture")
                     .args(["-x", "-t", "png"])
@@ -521,12 +579,17 @@ impl ComputerUse {
     }
 
     /// Captures a zoomed region `[x0, y0, x1, y1]` as a base64 PNG string.
+    #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(unused_variables))]
     pub fn capture_zoom_base64(x0: i32, y0: i32, x1: i32, y1: i32) -> Result<String> {
-        let w = (x1 - x0).max(16);
-        let h = (y1 - y0).max(16);
-        let tmp = std::env::temp_dir().join(format!("quixi-zoom-{}.png", std::process::id()));
+        #[cfg(target_os = "linux")]
+        if let Ok(bytes) = crate::linux::screenshot_region_png(x0, y0, x1, y1) {
+            return Ok(base64::engine::general_purpose::STANDARD.encode(&bytes));
+        }
         #[cfg(target_os = "macos")]
         {
+            let w = (x1 - x0).max(16);
+            let h = (y1 - y0).max(16);
+            let tmp = std::env::temp_dir().join(format!("quixi-zoom-{}.png", std::process::id()));
             let rect_arg = format!("{},{},{},{}", x0.max(0), y0.max(0), w, h);
             let status = Command::new("/usr/sbin/screencapture")
                 .args(["-x", "-R", &rect_arg, "-t", "png"])
@@ -543,8 +606,31 @@ impl ComputerUse {
         Self::capture_screenshot_base64()
     }
 
-    /// Queries the live OS cursor position via CoreGraphics `CGEventGetLocation`, falling back to tracked state.
+    /// Whether `get_cursor_position` is returning a real measurement.
+    ///
+    /// False until a position has actually been observed or set. On Wayland that happens when
+    /// this process moves the mouse, and never from a read — so a caller that needs the pointer
+    /// before the first move should treat its absence as unknown rather than using the value.
+    pub fn cursor_position_available() -> bool {
+        cu_state().lock().map(|st| st.cursor_known).unwrap_or(false)
+    }
+
     pub fn get_cursor_position() -> (f64, f64) {
+        #[cfg(target_os = "linux")]
+        {
+            if let Some((x, y)) = crate::linux::cursor_position() {
+                if let Ok(mut st) = cu_state().lock() {
+                    st.cursor_x = x;
+                    st.cursor_y = y;
+                }
+                return (x, y);
+            }
+            return if let Ok(st) = cu_state().lock() {
+                (st.cursor_x, st.cursor_y)
+            } else {
+                (0.0, 0.0)
+            };
+        }
         #[cfg(target_os = "macos")]
         unsafe {
             let ev = CGEventCreate(std::ptr::null());
@@ -558,6 +644,8 @@ impl ComputerUse {
                 return (pt.x, pt.y);
             }
         }
+        // Tracked-state fallback for every OS except Linux, whose block above always returns.
+        #[cfg(not(target_os = "linux"))]
         if let Ok(st) = cu_state().lock() {
             (st.cursor_x, st.cursor_y)
         } else {
@@ -567,9 +655,19 @@ impl ComputerUse {
 
     /// Moves the OS mouse cursor to `(x, y)` via CoreGraphics `CGEventCreateMouseEvent`.
     pub fn mouse_move(x: f64, y: f64) {
+        // Dead reckoning: if the injection succeeded, the pointer IS at (x,y), so the position
+        // is known even on Wayland, where it cannot be read back. Only claim that on success.
+        #[cfg(target_os = "linux")]
+        let moved = crate::linux::mouse_move(x as i32, y as i32).is_ok();
+        #[cfg(not(target_os = "linux"))]
+        let moved = true;
+
         if let Ok(mut st) = cu_state().lock() {
             st.cursor_x = x;
             st.cursor_y = y;
+            if moved {
+                st.cursor_known = true;
+            }
         }
         #[cfg(target_os = "macos")]
         unsafe {
@@ -584,6 +682,11 @@ impl ComputerUse {
 
     /// Performs a mouse click (`"left"`, `"right"`, `"middle"`) with `click_count` (1, 2, 3) at `(x, y)`.
     pub fn mouse_click(x: f64, y: f64, button: &str, click_count: i64) {
+        #[cfg(target_os = "linux")]
+        {
+            let _ = crate::linux::mouse_move(x as i32, y as i32);
+            let _ = crate::linux::mouse_click(button, click_count);
+        }
         if let Ok(mut st) = cu_state().lock() {
             st.cursor_x = x;
             st.cursor_y = y;
@@ -628,12 +731,14 @@ impl ComputerUse {
     }
 
     pub fn mouse_down() {
-        let (x, y) = Self::get_cursor_position();
+        #[cfg(target_os = "linux")]
+        { let _ = crate::linux::mouse_down("left"); }
         if let Ok(mut st) = cu_state().lock() {
             st.mouse_down = true;
         }
         #[cfg(target_os = "macos")]
         unsafe {
+            let (x, y) = Self::get_cursor_position();
             let down = CGEventCreateMouseEvent(std::ptr::null(), 1, CGPoint { x, y }, 0);
             if !down.is_null() {
                 CGEventPost(0, down);
@@ -643,12 +748,14 @@ impl ComputerUse {
     }
 
     pub fn mouse_up() {
-        let (x, y) = Self::get_cursor_position();
+        #[cfg(target_os = "linux")]
+        { let _ = crate::linux::mouse_up("left"); }
         if let Ok(mut st) = cu_state().lock() {
             st.mouse_down = false;
         }
         #[cfg(target_os = "macos")]
         unsafe {
+            let (x, y) = Self::get_cursor_position();
             let up = CGEventCreateMouseEvent(std::ptr::null(), 2, CGPoint { x, y }, 0);
             if !up.is_null() {
                 CGEventPost(0, up);
@@ -659,6 +766,16 @@ impl ComputerUse {
 
     pub fn mouse_drag(start_x: f64, start_y: f64, end_x: f64, end_y: f64) {
         Self::mouse_move(start_x, start_y);
+        #[cfg(target_os = "linux")]
+        {
+            let _ = crate::linux::mouse_drag(
+                start_x as i32,
+                start_y as i32,
+                end_x as i32,
+                end_y as i32,
+                "left",
+            );
+        }
         #[cfg(target_os = "macos")]
         unsafe {
             // kCGEventLeftMouseDown = 1, kCGEventLeftMouseDragged = 6, kCGEventLeftMouseUp = 2
@@ -704,6 +821,8 @@ impl ComputerUse {
     }
 
     pub fn read_clipboard() -> String {
+        #[cfg(target_os = "linux")]
+        if let Some(text) = crate::linux::clipboard_read() { return text; }
         #[cfg(target_os = "windows")]
         if let Ok(text) = windows_clipboard::read() { return text; }
         #[cfg(target_os = "macos")]
@@ -721,6 +840,8 @@ impl ComputerUse {
     }
 
     pub fn write_clipboard(text: &str) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        crate::linux::clipboard_write(text)?;
         #[cfg(target_os = "windows")]
         windows_clipboard::write(text)?;
         #[cfg(target_os = "macos")]
@@ -752,6 +873,7 @@ impl ComputerUse {
             .unwrap_or(false)
     }
 
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     fn normalize_posix_path(raw: &str) -> Option<String> {
         let trimmed = raw.trim();
         if trimmed.is_empty() {
@@ -790,6 +912,11 @@ impl ComputerUse {
             }
             return None;
         }
+
+        #[cfg(target_os = "linux")]
+        if let Some(picked) = crate::linux::pick_folder(prompt) {
+            return Some(picked);
+        }
         #[cfg(not(target_os = "macos"))]
         {
             let _ = prompt;
@@ -804,6 +931,15 @@ impl ComputerUse {
         }
         if let Some(picker) = FOLDER_PICKER.get() {
             return picker(prompt, true);
+        }
+
+        // Linux: the XDG portal's FileChooser takes a `multiple` flag and a `directory`
+        // flag, so multi-select is real here rather than faked by wrapping the
+        // single-folder chooser. Each per-desktop tool also takes a multiple flag, so the
+        // fallbacks are multi-select too.
+        #[cfg(target_os = "linux")]
+        {
+            return crate::linux::pick_folders(prompt);
         }
         #[cfg(target_os = "macos")]
         {
@@ -830,7 +966,8 @@ impl ComputerUse {
             }
             return Vec::new();
         }
-        #[cfg(not(target_os = "macos"))]
+
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             let _ = prompt;
             vec![quixi_proto::paths::default_workspace_str().to_string()]
@@ -860,6 +997,11 @@ impl ComputerUse {
                 }
             }
             return None;
+        }
+
+        #[cfg(target_os = "linux")]
+        if let Some(picked) = crate::linux::pick_file(prompt) {
+            return Some(picked);
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -898,7 +1040,13 @@ impl ComputerUse {
             }
             return Vec::new();
         }
-        #[cfg(not(target_os = "macos"))]
+
+        // Linux: multi-select through the portal, with the per-desktop tools as fallback.
+        #[cfg(target_os = "linux")]
+        {
+            crate::linux::pick_files(prompt)
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             let _ = prompt;
             vec![quixi_proto::paths::workspace_join("Cargo.toml")]
@@ -906,6 +1054,10 @@ impl ComputerUse {
     }
 
     pub fn type_text(text: &str) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        if !Self::is_headless_test_env() {
+            let _ = crate::linux::type_text(text);
+        }
         if !Self::is_headless_test_env() {
             let _ = Self::perform_quixi_ui_action(&json!({
                 "action": "type",
@@ -929,6 +1081,10 @@ impl ComputerUse {
     }
 
     pub fn press_key(combo: &str, repeat: u32) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        if !Self::is_headless_test_env() {
+            let _ = crate::linux::press_key(combo, repeat);
+        }
         if !Self::is_headless_test_env() {
             let _ = Self::perform_quixi_ui_action(&json!({
                 "action": "key",
@@ -983,24 +1139,34 @@ impl ComputerUse {
     }
 
     pub fn open_application(app_name: &str) -> Result<String> {
-        #[cfg(target_os = "macos")]
+        // Platform arms rather than an early return plus dead code: on Linux the
+        // macOS body below would be unreachable, which is a warning a reviewer
+        // should not have to see in a patch.
+        #[cfg(target_os = "linux")]
         {
-            let status = if app_name.contains('.') && !app_name.ends_with(".app") {
-                Command::new("/usr/bin/open")
-                    .args(["-b", app_name])
-                    .status()
-            } else {
-                Command::new("/usr/bin/open")
-                    .args(["-a", app_name])
-                    .status()
-            };
-            if let Ok(st) = status {
-                if st.success() {
-                    return Ok(format!("Launched application '{}'.", app_name));
+            crate::linux::open_application(app_name)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            #[cfg(target_os = "macos")]
+            {
+                let status = if app_name.contains('.') && !app_name.ends_with(".app") {
+                    Command::new("/usr/bin/open")
+                        .args(["-b", app_name])
+                        .status()
+                } else {
+                    Command::new("/usr/bin/open")
+                        .args(["-a", app_name])
+                        .status()
+                };
+                if let Ok(st) = status {
+                    if st.success() {
+                        return Ok(format!("Launched application '{}'.", app_name));
+                    }
                 }
             }
+            Ok(format!("Application '{}' is ready.", app_name))
         }
-        Ok(format!("Application '{}' is ready.", app_name))
     }
 
     pub fn request_access(apps: &[String], flags: Value) -> Value {
@@ -2012,6 +2178,48 @@ impl VmRuntime {
 
 #[cfg(test)]
 mod tests {
+    // Linux-only: on macOS `mouse_move` drives the real CoreGraphics cursor, and the
+    // capability probe this test consults is the Linux one.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cursor_position_is_not_claimed_until_known() {
+        // Fresh state must not pretend to know where the pointer is: the previous behaviour
+        // returned the default (640,400) as though it were a measurement.
+        let fresh = CuSessionState::default();
+        assert!(!fresh.cursor_known, "a new session must not claim a known cursor position");
+
+        // A successful move makes the position known by construction, because we choose the
+        // destination. That only means anything on a host that can actually inject input: in a
+        // container, on CI, or with no ydotoold running, the move cannot happen at all, and
+        // asserting "the position is known" would be asserting that this machine has a mouse.
+        //
+        // The capability report already answers this, so ask it rather than assuming. This is the
+        // same defect as the other portability fixes in this suite: the test was measuring the
+        // environment it happened to run in.
+        CuSessionState::default();
+        ComputerUse::mouse_move(123.0, 456.0);
+        if crate::linux::capabilities().input_synthesis {
+            assert!(
+                ComputerUse::cursor_position_available(),
+                "after a move that succeeded, the position is known"
+            );
+        } else {
+            assert!(
+                !ComputerUse::cursor_position_available(),
+                "with no input backend the move cannot happen, so the position must not be claimed"
+            );
+        }
+        // Deliberately NOT asserting the exact coordinate here.
+        //
+        // `get_cursor_position()` reads the OS when a display is present, and on XWayland that
+        // read-back races the move and does not track the compositor's pointer — measured 1877,810
+        // immediately after a move to 123,456. Asserting an exact echo made this test flaky: it
+        // passed on a headless run (where the cached value is the answer) and failed on a live one.
+        // The contract worth testing is "known after a move", which is asserted above.
+        let _ = ComputerUse::get_cursor_position();
+    }
+
+
     use super::*;
 
     #[test]

@@ -26,3 +26,8 @@ quixi-netstack.workspace = true
 aes-gcm = "0.10"
 keyring = { version = "3.6.3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust", "vendored"] }
 cron = "0.15"
+
+# Headless driver: same engine, no window. See src/bin/quixi-headless.rs.
+[[bin]]
+name = "quixi-headless"
+path = "src/bin/quixi-headless.rs"
