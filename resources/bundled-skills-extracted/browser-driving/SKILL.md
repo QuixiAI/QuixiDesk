@@ -84,11 +84,22 @@ alias for `Invoke-WebRequest`; call `curl.exe` to get real curl.
 Linux:
 
 ```sh
-PROFILE="${XDG_CACHE_HOME:-$HOME/.cache}/quixidesk/browser-profile"
 BROWSER=$(command -v google-chrome || command -v chromium || command -v brave-browser || command -v brave)
+case "$BROWSER" in
+  # Snap browsers (Ubuntu's chromium) cannot write hidden directories such as ~/.cache;
+  # they fail with "Failed To Create Data Directory" and run without a usable profile.
+  /snap/bin/*) PROFILE="$HOME/snap/$(basename "$BROWSER")/common/quixidesk-browser-profile" ;;
+  *)           PROFILE="${XDG_CACHE_HOME:-$HOME/.cache}/quixidesk/browser-profile" ;;
+esac
+mkdir -p "$PROFILE"
 "$BROWSER" --remote-debugging-port=9333 --user-data-dir="$PROFILE" \
   --no-first-run --no-default-browser-check about:blank &
 ```
+
+Confirm the profile is really in use before relying on it: a few seconds after launch the
+directory should contain a `Local State` file. If it stays empty, the browser could not write there
+(sandboxed packages such as snaps and Flatpaks restrict where they can write) and nothing you sign in
+to will be kept.
 
 The HTTP endpoints cover most needs (use `curl.exe` on Windows):
 
@@ -156,7 +167,8 @@ driver.quit()
 
 Check for Selenium first (`python3 -c "import selenium"`; on Windows `py -c "import selenium"`) and
 ask before installing it. Create the profile directory first; on Windows use a path under
-`%LOCALAPPDATA%`.
+`%LOCALAPPDATA%`. Ubuntu's Firefox is also a snap, so the same rule applies there: use a directory
+under `~/snap/firefox/common/`, not a hidden one such as `~/.cache`.
 
 ## HTTP: when it is right, and how to tell it worked
 
