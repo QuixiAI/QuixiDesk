@@ -104,6 +104,9 @@ Configure the endpoint and credentials, then save. QuixiDesk loads all models ad
 | **3** | **OpenAI (ChatGPT Plus / Pro & API)** | **PKCE / Device OAuth** or API Key (`OPENAI_API_KEY`) | `gpt-5.4`, `gpt-5.4-mini`, `o3`, `o4-mini`, `gpt-4.1` |
 | **4** | **xAI Grok (SuperGrok / X & API)** | **RFC 8628 Device OAuth** or API Key (`XAI_API_KEY`) | `grok-4`, `grok-3`, `grok-3-mini`, `grok-code-fast-1` |
 | **5** | **Anthropic (Claude Direct)** | API Key (`ANTHROPIC_API_KEY`) | `claude-sonnet-4-6`, `claude-opus-4-6`, `claude-haiku-4-5-20251001` |
+| **6** | **OpenCode Go (Go / Go Plus / Go Teams)** | API Key (`OPENCODE_GO_API_KEY`) | `deepseek-v4.1-flash`, `kimi-k3`, `glm-5.3`, `claude-haiku-5-5`, `gpt-6-luna` |
+
+**OpenCode Go** uses the OpenCode subscription gateway. Subscribe in the [OpenCode Console](https://opencode.ai/console), copy the Go API key, then open **Settings → Providers → OpenCode Go** and save it. QuixiDesk identifies itself as its own client and sends one stable `x-opencode-session` id per conversation, which the Go gateway uses for routing and prompt caching. Go, Go Plus, and Go Teams share the same integration; the plan controls usage limits in the console. The gateway advertises its model catalog at `https://opencode.ai/inference/go/v1/models`, so **Refresh models** picks up new Go models without a QuixiDesk update.
 
 ### Cloud Providers
 | Provider | Environment Variable | Base Endpoint | Example Models |

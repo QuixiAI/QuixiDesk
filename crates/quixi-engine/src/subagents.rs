@@ -176,6 +176,8 @@ impl QuixiEngine {
             })
             .map(summary)
     }
+    /// Runs one bounded child assignment: builds a child transcript, executes tool rounds under
+    /// the parent's permission mode, and stores durable activity for the Subagents panel.
     pub(crate) fn run_subagent(
         &self,
         session: &str,
@@ -251,7 +253,7 @@ impl QuixiEngine {
                 ));
                 // Use the selected model's context window and compact older evidence.
                 // Full activity remains stored in the child record for parent recovery.
-                self.compact_context_for_provider(&mut messages, &model, provider.as_deref(), prompt, cancelled)?;
+                self.compact_context_for_provider(&mut messages, &model, provider.as_deref(), prompt, cancelled, Some(session))?;
                 let turn = self
                     .provider_manager
                     .complete_turn_with_tools_for_provider(
@@ -259,6 +261,7 @@ impl QuixiEngine {
                         &tools,
                         Some(&model),
                         provider.as_deref(),
+                        Some(session),
                         &mut |_| {},
                     )
                     .ok_or("The selected provider did not return a tool-capable response.")?;
@@ -695,6 +698,7 @@ mod tests {
         assert_eq!(e.list_subagents(&sid).as_array().unwrap().len(), 1);
         fs::remove_dir_all(dir).unwrap();
     }
+    /// A configured subagent provider is used only when it advertises the selected model.
     #[test]
     fn provider_selection_falls_back_and_does_not_cross_provider_on_duplicate_model() {
         let (e, _, dir) = fixture();
@@ -719,6 +723,7 @@ mod tests {
                 &json!([]),
                 Some("child-fixture"),
                 Some("custom"),
+                None,
                 &mut |_| {},
             )
             .unwrap();
