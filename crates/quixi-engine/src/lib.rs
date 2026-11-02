@@ -1993,8 +1993,12 @@ impl QuixiEngine {
                         .collect()
                 })
                 .unwrap_or_default();
-            let reply_text =
-                self.generate_reply_with_history(prompt, quixi_proto::paths::default_workspace_str(), &history);
+            let reply_text = self.generate_reply_with_history_for_session(
+                prompt,
+                quixi_proto::paths::default_workspace_str(),
+                &history,
+                (!conv_uuid.is_empty()).then_some(conv_uuid),
+            );
             let now = Utc::now().to_rfc3339();
 
             let active_model = self.provider_manager.resolve_connected_model(
@@ -2263,14 +2267,34 @@ impl QuixiEngine {
         self.generate_reply_with_history(prompt, cwd, &[])
     }
 
+    /// Generates a reply from prior chat history without streaming. Kept for callers that do
+    /// not have a conversation UUID to pass as a provider session.
     pub fn generate_reply_with_history(
         &self,
         prompt: &str,
         cwd: &str,
         history: &[(String, String)],
     ) -> String {
-        let (reply, _) =
-            self.generate_reply_with_history_streaming(prompt, cwd, history, None, |_| {});
+        self.generate_reply_with_history_for_session(prompt, cwd, history, None)
+    }
+
+    /// History-based reply that forwards a conversation id to providers that scope routing
+    /// and caching per conversation, such as OpenCode Go.
+    pub fn generate_reply_with_history_for_session(
+        &self,
+        prompt: &str,
+        cwd: &str,
+        history: &[(String, String)],
+        session: Option<&str>,
+    ) -> String {
+        let (reply, _) = self.generate_reply_with_history_streaming_for_session(
+            prompt,
+            cwd,
+            history,
+            None,
+            session,
+            |_| {},
+        );
         reply
     }
 
@@ -2287,7 +2311,31 @@ impl QuixiEngine {
     where
         F: FnMut(StreamChunk),
     {
-        self.generate_reply_with_context(prompt, cwd, history, model_override, None, "", on_delta)
+        self.generate_reply_with_history_streaming_for_session(
+            prompt,
+            cwd,
+            history,
+            model_override,
+            None,
+            on_delta,
+        )
+    }
+
+    /// Session-aware streaming reply used by REST conversation completions. `session` is
+    /// forwarded to providers that keep per-conversation routing state.
+    pub fn generate_reply_with_history_streaming_for_session<F>(
+        &self,
+        prompt: &str,
+        cwd: &str,
+        history: &[(String, String)],
+        model_override: Option<&str>,
+        session: Option<&str>,
+        on_delta: F,
+    ) -> (String, String)
+    where
+        F: FnMut(StreamChunk),
+    {
+        self.generate_reply_with_context(prompt, cwd, history, model_override, session, "", on_delta)
     }
 
     /// Text-only fallback used when the selected provider cannot run tool calls. `session`
@@ -3812,6 +3860,76 @@ impl QuixiEngine {
     fn json_resp(status: u16, val: &Value) -> (u16, &'static str, Vec<u8>) {
         let bytes = serde_json::to_vec(val).unwrap_or_else(|_| b"{}".to_vec());
         (status, "application/json; charset=utf-8", bytes)
+    }
+}
+
+#[cfg(test)]
+mod rest_completion_session_tests {
+    use super::*;
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpListener;
+
+    /// REST completion forwards the conversation UUID as the provider session id.
+    #[test]
+    fn rest_completion_uses_the_conversation_session() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut headers = String::new();
+            let mut line = String::new();
+            while reader.read_line(&mut line).map(|n| n > 0).unwrap_or(false) {
+                if line == "\r\n" {
+                    break;
+                }
+                headers.push_str(&line);
+                line.clear();
+            }
+            let length = headers
+                .lines()
+                .find_map(|line| {
+                    line.to_ascii_lowercase()
+                        .strip_prefix("content-length:")
+                        .and_then(|value| value.trim().parse::<usize>().ok())
+                })
+                .unwrap_or(0);
+            let mut body = vec![0; length];
+            let _ = reader.read_exact(&mut body);
+            let body = "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+            let mut stream = stream;
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+            headers
+        });
+
+        let root = std::env::temp_dir().join(format!("quixi-rest-session-{}", uuid::Uuid::new_v4()));
+        let engine = QuixiEngine::new_with_data_dir(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../resources"),
+            root.clone(),
+        );
+        let saved = engine.provider_manager.save_provider(&json!({
+            "providerId": "opencode-go",
+            "baseUrl": format!("http://127.0.0.1:{port}/v1"),
+            "apiKey": "test-key",
+            "selectedModel": "deepseek-v4.1-flash",
+            "setAsActive": true
+        }));
+        assert!(saved.get("error").is_none(), "{saved}");
+
+        let reply = engine.generate_reply_with_history_for_session(
+            "hi",
+            root.to_string_lossy().as_ref(),
+            &[],
+            Some("conversation-rest-1"),
+        );
+        let headers = server.join().unwrap().to_ascii_lowercase();
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert_eq!(reply, "ok");
+        assert!(
+            headers.contains("x-opencode-session: conversation-rest-1"),
+            "headers: {headers}"
+        );
     }
 }
 
