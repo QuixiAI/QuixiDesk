@@ -2290,6 +2290,8 @@ impl QuixiEngine {
         self.generate_reply_with_context(prompt, cwd, history, model_override, None, "", on_delta)
     }
 
+    /// Text-only fallback used when the selected provider cannot run tool calls. `session`
+    /// carries the conversation id when the provider scopes routing per conversation.
     fn generate_reply_with_context<F>(
         &self,
         prompt: &str,

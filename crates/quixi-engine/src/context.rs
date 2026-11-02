@@ -45,6 +45,8 @@ fn compacted_messages(system: &Value, handoff: &str, prompt: &str, tail: &[Value
 }
 
 impl QuixiEngine {
+    /// Compacts older messages when the active model's context budget is nearly full. `session`
+    /// keeps provider-side routing state consistent with the surrounding turn.
     pub(crate) fn compact_context(
         &self,
         messages: &mut Vec<Value>,
@@ -56,6 +58,8 @@ impl QuixiEngine {
         self.compact_context_for_provider(messages, model, None, prompt, cancelled, session)
     }
 
+    /// Provider-pinned compaction used by subagents. A failed summary degrades to a mechanical
+    /// handoff so the task continues; the full transcript remains stored on disk.
     pub(crate) fn compact_context_for_provider(
         &self, messages: &mut Vec<Value>, model: &str, provider: Option<&str>,
         prompt: &str, cancelled: &AtomicBool, session: Option<&str>,
@@ -147,6 +151,7 @@ mod tests {
 mod recovery_tests {
     use super::*;
     use std::io::{BufRead, Read, Write};
+    /// Keeps the latest request and still degrades to a mechanical handoff when the summarizer fails.
     #[test]
     fn compaction_keeps_latest_context_and_a_failed_summary_still_compacts() {
         for fail in [false, true] {

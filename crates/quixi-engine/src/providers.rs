@@ -123,6 +123,9 @@ pub struct ProviderManager {
 }
 
 impl ProviderManager {
+    /// Loads provider configuration from `data_dir`, decrypting stored credentials and merging
+    /// saved values onto the current catalog. Defaults are persisted so newly added providers
+    /// appear without requiring a configuration rewrite.
     pub fn new(data_dir: &PathBuf) -> Self {
         let config_path = data_dir.join("providers.json");
         #[cfg(test)]
@@ -1372,6 +1375,9 @@ impl ProviderManager {
         self.get_public_state()
     }
 
+    /// Tests one provider connection and discovers its advertised model catalog. A supplied key
+    /// or endpoint overrides the stored values for the check; successful discovery is merged and
+    /// persisted, while failures leave the saved configuration intact.
     pub fn test_provider(&self, body: &Value) -> Value {
         let provider_id = body
             .get("providerId")
@@ -2663,6 +2669,9 @@ impl ProviderManager {
         )
     }
 
+    /// Text-only streaming completion with explicit prompt context. `session` carries the
+    /// conversation id to providers that scope routing or caching per conversation, such as
+    /// OpenCode Go.
     pub(crate) fn try_live_completion_with_context<F>(
         &self,
         prompt: &str,
@@ -3140,6 +3149,8 @@ impl ProviderManager {
         (parent_model.into(), None)
     }
 
+    /// Runs one streaming tool-calling turn, honoring `provider_override` when a subagent pins a
+    /// provider. `session` is forwarded to providers that keep per-conversation routing state.
     pub(crate) fn complete_turn_with_tools_for_provider<F>(
         &self, messages: &[Value], tools: &Value, model_override: Option<&str>, provider_override: Option<&str>, session: Option<&str>, mut on_chunk: F,
     ) -> Option<ProviderToolTurn> where F: FnMut(StreamChunk) {
@@ -3578,6 +3589,7 @@ mod streaming_chunk_tests {
         (ProviderManager::new(&dir), dir)
     }
 
+    /// Builds an isolated provider state that points OpenCode Go at a local fixture endpoint.
     fn opencode_manager(base_url: &str) -> (ProviderManager, PathBuf) {
         let dir = std::env::temp_dir().join(format!("quixi-oc-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -3672,6 +3684,7 @@ mod streaming_chunk_tests {
         );
     }
 
+    /// Tool turns carry the same conversation session header as text streaming.
     #[test]
     fn opencode_go_tool_turn_uses_the_same_session_header() {
         let (base_url, server) = provider_capturing_headers(OK_STREAM);

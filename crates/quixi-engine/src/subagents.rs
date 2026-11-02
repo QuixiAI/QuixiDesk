@@ -176,6 +176,8 @@ impl QuixiEngine {
             })
             .map(summary)
     }
+    /// Runs one bounded child assignment: builds a child transcript, executes tool rounds under
+    /// the parent's permission mode, and stores durable activity for the Subagents panel.
     pub(crate) fn run_subagent(
         &self,
         session: &str,
@@ -696,6 +698,7 @@ mod tests {
         assert_eq!(e.list_subagents(&sid).as_array().unwrap().len(), 1);
         fs::remove_dir_all(dir).unwrap();
     }
+    /// A configured subagent provider is used only when it advertises the selected model.
     #[test]
     fn provider_selection_falls_back_and_does_not_cross_provider_on_duplicate_model() {
         let (e, _, dir) = fixture();
