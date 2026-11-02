@@ -41,12 +41,37 @@ remain in `local_ui.rs`.
 ## Diagnostics
 
 Open a conversation's **Task actions → Prompt diagnostics** in
-`resources/ui/app.js`. The view displays the latest tool-enabled model request:
-configuration version, round, permission mode, section sources/activation reason,
-and model-visible tool names. It does not store instruction text or arguments.
+`resources/ui/app.js`. The view displays the latest model request (including a separate text-only fallback
+snapshot): configuration version, generation path, round, permission mode, section
+sources/activation reason, and model-visible tool names. It does not store instruction text or arguments.
 The local endpoint is `/api/quixi/prompt-context/{sessionId}`. Snapshots are
 in-memory, replaced each round, and unavailable before a model request or after
-restart. Tool-less fallback requests do not have a separate snapshot.
+restart. Text-only fallback snapshots have an empty tool list and omit Artifact and
+skill guidance. Standalone text generation has no conversation ID and therefore
+no conversation diagnostic snapshot.
+
+## Core prompt and request boundaries
+
+`crates/quixi-engine/src/prompt_context.rs` assembles the shared core, safety,
+current permission/capability context, labeled project/workspace instructions,
+and optional Artifact/skill guidance, in that order. Tool-enabled and text-only
+paths use the same latest-request precedence and trust rules. Text-only adapters
+no longer claim filesystem access or completed tool actions.
+
+Assessments and proposals do not authorize implementation or deployment. An
+explicit subsequent implementation request authorizes the agreed scope under
+current permissions. Historical availability claims and handoffs cannot override
+current requests or permissions. These are model instructions, not a new semantic
+execution-permission classifier; existing execution gates remain authoritative.
+
+`crates/quixi-engine/src/context.rs` keeps generated historical handoffs and the
+verbatim current request in separate user messages during compaction, retaining
+the original current-request message when present in the recent tail. Generated
+summaries never gain system authority. User-pasted mixed handoffs are not parsed
+by brittle heading heuristics; the shared core tells the model to distinguish
+current requests from quoted historical context.
+
+See `docs/prompt-behavior-evals.md` for opt-in behavioral probes and their limits.
 
 ## Verification
 

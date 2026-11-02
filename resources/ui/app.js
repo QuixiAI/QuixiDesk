@@ -1761,7 +1761,7 @@
             const context = await response.json();
             if (!response.ok) throw Error(context.error || "Diagnostics unavailable");
             dialog("Prompt diagnostics", [
-              el("p", {class:"hint"}, "Latest tool-enabled model request. Instruction text and tool arguments are not stored here."),
+              el("p", {class:"hint"}, "Latest model request, including text-only fallback. Instruction text and tool arguments are not stored here."),
               el("pre", {class:"code-preview"}, JSON.stringify(context, null, 2)),
             ], {wide:true});
           } catch (error) { toast(error.message); }
