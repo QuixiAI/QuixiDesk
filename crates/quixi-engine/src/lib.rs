@@ -2287,7 +2287,7 @@ impl QuixiEngine {
     where
         F: FnMut(StreamChunk),
     {
-        self.generate_reply_with_context(prompt, cwd, history, model_override, "", on_delta)
+        self.generate_reply_with_context(prompt, cwd, history, model_override, None, "", on_delta)
     }
 
     fn generate_reply_with_context<F>(
@@ -2296,6 +2296,7 @@ impl QuixiEngine {
         cwd: &str,
         history: &[(String, String)],
         model_override: Option<&str>,
+        session: Option<&str>,
         context: &str,
         mut on_delta: F,
     ) -> (String, String)
@@ -2317,6 +2318,7 @@ impl QuixiEngine {
                 cwd,
                 history,
                 Some(&resolved_default),
+                session,
                 &system_context,
                 &mut on_delta,
             )
@@ -2484,15 +2486,16 @@ impl QuixiEngine {
                 tools.as_array().unwrap().iter().map(|t| t["function"]["name"].clone()).collect(),
                 task_context.artifact_reason,
             ));
-            if let Err(error)=self.compact_context(&mut messages,&resolved_model,prompt,cancelled) {
+            if let Err(error)=self.compact_context(&mut messages,&resolved_model,prompt,cancelled,Some(session_id)) {
                 if !cancelled.load(Ordering::SeqCst) {on_chunk(StreamChunk::Text(error.clone()));}
                 return (error,final_model);
             }
             let mut streamed_text = false;
-            let turn = match self.provider_manager.complete_turn_with_tools(
+            let turn = match self.provider_manager.complete_turn_with_tools_for_session(
                 &messages,
                 &tools,
                 Some(&resolved_model),
+                Some(session_id),
                 &mut |chunk| { if !cancelled.load(Ordering::SeqCst) { if let StreamChunk::Text(text)=&chunk { if !text.is_empty() {streamed_text=true;self.record_partial_reply(session_id,cancelled,text);} } on_chunk(chunk); } },
             ) {
                 Some(turn) => turn,
@@ -2518,6 +2521,7 @@ impl QuixiEngine {
                         cwd,
                         history,
                         model_override,
+                        Some(session_id),
                         &text_context.render(),
                         &mut |chunk| { if !cancelled.load(Ordering::SeqCst) {if let StreamChunk::Text(text)=&chunk {self.record_partial_reply(session_id,cancelled,text);} on_chunk(chunk); } },
                     );
@@ -2751,10 +2755,11 @@ impl QuixiEngine {
                     "role": "user",
                     "content": "Stop calling tools. Summarize in at most 5 sentences what you actually did (concrete results), and list anything still open."
                 }));
-                if let Some(turn) = self.provider_manager.complete_turn_with_tools(
+                if let Some(turn) = self.provider_manager.complete_turn_with_tools_for_session(
                     &closing,
                     &json!([]),
                     Some(&resolved_model),
+                    Some(session_id),
                     &mut on_chunk,
                 ) {
                     if !turn.text.trim().is_empty() {

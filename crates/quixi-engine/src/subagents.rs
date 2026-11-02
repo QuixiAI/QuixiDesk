@@ -251,7 +251,7 @@ impl QuixiEngine {
                 ));
                 // Use the selected model's context window and compact older evidence.
                 // Full activity remains stored in the child record for parent recovery.
-                self.compact_context_for_provider(&mut messages, &model, provider.as_deref(), prompt, cancelled)?;
+                self.compact_context_for_provider(&mut messages, &model, provider.as_deref(), prompt, cancelled, Some(session))?;
                 let turn = self
                     .provider_manager
                     .complete_turn_with_tools_for_provider(
@@ -259,6 +259,7 @@ impl QuixiEngine {
                         &tools,
                         Some(&model),
                         provider.as_deref(),
+                        Some(session),
                         &mut |_| {},
                     )
                     .ok_or("The selected provider did not return a tool-capable response.")?;
@@ -719,6 +720,7 @@ mod tests {
                 &json!([]),
                 Some("child-fixture"),
                 Some("custom"),
+                None,
                 &mut |_| {},
             )
             .unwrap();

@@ -115,6 +115,9 @@ pub struct ProviderManager {
     credential_error: RwLock<Option<String>>,
     credential_load_failed: bool,
     persist_lock: parking_lot::Mutex<()>,
+    /// Stable per-process fallback for OpenCode Go's `x-opencode-session` header when a
+    /// request is not tied to a stored conversation (for example a catalog probe).
+    anonymous_session: String,
     pub state: RwLock<ProvidersStateFile>,
     pub pending_oauth: RwLock<HashMap<String, PendingOAuthSession>>,
 }
@@ -148,6 +151,7 @@ impl ProviderManager {
             credential_error: RwLock::new(credential_error),
             persist_lock: parking_lot::Mutex::new(()),
             config_path,
+            anonymous_session: format!("quixidesk-{}", Uuid::new_v4()),
             state: RwLock::new(state),
             pending_oauth: RwLock::new(HashMap::new()),
         };
@@ -171,13 +175,14 @@ impl ProviderManager {
         }
     }
 
-    /// Builds the full 19-entry provider catalog in the exact user-requested priority order:
+    /// Builds the full 20-entry provider catalog in the exact user-requested priority order:
     /// 1. OpenRouter
     /// 2. Custom Endpoint
     /// 3. OpenAI (OAuth + API Key)
     /// 4. Grok / xAI (OAuth + API Key)
     /// 5. Anthropic (API Key)
-    /// 6..19. Remaining HexisPro cloud & local providers
+    /// 6. OpenCode Go (subscription API key)
+    /// 7..20. Remaining cloud & local providers
     pub fn default_catalog() -> ProvidersStateFile {
         let providers = vec![
             // 1. OpenRouter (First on the list)
@@ -361,14 +366,75 @@ impl ProviderManager {
                 last_tested_ok: None,
                 last_latency_ms: None,
             },
-            // 6. Google Gemini
+            // 6. OpenCode Go (subscription API key)
+            ProviderEntry {
+                id: "opencode-go".to_string(),
+                name: "OpenCode Go".to_string(),
+                subtitle: "One subscription key for Go, Go Plus, and Go Teams coding models on the OpenCode OpenAI-compatible gateway".to_string(),
+                badge: "Subscription".to_string(),
+                category: "priority".to_string(),
+                priority_rank: 6,
+                supports_oauth: false,
+                oauth_label: None,
+                auth_mode: "api_key".to_string(),
+                api_format: "openai".to_string(),
+                // Chat Completions lives under the gateway's OpenAI prefix; the catalog is
+                // advertised at .../inference/go/v1/models, which `models_endpoint` derives.
+                base_url: "https://opencode.ai/inference/go/openai/v1".to_string(),
+                api_key_masked: String::new(),
+                api_key_raw: String::new(),
+                oauth_access_token: String::new(),
+                oauth_refresh_token: String::new(),
+                oauth_account_label: None,
+                oauth_expires_ms: None,
+                key_placeholder: "OpenCode Go API key".to_string(),
+                env_var: "OPENCODE_GO_API_KEY".to_string(),
+                docs_url: "https://opencode.ai/docs/go/".to_string(),
+                configured: false,
+                selected_model: "deepseek-v4.1-flash".to_string(),
+                models: vec![
+                    Self::model("deepseek-v4.1-flash", "DeepSeek V4.1 Flash", 1_000_000, true, true),
+                    Self::model("deepseek-v4-pro", "DeepSeek V4 Pro (New)", 1_000_000, true, false),
+                    Self::model("glm-5.2", "GLM-5.2", 1_000_000, true, false),
+                    Self::model("glm-5.3", "GLM-5.3", 1_000_000, true, false),
+                    Self::model("grok-4.7", "Grok 4.7", 500_000, true, true),
+                    Self::model("muse-spark-1.2-contributor", "Muse Spark 1.2 Contributor", 1_048_576, true, true),
+                    Self::model("muse-spark-1.3-contributor", "Muse Spark 1.3 Contributor", 1_048_576, true, true),
+                    Self::model("glm-5.3-flash", "GLM-5.3-Flash", 1_000_000, true, true),
+                    Self::model("gpt-5.6-luna", "GPT-5.6 Luna", 1_050_000, true, true),
+                    Self::model("gpt-6-luna", "GPT-6 Luna", 1_050_000, true, true),
+                    Self::model("claude-haiku-5-5", "Claude Haiku 5.5", 1_000_000, true, true),
+                    Self::model("hy3", "Hy3", 256_000, true, false),
+                    Self::model("hy4-preview", "Hy4 preview", 1_024_000, true, false),
+                    Self::model("kimi-k2.7-code", "Kimi K2.7 Code", 262_144, true, true),
+                    Self::model("kimi-k3", "Kimi K3", 1_048_576, true, true),
+                    Self::model("mimo-v2.6-flash", "MiMo-V2.6-Flash", 1_048_576, true, true),
+                    Self::model("mimo-v2.6-pro", "MiMo-V2.6-Pro", 1_048_576, true, true),
+                    Self::model("minimax-m3", "MiniMax-M3", 1_000_000, true, true),
+                    Self::model("minimax-m3.1-flash", "MiniMax M3.1 Flash", 1_000_000, true, true),
+                    Self::model("longcat-2.0", "LongCat-2.0", 1_000_000, true, false),
+                    Self::model("step-5-preview", "Step 5 Preview", 1_000_000, true, true),
+                    Self::model("beam-free", "Beam Free", 1_048_576, true, false),
+                    Self::model("qwen3.8-max", "Qwen3.8 Max", 1_000_000, true, true),
+                    Self::model("qwen3.8-flash", "Qwen3.8 Flash", 1_000_000, true, true),
+                    Self::model("qwen3.7-plus", "Qwen3.7 Plus", 1_000_000, true, true),
+                    Self::model("kimi-k3.1-pro", "Kimi K3.1 Pro", 1_048_576, true, true),
+                    Self::model("iceman-contributor-free", "Iceman Contributor Free", 262_144, true, false),
+                    Self::model("gemini-4-argon", "Gemini 4 Argon", 1_048_576, true, true),
+                ],
+                custom_models: vec![],
+                context_window: 1_000_000,
+                last_tested_ok: None,
+                last_latency_ms: None,
+            },
+            // 7. Google Gemini
             ProviderEntry {
                 id: "gemini".to_string(),
                 name: "Google Gemini".to_string(),
                 subtitle: "Gemini 3.1 Pro, 2.5 Pro, and 2.5 Flash via Google AI Studio API key".to_string(),
                 badge: "1M Context".to_string(),
                 category: "cloud".to_string(),
-                priority_rank: 6,
+                priority_rank: 7,
                 supports_oauth: false,
                 oauth_label: None,
                 auth_mode: "api_key".to_string(),
@@ -395,14 +461,14 @@ impl ProviderManager {
                 last_tested_ok: None,
                 last_latency_ms: None,
             },
-            // 7. DeepSeek
+            // 8. DeepSeek
             ProviderEntry {
                 id: "deepseek".to_string(),
                 name: "DeepSeek".to_string(),
                 subtitle: "DeepSeek V4.1 Flash (thinking + native vision) and V4 Pro — 1M context".to_string(),
                 badge: "Reasoning".to_string(),
                 category: "cloud".to_string(),
-                priority_rank: 7,
+                priority_rank: 8,
                 supports_oauth: false,
                 oauth_label: None,
                 auth_mode: "api_key".to_string(),
@@ -436,14 +502,14 @@ impl ProviderManager {
                 last_tested_ok: None,
                 last_latency_ms: None,
             },
-            // 8. Groq
+            // 9. Groq
             ProviderEntry {
                 id: "groq".to_string(),
                 name: "Groq".to_string(),
                 subtitle: "Ultra-low-latency LPU inference for Llama 3.3, Kimi K2, and Qwen".to_string(),
                 badge: "Ultra-Fast".to_string(),
                 category: "cloud".to_string(),
-                priority_rank: 8,
+                priority_rank: 9,
                 supports_oauth: false,
                 oauth_label: None,
                 auth_mode: "api_key".to_string(),
@@ -470,14 +536,14 @@ impl ProviderManager {
                 last_tested_ok: None,
                 last_latency_ms: None,
             },
-            // 9. Mistral
+            // 10. Mistral
             ProviderEntry {
                 id: "mistral".to_string(),
                 name: "Mistral AI".to_string(),
                 subtitle: "Mistral Large, Codestral, and Pixtral models".to_string(),
                 badge: "Cloud".to_string(),
                 category: "cloud".to_string(),
-                priority_rank: 9,
+                priority_rank: 10,
                 supports_oauth: false,
                 oauth_label: None,
                 auth_mode: "api_key".to_string(),
@@ -503,14 +569,14 @@ impl ProviderManager {
                 last_tested_ok: None,
                 last_latency_ms: None,
             },
-            // 10. MiniMax
+            // 11. MiniMax
             ProviderEntry {
                 id: "minimax".to_string(),
                 name: "MiniMax".to_string(),
                 subtitle: "MiniMax M2.7 and M1 long-context reasoning models".to_string(),
                 badge: "Cloud".to_string(),
                 category: "cloud".to_string(),
-                priority_rank: 10,
+                priority_rank: 11,
                 supports_oauth: false,
                 oauth_label: None,
                 auth_mode: "api_key".to_string(),
@@ -536,14 +602,14 @@ impl ProviderManager {
                 last_tested_ok: None,
                 last_latency_ms: None,
             },
-            // 11. Zhipu / GLM
+            // 12. Zhipu / GLM
             ProviderEntry {
                 id: "zai".to_string(),
                 name: "Zhipu / GLM (Z.ai)".to_string(),
                 subtitle: "GLM-5.1 and GLM-4.5 agentic models".to_string(),
                 badge: "Cloud".to_string(),
                 category: "cloud".to_string(),
-                priority_rank: 11,
+                priority_rank: 12,
                 supports_oauth: false,
                 oauth_label: None,
                 auth_mode: "api_key".to_string(),
@@ -569,14 +635,14 @@ impl ProviderManager {
                 last_tested_ok: None,
                 last_latency_ms: None,
             },
-            // 12. Moonshot / Kimi
+            // 13. Moonshot / Kimi
             ProviderEntry {
                 id: "moonshot".to_string(),
                 name: "Moonshot / Kimi".to_string(),
                 subtitle: "Kimi K2.5 and Moonshot v1 models".to_string(),
                 badge: "Cloud".to_string(),
                 category: "cloud".to_string(),
-                priority_rank: 12,
+                priority_rank: 13,
                 supports_oauth: false,
                 oauth_label: None,
                 auth_mode: "api_key".to_string(),
@@ -602,14 +668,14 @@ impl ProviderManager {
                 last_tested_ok: None,
                 last_latency_ms: None,
             },
-            // 13. Cohere
+            // 14. Cohere
             ProviderEntry {
                 id: "cohere".to_string(),
                 name: "Cohere".to_string(),
                 subtitle: "Command A and Command R+ enterprise RAG models".to_string(),
                 badge: "Cloud".to_string(),
                 category: "cloud".to_string(),
-                priority_rank: 13,
+                priority_rank: 14,
                 supports_oauth: false,
                 oauth_label: None,
                 auth_mode: "api_key".to_string(),
@@ -635,14 +701,14 @@ impl ProviderManager {
                 last_tested_ok: None,
                 last_latency_ms: None,
             },
-            // 14. Together AI
+            // 15. Together AI
             ProviderEntry {
                 id: "together".to_string(),
                 name: "Together AI".to_string(),
                 subtitle: "Serverless open-weights cloud (DeepSeek, Llama, Qwen)".to_string(),
                 badge: "Open Weights".to_string(),
                 category: "cloud".to_string(),
-                priority_rank: 14,
+                priority_rank: 15,
                 supports_oauth: false,
                 oauth_label: None,
                 auth_mode: "api_key".to_string(),
@@ -668,14 +734,14 @@ impl ProviderManager {
                 last_tested_ok: None,
                 last_latency_ms: None,
             },
-            // 15. Fireworks AI
+            // 16. Fireworks AI
             ProviderEntry {
                 id: "fireworks".to_string(),
                 name: "Fireworks AI".to_string(),
                 subtitle: "Fastserverless inference for DeepSeek, Llama, and Qwen".to_string(),
                 badge: "Open Weights".to_string(),
                 category: "cloud".to_string(),
-                priority_rank: 15,
+                priority_rank: 16,
                 supports_oauth: false,
                 oauth_label: None,
                 auth_mode: "api_key".to_string(),
@@ -701,14 +767,14 @@ impl ProviderManager {
                 last_tested_ok: None,
                 last_latency_ms: None,
             },
-            // 16. Ollama (Local)
+            // 17. Ollama (Local)
             ProviderEntry {
                 id: "ollama".to_string(),
                 name: "Ollama (Local)".to_string(),
                 subtitle: "Local models running on http://localhost:11434/v1".to_string(),
                 badge: "Local · :11434".to_string(),
                 category: "local".to_string(),
-                priority_rank: 16,
+                priority_rank: 17,
                 supports_oauth: false,
                 oauth_label: None,
                 auth_mode: "local".to_string(),
@@ -735,14 +801,14 @@ impl ProviderManager {
                 last_tested_ok: None,
                 last_latency_ms: None,
             },
-            // 17. LM Studio (Local)
+            // 18. LM Studio (Local)
             ProviderEntry {
                 id: "lmstudio".to_string(),
                 name: "LM Studio (Local)".to_string(),
                 subtitle: "Local OpenAI-compatible server on http://localhost:1234/v1".to_string(),
                 badge: "Local · :1234".to_string(),
                 category: "local".to_string(),
-                priority_rank: 17,
+                priority_rank: 18,
                 supports_oauth: false,
                 oauth_label: None,
                 auth_mode: "local".to_string(),
@@ -767,14 +833,14 @@ impl ProviderManager {
                 last_tested_ok: None,
                 last_latency_ms: None,
             },
-            // 18. vLLM (Local)
+            // 19. vLLM (Local)
             ProviderEntry {
                 id: "vllm".to_string(),
                 name: "vLLM (Local)".to_string(),
                 subtitle: "High-throughput local server on http://localhost:8000/v1".to_string(),
                 badge: "Local · :8000".to_string(),
                 category: "local".to_string(),
-                priority_rank: 18,
+                priority_rank: 19,
                 supports_oauth: false,
                 oauth_label: None,
                 auth_mode: "local".to_string(),
@@ -799,14 +865,14 @@ impl ProviderManager {
                 last_tested_ok: None,
                 last_latency_ms: None,
             },
-            // 19. llama.cpp (Local)
+            // 20. llama.cpp (Local)
             ProviderEntry {
                 id: "llamacpp".to_string(),
                 name: "llama.cpp (Local)".to_string(),
                 subtitle: "llama-server running on http://localhost:8080/v1".to_string(),
                 badge: "Local · :8080".to_string(),
                 category: "local".to_string(),
-                priority_rank: 19,
+                priority_rank: 20,
                 supports_oauth: false,
                 oauth_label: None,
                 auth_mode: "local".to_string(),
@@ -855,6 +921,53 @@ impl ProviderManager {
         let prefix: String = chars.iter().take(6).collect();
         let suffix: String = chars.iter().skip(chars.len() - 4).collect();
         format!("{}••••{}", prefix, suffix)
+    }
+
+    /// OpenCode Go asks every client to identify itself with its own User-Agent and to send
+    /// a stable `x-opencode-session` per conversation. The gateway uses the latter for routing
+    /// and prompt caching, so chat, tool, and compaction requests share the conversation id.
+    fn opencode_session(&self, session: Option<&str>) -> String {
+        session
+            .map(str::trim)
+            .filter(|value| {
+                !value.is_empty()
+                    && value.len() <= 128
+                    && value
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':'))
+            })
+            .map(str::to_string)
+            .unwrap_or_else(|| self.anonymous_session.clone())
+    }
+
+    /// Adds the client-identification headers required by OpenCode Go. Other providers keep
+    /// their existing wire format untouched.
+    fn with_client_headers(
+        &self,
+        req: reqwest::blocking::RequestBuilder,
+        provider_id: &str,
+        session: Option<&str>,
+    ) -> reqwest::blocking::RequestBuilder {
+        if provider_id != "opencode-go" {
+            return req;
+        }
+        req.header(
+            reqwest::header::USER_AGENT,
+            concat!("QuixiDesk/", env!("CARGO_PKG_VERSION")),
+        )
+        .header("x-opencode-session", self.opencode_session(session))
+    }
+
+    /// OpenCode Go serves chat completions under `/openai/v1` but advertises its catalog at
+    /// the gateway root (`/inference/go/v1/models`), so the usual `{base}/models` join is wrong.
+    fn models_endpoint(provider_id: &str, base_url: &str) -> String {
+        let base = base_url.trim_end_matches('/');
+        if provider_id == "opencode-go" {
+            if let Some(root) = base.strip_suffix("/openai/v1") {
+                return format!("{root}/v1/models");
+            }
+        }
+        format!("{base}/models")
     }
 
     fn merge_saved_state(mut catalog: ProvidersStateFile, saved: &Value) -> Option<ProvidersStateFile> {
@@ -1330,8 +1443,8 @@ impl ProviderManager {
                     message = "Could not verify the ChatGPT connection: no model catalog was returned. Try again or reconnect the account.".to_string();
                 }
             } else {
-                let models_url = format!("{}/models", base_url);
-                let mut req = http.get(&models_url);
+                let models_url = Self::models_endpoint(provider_id, &base_url);
+                let mut req = self.with_client_headers(http.get(&models_url), provider_id, None);
                 if !api_key.is_empty() {
                     if api_format == "anthropic" {
                         req = req
@@ -2515,7 +2628,39 @@ impl ProviderManager {
     where
         F: FnMut(StreamChunk),
     {
-        self.try_live_completion_with_context(prompt, cwd, history, model_override, "", on_chunk)
+        self.try_live_completion_streaming_for_session(
+            prompt,
+            cwd,
+            history,
+            model_override,
+            None,
+            on_chunk,
+        )
+    }
+
+    /// Streaming completion that preserves the conversation id for providers that scope
+    /// routing and caching to a session header (OpenCode Go).
+    pub fn try_live_completion_streaming_for_session<F>(
+        &self,
+        prompt: &str,
+        cwd: &str,
+        history: &[(String, String)],
+        model_override: Option<&str>,
+        session: Option<&str>,
+        on_chunk: F,
+    ) -> Option<(String, String, String)>
+    where
+        F: FnMut(StreamChunk),
+    {
+        self.try_live_completion_with_context(
+            prompt,
+            cwd,
+            history,
+            model_override,
+            session,
+            "",
+            on_chunk,
+        )
     }
 
     pub(crate) fn try_live_completion_with_context<F>(
@@ -2524,6 +2669,7 @@ impl ProviderManager {
         cwd: &str,
         history: &[(String, String)],
         model_override: Option<&str>,
+        session: Option<&str>,
         context: &str,
         mut on_chunk: F,
     ) -> Option<(String, String, String)>
@@ -2728,7 +2874,7 @@ impl ProviderManager {
             {
                 msgs.push(json!({ "role": "user", "content": prompt }));
             }
-            let resp = http
+            let mut anthropic_req = http
                 .post(&url)
                 .header("x-api-key", &credential)
                 .header("anthropic-version", "2023-06-01")
@@ -2740,8 +2886,9 @@ impl ProviderManager {
                     "system": sys_prompt,
                     "messages": msgs,
                     "stream": true
-                }))
-                .send();
+                }));
+            anthropic_req = self.with_client_headers(anthropic_req, &provider_id, session);
+            let resp = anthropic_req.send();
 
             let resp = match resp {
                 Ok(resp) => resp,
@@ -2789,6 +2936,7 @@ impl ProviderManager {
                     .header("HTTP-Referer", "https://quixidesk.local")
                     .header("X-Title", "QuixiDesk");
             }
+            req = self.with_client_headers(req, &provider_id, session);
             let mut msgs = vec![json!({ "role": "system", "content": sys_prompt })];
             for (role, text) in history {
                 if !text.trim().is_empty() {
@@ -2938,12 +3086,35 @@ impl ProviderManager {
         messages: &[Value],
         tools: &Value,
         model_override: Option<&str>,
+        on_chunk: F,
+    ) -> Option<ProviderToolTurn>
+    where
+        F: FnMut(StreamChunk),
+    {
+        self.complete_turn_with_tools_for_session(messages, tools, model_override, None, on_chunk)
+    }
+
+    /// Tool turn that forwards the conversation id to providers that keep per-session
+    /// routing state (OpenCode Go's `x-opencode-session`).
+    pub fn complete_turn_with_tools_for_session<F>(
+        &self,
+        messages: &[Value],
+        tools: &Value,
+        model_override: Option<&str>,
+        session: Option<&str>,
         mut on_chunk: F,
     ) -> Option<ProviderToolTurn>
     where
         F: FnMut(StreamChunk),
     {
-        self.complete_turn_with_tools_for_provider(messages, tools, model_override, None, &mut on_chunk)
+        self.complete_turn_with_tools_for_provider(
+            messages,
+            tools,
+            model_override,
+            None,
+            session,
+            &mut on_chunk,
+        )
     }
 
     /// Application budgets are conservative envelopes, not promises about an arbitrary gateway.
@@ -2970,7 +3141,7 @@ impl ProviderManager {
     }
 
     pub(crate) fn complete_turn_with_tools_for_provider<F>(
-        &self, messages: &[Value], tools: &Value, model_override: Option<&str>, provider_override: Option<&str>, mut on_chunk: F,
+        &self, messages: &[Value], tools: &Value, model_override: Option<&str>, provider_override: Option<&str>, session: Option<&str>, mut on_chunk: F,
     ) -> Option<ProviderToolTurn> where F: FnMut(StreamChunk) {
         use std::io::BufReader;
 
@@ -3062,6 +3233,7 @@ impl ProviderManager {
                 .header("HTTP-Referer", "https://quixidesk.local")
                 .header("X-Title", "QuixiDesk");
         }
+        req = self.with_client_headers(req, &provider_id, session);
 
         // Internal replay/error metadata belongs to adapters, never the Chat Completions wire format.
         let wire_messages: Vec<Value> = messages.iter().cloned().map(|mut message| {
@@ -3273,6 +3445,51 @@ mod provider_catalog_tests {
         assert!(ids.contains(&"deepseek/deepseek-v4.1-flash"), "ids: {ids:?}");
         assert!(ids.contains(&"deepseek/deepseek-v4-pro"), "ids: {ids:?}");
     }
+
+    /// OpenCode Go keeps Chat Completions under `/openai/v1`, but advertises the Go catalog at
+    /// the gateway root. Both endpoints and the subscription models belong to this integration.
+    #[test]
+    fn opencode_go_catalog_matches_subscription_gateway() {
+        let oc = entry("opencode-go");
+        assert_eq!(oc.name, "OpenCode Go");
+        assert_eq!(oc.category, "priority");
+        assert!(oc.supports_oauth == false, "Go uses a console API key");
+        assert_eq!(oc.auth_mode, "api_key");
+        assert_eq!(oc.api_format, "openai");
+        assert_eq!(oc.base_url, "https://opencode.ai/inference/go/openai/v1");
+        assert_eq!(oc.context_window, 1_000_000);
+
+        let ids: Vec<&str> = oc.models.iter().map(|m| m.id.as_str()).collect();
+        for expected in [
+            "deepseek-v4.1-flash",
+            "glm-5.3",
+            "kimi-k3",
+            "claude-haiku-5-5",
+            "gpt-6-luna",
+            "gemini-4-argon",
+        ] {
+            assert!(ids.contains(&expected), "{expected} missing: {ids:?}");
+        }
+        let deepseek = oc
+            .models
+            .iter()
+            .find(|m| m.id == "deepseek-v4.1-flash")
+            .unwrap();
+        assert!(deepseek.supports_thinking && deepseek.supports_vision);
+
+        assert_eq!(
+            ProviderManager::models_endpoint("opencode-go", &oc.base_url),
+            "https://opencode.ai/inference/go/v1/models"
+        );
+        assert_eq!(
+            ProviderManager::models_endpoint("openrouter", "https://openrouter.ai/api/v1"),
+            "https://openrouter.ai/api/v1/models"
+        );
+        assert_eq!(
+            ProviderManager::models_endpoint("opencode-go", "https://proxy.test/go/openai/v1"),
+            "https://proxy.test/go/v1/models"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -3303,6 +3520,7 @@ mod legacy_model_migration_tests {
 #[cfg(test)]
 mod streaming_chunk_tests {
     use super::{ProviderManager, StreamChunk};
+    use serde_json::json;
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
     use std::path::PathBuf;
@@ -3358,6 +3576,153 @@ mod streaming_chunk_tests {
         )
         .unwrap();
         (ProviderManager::new(&dir), dir)
+    }
+
+    fn opencode_manager(base_url: &str) -> (ProviderManager, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("quixi-oc-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let state = serde_json::json!({
+            "onboardingCompleted": true,
+            "activeProvider": "opencode-go",
+            "activeModel": "deepseek-v4.1-flash",
+            "providers": [{
+                "id": "opencode-go",
+                "name": "OpenCode Go",
+                "configured": true,
+                "baseUrl": base_url,
+                "apiFormat": "openai",
+                "authMode": "api_key",
+                "selectedModel": "deepseek-v4.1-flash",
+                "apiKeyRaw": "test-key"
+            }]
+        });
+        std::fs::write(
+            dir.join("providers.json"),
+            serde_json::to_vec_pretty(&state).unwrap(),
+        )
+        .unwrap();
+        (ProviderManager::new(&dir), dir)
+    }
+
+    /// Captures the request headers and answers with `body`, so integrations that depend on
+    /// client-identification headers can be verified locally.
+    fn provider_capturing_headers(body: &'static str) -> (String, std::thread::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut headers = String::new();
+            let mut line = String::new();
+            while reader.read_line(&mut line).map(|n| n > 0).unwrap_or(false) {
+                if line == "\r\n" {
+                    break;
+                }
+                headers.push_str(&line);
+                line.clear();
+            }
+            let mut stream = stream;
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{}",
+                body
+            );
+            let _ = stream.flush();
+            headers
+        });
+        (format!("http://127.0.0.1:{}/v1", port), handle)
+    }
+
+    const OK_STREAM: &str = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n"
+    );
+
+    /// Go asks clients to identify themselves and to send a stable per-conversation session id
+    /// for routing and prompt caching. Chat, tool, and compaction turns all carry the same id.
+    #[test]
+    fn opencode_go_requests_identify_client_and_conversation() {
+        let (base_url, server) = provider_capturing_headers(OK_STREAM);
+        let (mgr, dir) = opencode_manager(&base_url);
+
+        let out = mgr.try_live_completion_streaming_for_session(
+            "hi",
+            &dir.to_string_lossy(),
+            &[],
+            Some("deepseek-v4.1-flash"),
+            Some("conversation-abc"),
+            |_| {},
+        );
+        let headers = server.join().unwrap().to_ascii_lowercase();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(out.is_some(), "request should reach the local gateway");
+        assert!(
+            headers.contains(&format!("user-agent: quixidesk/{}", env!("CARGO_PKG_VERSION"))),
+            "headers: {headers}"
+        );
+        assert!(
+            headers.contains("x-opencode-session: conversation-abc"),
+            "headers: {headers}"
+        );
+        assert!(
+            headers.contains("authorization: bearer test-key"),
+            "headers: {headers}"
+        );
+    }
+
+    #[test]
+    fn opencode_go_tool_turn_uses_the_same_session_header() {
+        let (base_url, server) = provider_capturing_headers(OK_STREAM);
+        let (mgr, dir) = opencode_manager(&base_url);
+
+        let turn = mgr.complete_turn_with_tools_for_session(
+            &[json!({"role":"user","content":"hi"})],
+            &json!([]),
+            Some("deepseek-v4.1-flash"),
+            Some("conversation-xyz"),
+            |_| {},
+        );
+        let headers = server.join().unwrap().to_ascii_lowercase();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let turn = turn.expect("tool turn should return");
+        assert_eq!(turn.text, "ok");
+        assert!(
+            headers.contains("x-opencode-session: conversation-xyz"),
+            "headers: {headers}"
+        );
+        assert!(
+            headers.contains(&format!("user-agent: quixidesk/{}", env!("CARGO_PKG_VERSION"))),
+            "headers: {headers}"
+        );
+    }
+
+    /// A caller-supplied id is untrusted request data: unsafe characters must fall back to the
+    /// manager's stable anonymous session rather than being forwarded into an HTTP header.
+    #[test]
+    fn opencode_go_rejects_unsafe_session_ids() {
+        let (base_url, server) = provider_capturing_headers(OK_STREAM);
+        let (mgr, dir) = opencode_manager(&base_url);
+
+        let out = mgr.try_live_completion_streaming_for_session(
+            "hi",
+            &dir.to_string_lossy(),
+            &[],
+            Some("deepseek-v4.1-flash"),
+            Some("bad session\r\nx-injected: yes"),
+            |_| {},
+        );
+        let headers = server.join().unwrap().to_ascii_lowercase();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(out.is_some());
+        assert!(
+            headers.contains("x-opencode-session: quixidesk-"),
+            "headers: {headers}"
+        );
+        assert!(!headers.contains("x-injected"), "headers: {headers}");
     }
 
     /// Reasoning deltas must reach the UI as thinking chunks, and the visible answer must
