@@ -13,6 +13,11 @@ dashmap.workspace = true
 parking_lot.workspace = true
 dirs.workspace = true
 tracing.workspace = true
+sha2.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+tempfile.workspace = true
+quixi-platform.workspace = true
 quixi-proto.workspace = true
 
 [target.'cfg(unix)'.dependencies]

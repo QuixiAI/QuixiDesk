@@ -191,6 +191,11 @@ impl QuixiEngine {
         let _submission = self.chat_submission.lock();
         self.cancel_turn_signal(id);
         self.pending_messages.lock().remove(id);
+        self.jobs.kill_all_for_owner(id);
+        self.shell_host.terminals.close_owner(id);
+        self.collaboration.delete_session(id);
+        self.observations.clear_session(id);
+        let _ = fs::remove_dir_all(crate::spill::session_spill_dir(&self.data_dir, id));
         self.delete_subagents(id)?;
         let mut agents = self.agent_sessions.write();
         let mut codes = self.code_sessions.write();

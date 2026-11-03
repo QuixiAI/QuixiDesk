@@ -80,9 +80,9 @@ fn main() {
     }
     // An unrecognised leading option is a mistake, not a prompt: sending `--bogus` to the model
     // spends a call answering a question the user did not ask, and looks like the CLI hung.
-    const KNOWN: [&str; 8] = [
+    const KNOWN: [&str; 12] = [
         "--skills", "--skill", "--search", "--providers", "--prompt-block", "--json", "--cwd",
-        "--capabilities",
+        "--capabilities", "--mode", "--plan", "--model", "--effort",
     ];
     if argv[0].starts_with('-') && !KNOWN.contains(&argv[0].as_str()) {
         eprintln!("quixi-headless: unknown option `{}`\n", argv[0]);
@@ -191,7 +191,11 @@ fn main() {
         let st = engine.provider_manager.state.read();
         println!("active provider: {}", st.active_provider);
         println!("active model:    {}", st.active_model);
-        println!("subagent:        {} / {}", st.subagent_provider, st.subagent_model);
+        if st.subagent_model_user_selected && !st.subagent_model.is_empty() {
+            println!("subagent:        {} / {}", st.subagent_provider, st.subagent_model);
+        } else {
+            println!("subagent:        same as active model");
+        }
         for p in st.providers.iter() {
             println!(
                 "  {:<12} {:<28} {}",
@@ -205,6 +209,10 @@ fn main() {
 
     // ── a real turn ──
     let mut json_out = false;
+    let mut plan_mode = false;
+    let mut perm_mode = "default".to_string();
+    let mut model_opt: Option<String> = None;
+    let mut effort_opt = "default".to_string();
     let mut cwd = std::env::current_dir()
         .map(|d| d.to_string_lossy().into_owned())
         .unwrap_or_else(|_| ".".to_string());
@@ -214,10 +222,29 @@ fn main() {
     while i < argv.len() {
         match argv[i].as_str() {
             "--json" => json_out = true,
+            "--plan" => plan_mode = true,
             "--cwd" => {
                 i += 1;
                 if i < argv.len() {
                     cwd = argv[i].clone();
+                }
+            }
+            "--mode" => {
+                i += 1;
+                if i < argv.len() {
+                    perm_mode = argv[i].clone();
+                }
+            }
+            "--model" => {
+                i += 1;
+                if i < argv.len() {
+                    model_opt = Some(argv[i].clone());
+                }
+            }
+            "--effort" => {
+                i += 1;
+                if i < argv.len() {
+                    effort_opt = argv[i].clone();
                 }
             }
             other => prompt_parts.push(other.to_string()),
@@ -230,7 +257,16 @@ fn main() {
         usage_with(2);
     }
 
-    let session_id = format!("headless-{}", uuid::Uuid::new_v4());
+    let session_id = engine.start_agent_session(&serde_json::json!({
+        "cwd": cwd,
+        "userSelectedFolders": [cwd],
+        "permissionMode": perm_mode,
+        "effortLevel": effort_opt,
+        "model": model_opt.clone().unwrap_or_default(),
+    }));
+    if plan_mode {
+        engine.collaboration.set_plan_mode(&session_id, true);
+    }
     let cancelled = AtomicBool::new(false);
 
     let mut printed_any = false;
@@ -238,8 +274,8 @@ fn main() {
         &prompt,
         &cwd,
         &[],
-        None,
-        "default",
+        model_opt.as_deref(),
+        &perm_mode,
         &session_id,
         &cancelled,
         |chunk| match chunk {
@@ -281,7 +317,11 @@ fn main() {
                     .get("input")
                     .map(|i| {
                         let s = i.to_string();
-                        if s.len() > 90 { format!("{}…", &s[..90]) } else { s }
+                        if s.chars().count() > 90 {
+                            format!("{}…", s.chars().take(90).collect::<String>())
+                        } else {
+                            s
+                        }
                     })
                     .unwrap_or_default();
                 eprintln!("[tool] {name} {detail}");
@@ -290,9 +330,16 @@ fn main() {
     );
 
     if json_out {
+        let collab = engine.collaboration.client_view(&session_id);
         println!(
             "{}",
-            serde_json::json!({"model": model, "session": session_id, "reply": reply})
+            serde_json::json!({
+                "model": model,
+                "session": session_id,
+                "reply": reply,
+                "contextMeter": collab["contextMeter"],
+                "deliverables": collab["deliverables"],
+            })
         );
     } else if !printed_any {
         // Some providers return the whole answer without streaming; print it rather than nothing.

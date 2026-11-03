@@ -1872,11 +1872,7 @@ impl McpHost {
             // =========================================================================
             "read_file" => {
                 let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
-                let target = if Path::new(path).is_absolute() {
-                    PathBuf::from(path)
-                } else {
-                    default_cwd.join(path)
-                };
+                let target = quixi_platform::SafeFs::resolve_target_beneath(default_cwd, Path::new(path))?;
                 let content = fs::read_to_string(&target)?;
                 Ok(json!({
                     "content": [{ "type": "text", "text": content }],
@@ -1886,11 +1882,7 @@ impl McpHost {
             "write_file" | "create_file" => {
                 let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
                 let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
-                let target = if Path::new(path).is_absolute() {
-                    PathBuf::from(path)
-                } else {
-                    default_cwd.join(path)
-                };
+                let target = quixi_platform::SafeFs::resolve_target_beneath(default_cwd, Path::new(path))?;
                 if let Some(parent) = target.parent() {
                     let _ = fs::create_dir_all(parent);
                 }
@@ -1907,11 +1899,7 @@ impl McpHost {
                     .get("replacement")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                let target_path = if Path::new(path).is_absolute() {
-                    PathBuf::from(path)
-                } else {
-                    default_cwd.join(path)
-                };
+                let target_path = quixi_platform::SafeFs::resolve_target_beneath(default_cwd, Path::new(path))?;
                 let existing = fs::read_to_string(&target_path)?;
                 if target_str.is_empty()||!existing.contains(target_str){bail!("Edit target was not found; file was not changed");}
                 let updated = existing.replacen(target_str, replacement, 1);
@@ -1923,11 +1911,7 @@ impl McpHost {
             }
             "delete_file" => {
                 let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
-                let target = if Path::new(path).is_absolute() {
-                    PathBuf::from(path)
-                } else {
-                    default_cwd.join(path)
-                };
+                let target = quixi_platform::SafeFs::resolve_target_beneath(default_cwd, Path::new(path))?;
                 fs::remove_file(&target)?;
                 Ok(json!({
                     "content": [{ "type": "text", "text": format!("Deleted {}", target.display()) }],
@@ -1936,11 +1920,7 @@ impl McpHost {
             }
             "list_directory" => {
                 let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
-                let target = if Path::new(path).is_absolute() {
-                    PathBuf::from(path)
-                } else {
-                    default_cwd.join(path)
-                };
+                let target = quixi_platform::SafeFs::resolve_target_beneath(default_cwd, Path::new(path))?;
                 let entries = quixi_workspace::FileIndexEngine::list_directory_children(&target);
                 Ok(json!({
                     "content": [{ "type": "text", "text": serde_json::to_string_pretty(&entries)? }],
@@ -2007,7 +1987,11 @@ impl McpHost {
                 "isError": false
             })),
             "screenshot" | "app_screenshot" | "framebuffer_screenshot" | "preview_screenshot" => {
-                let b64 = ComputerUse::capture_screenshot_base64()?;
+                let b64 = if tool_name == "preview_screenshot" {
+                    ComputerUse::capture_screenshot_base64()?
+                } else {
+                    ComputerUse::capture_desktop_screenshot_base64()?
+                };
                 let displays = ComputerUse::list_displays();
                 let d = displays.first().cloned().unwrap_or(quixi_platform::DisplayInfo {
                     id: 1,

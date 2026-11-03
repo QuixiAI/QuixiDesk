@@ -18,6 +18,9 @@ base64.workspace = true
 sha2.workspace = true
 url.workspace = true
 ignore.workspace = true
+regex.workspace = true
+globset.workspace = true
+tempfile.workspace = true
 quixi-proto.workspace = true
 quixi-platform.workspace = true
 quixi-workspace.workspace = true
@@ -26,6 +29,9 @@ quixi-netstack.workspace = true
 aes-gcm = "0.10"
 keyring = { version = "3.6.3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust", "vendored"] }
 cron = "0.15"
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
 
 # Headless driver: same engine, no window. See src/bin/quixi-headless.rs.
 [[bin]]

@@ -20,13 +20,14 @@ provider_files = {
 provider_patterns = {
     "crates/quixi-engine/src/provider_tool_responses.rs": re.compile(r"anthropic_payload"),
     "crates/quixi-engine/src/mcp_integration_tests.rs": re.compile(r'"anthropic"|anthropic_'),
+    "crates/quixi-engine/src/subagents.rs": re.compile(r"anthropic/claude-sonnet"),
     "crates/quixi-engine/src/lib.rs": re.compile(
-        r"claude-sonnet-4-6|anthropic-version"
+        r"claude-sonnet-4-6|anthropic-version|anthropic_output_budget|anthropic_response_text"
     ),
     "crates/quixi-ipc/src/lib.rs": re.compile(
         r'"provider": "anthropic"|"signInWithAnthropicApi"|claude-(sonnet|opus)-'
     ),
-    "resources/ui/app.js": re.compile(r'"anthropic", "Messages API"'),
+    "resources/ui/app.js": re.compile(r'"anthropic", "Messages API"|apiFormat === "anthropic"'),
 }
 errors = []
 checked = 0

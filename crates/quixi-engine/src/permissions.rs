@@ -6,19 +6,91 @@ use std::time::{Duration, Instant};
 pub(crate) struct PendingToolApproval {
     session_id: String,
     request: Value,
-    decision: Arc<AtomicU8>,
+    pub(crate) decision: Arc<AtomicU8>,
+    selected_subagent_model: Arc<parking_lot::Mutex<Option<(String, Option<String>)>>>,
+    interaction_reply: Arc<parking_lot::Mutex<Option<Value>>>,
+}
+
+fn canonical_or_parent(path: &Path) -> Option<PathBuf> {
+    if let Ok(p) = path.canonicalize() {
+        return Some(p);
+    }
+    let name = path.file_name()?;
+    let parent = canonical_or_parent(path.parent()?)?;
+    Some(parent.join(name))
 }
 
 // Resolve existing symlinks and normalize missing descendants before checking scope.
+#[cfg(test)]
 fn file_access_outside_workspace(name:&str,input:&Value,cwd:&str)->bool {
-    if !matches!(name,"Read"|"ListDirectory"|"Grep"|"Write"|"Edit") {return false;}
-    let raw=input[if matches!(name,"ListDirectory"|"Grep") {"path"}else{"file_path"}].as_str().unwrap_or(".");
-    let path=Path::new(raw);let path=if path.is_absolute(){path.to_path_buf()}else{Path::new(cwd).join(path)};
-    fn resolved(path:&Path)->Option<PathBuf>{
-        if let Ok(p)=path.canonicalize(){return Some(p);}
-        let name=path.file_name()?;let parent=resolved(path.parent()?)?;Some(parent.join(name))
+    file_access_outside_workspace_with_spill(name, input, cwd, None)
+}
+
+fn file_access_outside_workspace_with_spill(
+    name: &str,
+    input: &Value,
+    cwd: &str,
+    spill_allowance: Option<(&Path, &str)>,
+) -> bool {
+    let check_one = |raw: &str, allow_spill: bool| -> bool {
+        let p = Path::new(raw);
+        let joined = if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            Path::new(cwd).join(p)
+        };
+        if allow_spill {
+            if let Some((data_dir, sid)) = spill_allowance {
+                if crate::spill::is_session_spill_path(data_dir, sid, &joined) {
+                    return false;
+                }
+            }
+        }
+        match (Path::new(cwd).canonicalize(), canonical_or_parent(&joined)) {
+            (Ok(root), Some(resolved)) => !resolved.starts_with(root),
+            _ => true,
+        }
+    };
+
+    match name {
+        "Read" | "Write" | "Edit" | "Lsp" => {
+            let raw = input["file_path"].as_str().unwrap_or(".");
+            check_one(raw, name == "Read")
+        }
+        "ListDirectory" | "Grep" | "Glob" => {
+            let raw = input["path"].as_str().unwrap_or(".");
+            check_one(raw, name == "Grep")
+        }
+        "TerminalOpen" => match input.get("cwd").and_then(Value::as_str) {
+            Some(raw) if !raw.trim().is_empty() => check_one(raw, false),
+            _ => false,
+        },
+        "WorkingDirectory" => {
+            if input["action"].as_str() == Some("set") {
+                check_one(input["path"].as_str().unwrap_or("."), false)
+            } else {
+                false
+            }
+        }
+        "ApplyPatch" => {
+            let patch = input["patch"].as_str().unwrap_or("");
+            match crate::code_tools::parse_patch_operations(patch, Path::new(cwd)) {
+                Ok(ops) => ops.iter().any(|op| {
+                    let p = match op {
+                        crate::code_tools::PatchFileOp::Add { path, .. }
+                        | crate::code_tools::PatchFileOp::Update { path, .. }
+                        | crate::code_tools::PatchFileOp::Delete { path } => path,
+                    };
+                    check_one(&p.to_string_lossy(), false)
+                }),
+                Err(_) => false,
+            }
+        }
+        "Present" => input["files"]
+            .as_array()
+            .is_some_and(|arr| arr.iter().any(|f| check_one(f["path"].as_str().unwrap_or("."), false))),
+        _ => false,
     }
-    match (Path::new(cwd).canonicalize(),resolved(&path)) {(Ok(root),Some(path))=>!path.starts_with(root),_=>true}
 }
 
 impl QuixiEngine {
@@ -35,13 +107,118 @@ impl QuixiEngine {
     }
 
     pub fn resolve_tool_approval(&self, session_id: &str, request_id: &str, decision: &str) -> Value {
-        let (signal, file_edit) = {
+        let (signal, file_edit, request, subagent_choice, interaction_reply) = {
             let pending=self.pending_approvals.read();
             let Some(p)=pending.get(request_id).filter(|p|p.session_id==session_id) else {
                 return json!({"error":"This approval is no longer pending."});
             };
-            (p.decision.clone(), matches!(p.request["toolName"].as_str(),Some("Write"|"Edit")) && p.request["outsideWorkspace"]!=true)
+            (
+                p.decision.clone(),
+                matches!(p.request["toolName"].as_str(),Some("Write"|"Edit"|"ApplyPatch")) && p.request["outsideWorkspace"]!=true,
+                p.request.clone(),
+                p.selected_subagent_model.clone(),
+                p.interaction_reply.clone(),
+            )
         };
+        if request["kind"] == "plan_review" {
+            let (code, payload) = if decision == "approve" || decision == "allow_once" {
+                (1u8, json!({"approved": true}))
+            } else if let Some(feedback) = decision.strip_prefix("revise:") {
+                (2u8, json!({"approved": false, "feedback": feedback.trim()}))
+            } else if decision == "deny" {
+                (2u8, json!({"approved": false}))
+            } else {
+                return json!({"error": "Invalid plan review decision."});
+            };
+            if signal.compare_exchange(0, 3, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+                return json!({"error": "This plan review was already answered."});
+            }
+            *interaction_reply.lock() = Some(payload);
+            signal.store(code, Ordering::SeqCst);
+            self.permission_event(session_id, "tool_permission_changed");
+            return json!({"ok": true});
+        }
+        if request["kind"] == "ask_user" {
+            let (code, payload) = if let Some(raw_json) = decision.strip_prefix("answer:") {
+                match serde_json::from_str::<Value>(raw_json) {
+                    Ok(v) => (1u8, v),
+                    Err(_) => return json!({"error": "Invalid question answer payload."}),
+                }
+            } else if decision == "deny" {
+                (2u8, json!({"dismissed": true}))
+            } else {
+                return json!({"error": "Invalid question response."});
+            };
+            if signal.compare_exchange(0, 3, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+                return json!({"error": "This question was already answered."});
+            }
+            *interaction_reply.lock() = Some(payload);
+            signal.store(code, Ordering::SeqCst);
+            self.permission_event(session_id, "tool_permission_changed");
+            return json!({"ok": true});
+        }
+        if request["kind"] == "subagent_model" {
+            let parent_model = request["parentModel"].as_str().unwrap_or_default().to_string();
+            let requested_model = request["requestedModel"].as_str().unwrap_or_default().to_string();
+            let requested_provider = request["requestedProvider"].as_str().map(str::to_string);
+            let parsed: Result<(u8, Option<(String, Option<String>)>, Option<(String, String)>), String> = match decision {
+                "deny" => Ok((2, None, None)),
+                "use_parent_model" => Ok((1, Some((parent_model, None)), None)),
+                "allow_once" if !requested_model.is_empty() && requested_provider.is_some() => {
+                    Ok((1, Some((requested_model, requested_provider)), None))
+                }
+                "allow_always" if !requested_model.is_empty() && requested_provider.is_some() => {
+                    let pid = requested_provider.clone().unwrap();
+                    Ok((1, Some((requested_model.clone(), Some(pid.clone()))), Some((pid, requested_model))))
+                }
+                _ if decision.starts_with("select_once:") || decision.starts_with("select_always:") => {
+                    let always = decision.starts_with("select_always:");
+                    let rest = decision.split_once(':').map(|(_, r)| r).unwrap_or("");
+                    if let Some((pid, mid)) = rest.split_once(':') {
+                        let pid = pid.trim();
+                        let mid = mid.trim();
+                        if !pid.is_empty() && !mid.is_empty() {
+                            let valid = self
+                                .provider_manager
+                                .available_subagent_models()
+                                .into_iter()
+                                .any(|m| m["providerId"] == pid && m["model"] == mid);
+                            if valid {
+                                Ok((
+                                    1,
+                                    Some((mid.to_string(), Some(pid.to_string()))),
+                                    always.then(|| (pid.to_string(), mid.to_string())),
+                                ))
+                            } else {
+                                Err("Choose a tool-capable model from a configured provider.".into())
+                            }
+                        } else {
+                            Err("Choose a valid subagent model.".into())
+                        }
+                    } else {
+                        Err("Invalid subagent model choice.".into())
+                    }
+                }
+                _ => Err("Invalid approval choice.".into()),
+            };
+            let (answer, chosen, persist) = match parsed {
+                Ok(v) => v,
+                Err(msg) => return json!({"error": msg}),
+            };
+            if signal.compare_exchange(0,3,Ordering::SeqCst,Ordering::SeqCst).is_err() {
+                return json!({"error":"This approval was already answered."});
+            }
+            if let Some((pid, mid)) = persist {
+                if let Err(err) = self.provider_manager.save_subagent_selection(&pid, &mid) {
+                    signal.store(0, Ordering::SeqCst);
+                    return json!({"error": err});
+                }
+            }
+            *subagent_choice.lock() = chosen;
+            signal.store(answer, Ordering::SeqCst);
+            self.permission_event(session_id, "tool_permission_changed");
+            return json!({"ok":true});
+        }
         let answer=match decision {
             "allow_once" => 1,
             "allow_file_edits" if file_edit => 1,
@@ -64,10 +241,256 @@ impl QuixiEngine {
         json!({"ok":true})
     }
 
+    pub(crate) fn request_subagent_model_approval(
+        &self,
+        session_id: &str,
+        call_id: &str,
+        title: &str,
+        parent_model: &str,
+        requested_model: &str,
+        requested_provider: Option<&str>,
+        cancelled: &AtomicBool,
+    ) -> Result<(String, Option<String>), String> {
+        if cancelled.load(Ordering::SeqCst) {
+            return Err("Task stopped before delegation.".into());
+        }
+        let request_id = Uuid::new_v4().to_string();
+        let signal = Arc::new(AtomicU8::new(0));
+        let selected = Arc::new(parking_lot::Mutex::new(None));
+        let available = self.provider_manager.available_subagent_models();
+        self.pending_approvals.write().insert(
+            request_id.clone(),
+            PendingToolApproval {
+                session_id: session_id.into(),
+                decision: signal.clone(),
+                selected_subagent_model: selected.clone(),
+                interaction_reply: Arc::new(parking_lot::Mutex::new(None)),
+                request: json!({
+                    "requestId": request_id,
+                    "sessionId": session_id,
+                    "toolCallId": call_id,
+                    "toolName": "Task",
+                    "kind": "subagent_model",
+                    "title": title,
+                    "parentModel": parent_model,
+                    "requestedModel": requested_model,
+                    "requestedProvider": requested_provider,
+                    "availableModels": available,
+                    "input": {
+                        "title": title,
+                        "model": requested_model,
+                    },
+                }),
+            },
+        );
+        self.permission_event(session_id, "tool_permission_requested");
+        let start = Instant::now();
+        let outcome = loop {
+            if cancelled.load(Ordering::SeqCst) {
+                break 2;
+            }
+            let decision = signal.load(Ordering::SeqCst);
+            if decision == 1 || decision == 2 {
+                break decision;
+            }
+            if start.elapsed() > Duration::from_secs(30 * 60) {
+                break 2;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        self.pending_approvals.write().remove(&request_id);
+        self.permission_event(session_id, "tool_permission_changed");
+        if outcome != 1 || cancelled.load(Ordering::SeqCst) {
+            return Err("Subagent model request was not approved or the task was stopped. No subagent ran.".into());
+        }
+        let choice = selected.lock().clone();
+        choice.ok_or_else(|| "Subagent model choice was not recorded.".into())
+    }
+
     pub(crate) fn cancel_tool_approvals(&self, session_id: &str) {
         self.pending_approvals.write().retain(|_,p| {
             if p.session_id==session_id {p.decision.store(2,Ordering::SeqCst);false} else {true}
         });
+    }
+
+    fn run_plan_review(
+        &self,
+        session_id: &str,
+        call_id: &str,
+        input: &Value,
+        cancelled: &AtomicBool,
+    ) -> (String, bool) {
+        if !self.collaboration.is_plan_active(session_id) {
+            return (
+                "ExitPlanMode is only callable while Plan Mode is active.".into(),
+                true,
+            );
+        }
+        let plan = input["plan"].as_str().unwrap_or("").trim();
+        if !plan.starts_with('#') {
+            return (
+                "ExitPlanMode requires a complete Markdown plan starting with a `#` heading.".into(),
+                true,
+            );
+        }
+        self.collaboration.mutate(session_id, |st| {
+            st.plan_mode.last_plan = Some(plan.to_string());
+        });
+        let request_id = Uuid::new_v4().to_string();
+        let signal = Arc::new(AtomicU8::new(0));
+        let reply = Arc::new(parking_lot::Mutex::new(None));
+        self.pending_approvals.write().insert(
+            request_id.clone(),
+            PendingToolApproval {
+                session_id: session_id.into(),
+                decision: signal.clone(),
+                selected_subagent_model: Arc::new(parking_lot::Mutex::new(None)),
+                interaction_reply: reply.clone(),
+                request: json!({
+                    "requestId": request_id,
+                    "sessionId": session_id,
+                    "toolCallId": call_id,
+                    "toolName": "ExitPlanMode",
+                    "kind": "plan_review",
+                    "plan": plan,
+                    "input": { "plan": plan },
+                }),
+            },
+        );
+        self.permission_event(session_id, "tool_permission_requested");
+        let start = Instant::now();
+        let outcome = loop {
+            if cancelled.load(Ordering::SeqCst) {
+                break 2;
+            }
+            let d = signal.load(Ordering::SeqCst);
+            if d == 1 || d == 2 {
+                break d;
+            }
+            if start.elapsed() > Duration::from_secs(30 * 60) {
+                break 2;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        self.pending_approvals.write().remove(&request_id);
+        self.permission_event(session_id, "tool_permission_changed");
+        if cancelled.load(Ordering::SeqCst) {
+            return ("Task stopped during plan review.".into(), true);
+        }
+        let payload = reply.lock().clone().unwrap_or_else(|| json!({}));
+        if outcome == 1 {
+            self.collaboration.set_plan_mode(session_id, false);
+            self.emit_session_collab_updated(session_id);
+            (
+                json!({"approved": true, "note": "Plan approved by user; Plan Mode is now off. Proceed with implementation."}).to_string(),
+                false,
+            )
+        } else if let Some(fb) = payload["feedback"].as_str().filter(|s| !s.is_empty()) {
+            (
+                format!("Keep planning — user requested revisions:\n{fb}\n\nRevise the plan and submit via ExitPlanMode."),
+                true,
+            )
+        } else {
+            (
+                json!({"approved": false, "note": "Plan review dismissed; remain in Plan Mode and await user instructions."}).to_string(),
+                false,
+            )
+        }
+    }
+
+    fn run_ask_user_question(
+        &self,
+        session_id: &str,
+        call_id: &str,
+        input: &Value,
+        cancelled: &AtomicBool,
+    ) -> (String, bool) {
+        let Some(questions) = input["questions"].as_array().filter(|q| !q.is_empty() && q.len() <= 4) else {
+            return ("AskUserQuestion requires 1 to 4 items in `questions`.".into(), true);
+        };
+        let normalized_questions: Vec<Value> = questions
+            .iter()
+            .enumerate()
+            .map(|(i, q)| {
+                let mut item = q.clone();
+                if item.get("id").and_then(Value::as_str).is_none_or(|s| s.trim().is_empty()) {
+                    item["id"] = json!(format!("q{}", i + 1));
+                }
+                item
+            })
+            .collect();
+        let timed_secs = input
+            .get("timeout_seconds")
+            .and_then(Value::as_u64)
+            .map(|s| s.clamp(1, 300));
+
+        let request_id = Uuid::new_v4().to_string();
+        let signal = Arc::new(AtomicU8::new(0));
+        let reply = Arc::new(parking_lot::Mutex::new(None));
+        self.pending_approvals.write().insert(
+            request_id.clone(),
+            PendingToolApproval {
+                session_id: session_id.into(),
+                decision: signal.clone(),
+                selected_subagent_model: Arc::new(parking_lot::Mutex::new(None)),
+                interaction_reply: reply.clone(),
+                request: json!({
+                    "requestId": request_id,
+                    "sessionId": session_id,
+                    "toolCallId": call_id,
+                    "toolName": "AskUserQuestion",
+                    "kind": "ask_user",
+                    "questions": normalized_questions,
+                    "timeoutSeconds": timed_secs,
+                    "input": input,
+                }),
+            },
+        );
+        self.permission_event(session_id, "tool_permission_requested");
+        let wait_limit = timed_secs
+            .map(Duration::from_secs)
+            .unwrap_or(Duration::from_secs(30 * 60));
+        let start = Instant::now();
+        let mut timed_out = false;
+        let outcome = loop {
+            if cancelled.load(Ordering::SeqCst) {
+                break 2;
+            }
+            let d = signal.load(Ordering::SeqCst);
+            if d == 1 || d == 2 {
+                break d;
+            }
+            if start.elapsed() >= wait_limit {
+                timed_out = timed_secs.is_some();
+                break 0;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        self.pending_approvals.write().remove(&request_id);
+        self.permission_event(session_id, "tool_permission_changed");
+        if cancelled.load(Ordering::SeqCst) {
+            return ("Task stopped while waiting for user answer.".into(), true);
+        }
+        if timed_out && outcome == 0 {
+            self.collaboration
+                .record_continued_question(session_id, call_id, normalized_questions);
+            self.emit_session_collab_updated(session_id);
+            return (
+                json!({
+                    "pending": true,
+                    "callId": call_id,
+                    "note": "Foreground wait elapsed without an answer. The question card remains open for a late reply; continue independent non-blocked work, and do not treat pending as approval or confirmation."
+                })
+                .to_string(),
+                false,
+            );
+        }
+        if outcome == 1 {
+            let ans = reply.lock().clone().unwrap_or_else(|| json!({"answers": []}));
+            (ans.to_string(), false)
+        } else {
+            ("User dismissed the question without answering.".into(), true)
+        }
     }
 
     pub(crate) fn execute_tool_with_approval(&self, session_id: &str, call_id: &str, name: &str,
@@ -80,6 +503,88 @@ impl QuixiEngine {
         }
         if let Err(error)=agent_tools::validate_input(name,input) {return (error,true);}
         if cancelled.load(Ordering::SeqCst) {return ("Task stopped. No action performed.".into(),true);}
+
+        // Monotonic Plan Mode guard: block mutations & shell execution while planning.
+        if self.collaboration.is_plan_active(session_id)
+            && matches!(
+                name,
+                agent_tools::TOOL_BASH
+                    | agent_tools::TOOL_WRITE
+                    | agent_tools::TOOL_EDIT
+                    | crate::code_tools::TOOL_APPLY_PATCH
+                    | crate::code_tools::TOOL_CREATE_WORKTREE
+                    | "TerminalOpen"
+                    | "TerminalSend"
+            )
+        {
+            return (
+                format!(
+                    "Blocked by Plan Mode: `{name}` is disabled while planning. Use read-only inspection tools (`Read`, `Grep`, `Glob`, `ListDirectory`, `Lsp`) and submit your finished plan via `ExitPlanMode`."
+                ),
+                true,
+            );
+        }
+
+        // Dedicated interactive collaboration flows:
+        if name == crate::collaboration::TOOL_EXIT_PLAN_MODE {
+            return self.run_plan_review(session_id, call_id, input, cancelled);
+        }
+        if name == crate::collaboration::TOOL_ASK_USER {
+            return self.run_ask_user_question(session_id, call_id, input, cancelled);
+        }
+        if name == crate::collaboration::TOOL_TODO_WRITE {
+            return match self.collaboration.write_todos(session_id, input) {
+                Ok(v) => {
+                    self.emit_session_collab_updated(session_id);
+                    (v.to_string(), false)
+                }
+                Err(e) => (e, true),
+            };
+        }
+        if matches!(
+            name,
+            crate::collaboration::TOOL_GET_GOAL
+                | crate::collaboration::TOOL_CREATE_GOAL
+                | crate::collaboration::TOOL_UPDATE_GOAL
+        ) {
+            let action = match name {
+                crate::collaboration::TOOL_GET_GOAL => "get",
+                crate::collaboration::TOOL_CREATE_GOAL => "create",
+                _ => input["action"].as_str().unwrap_or(""),
+            };
+            return match self.collaboration.manage_goal(session_id, action, input) {
+                Ok(v) => {
+                    self.emit_session_collab_updated(session_id);
+                    (v.to_string(), false)
+                }
+                Err(e) => (e, true),
+            };
+        }
+        if matches!(
+            name,
+            crate::collaboration::TOOL_TEAM_CREATE
+                | crate::collaboration::TOOL_TEAM_LIST
+                | crate::collaboration::TOOL_TEAM_UPDATE
+        ) {
+            let res = match name {
+                crate::collaboration::TOOL_TEAM_LIST => {
+                    let st = self.collaboration.get(session_id);
+                    Ok(json!({ "tasks": crate::collaboration::enrich_team_tasks(&st.team.tasks) }))
+                }
+                crate::collaboration::TOOL_TEAM_CREATE => {
+                    self.collaboration.team_create_task(session_id, input)
+                }
+                _ => self.collaboration.team_update_task(session_id, input),
+            };
+            return match res {
+                Ok(v) => {
+                    self.emit_session_collab_updated(session_id);
+                    (v.to_string(), false)
+                }
+                Err(e) => (e, true),
+            };
+        }
+
         let mcp_workspace=self.mcp_workspace(cwd);
         let execution_cwd=if matches!(name,agent_tools::TOOL_MCP_CALL|agent_tools::TOOL_MCP_DISCOVER) {mcp_workspace.to_str().unwrap_or(cwd)} else {cwd};
         let mcp_identity=if name==agent_tools::TOOL_MCP_CALL {
@@ -87,25 +592,191 @@ impl QuixiEngine {
                 Ok(identity)=>{if expected.is_some_and(|v|v!=identity){return ("MCP server configuration changed after the tool was advertised. Discover it again before requesting execution.".into(),true);}Some(identity)},Err(error)=>return(format!("MCP server is unavailable: {error}"),true),
             }
         }else{None};
-        let outside=file_access_outside_workspace(name,input,cwd);
+        let outside = file_access_outside_workspace_with_spill(
+            name,
+            input,
+            cwd,
+            Some((&self.data_dir, session_id)),
+        );
         let needs=|mode:&str| agent_tools::requires_approval_with_host(name,input,mode,&self.mcp_host) || (outside&&!matches!(mode,"auto"|"bypassPermissions"));
         let mode=self.current_permission_mode(session_id,fallback_mode);
-        let execute = |execution_mode: &str| {
-            if name == "Artifact" {
+        let execute = |execution_mode: &str| -> (String, bool) {
+            let raw_out = if name == "Artifact" {
                 self.create_local_artifact(session_id, input)
+            } else if name == crate::workflows::TOOL_WORKING_DIRECTORY {
+                self.execute_working_directory_tool(session_id, cwd, input)
+            } else if name == crate::workflows::TOOL_SESSION_SEARCH {
+                self.execute_session_search_tool(session_id, cwd, input)
+            } else if name == crate::collaboration::TOOL_PRESENT {
+                self.execute_present_tool(session_id, cwd, input)
+            } else if name == agent_tools::TOOL_BASH
+                && input.get("run_in_background").and_then(Value::as_bool) == Some(true)
+            {
+                let cmd_str = input["command"].as_str().unwrap_or("");
+                if agent_tools::is_destructive_for_test(cmd_str)
+                    && !matches!(execution_mode, "auto" | "bypassPermissions")
+                {
+                    (
+                        format!("Blocked destructive background command in `{execution_mode}` mode."),
+                        true,
+                    )
+                } else {
+                    let policy = quixi_platform::sandbox::SandboxPolicy {
+                        mode: quixi_platform::sandbox::SandboxMode::from_permission_mode(execution_mode),
+                        workspace_root: PathBuf::from(cwd),
+                        additional_writable_roots: vec![],
+                        session_temp_dir: None,
+                    };
+                    match self.jobs.start_bash(
+                        session_id,
+                        input["description"].as_str().unwrap_or(cmd_str),
+                        Path::new(cwd),
+                        cmd_str,
+                        &self.data_dir,
+                        (!cwd.trim().is_empty()).then_some(&policy),
+                    ) {
+                        Ok(view) => {
+                            self.emit_session_collab_updated(session_id);
+                            (serde_json::to_string(&view).unwrap_or_default(), false)
+                        }
+                        Err(e) => (e, true),
+                    }
+                }
+            } else if matches!(name, "JobList" | "JobOutput" | "JobKill") {
+                match name {
+                    "JobList" => (
+                        serde_json::to_string(&self.jobs.list(session_id)).unwrap_or_default(),
+                        false,
+                    ),
+                    "JobOutput" => {
+                        let jid = input["job_id"].as_str().unwrap_or("");
+                        let wait = input
+                            .get("wait_seconds")
+                            .and_then(Value::as_u64)
+                            .map(|s| Duration::from_secs(s.min(30)));
+                        match self.jobs.read_consuming(session_id, jid, wait, cancelled) {
+                            Ok(v) => (v.to_string(), false),
+                            Err(e) => (e, true),
+                        }
+                    }
+                    _ => {
+                        let jid = input["job_id"].as_str().unwrap_or("");
+                        let reason = input.get("reason").and_then(Value::as_str);
+                        match self.jobs.kill(session_id, jid, reason) {
+                            Ok(v) => {
+                                self.emit_session_collab_updated(session_id);
+                                (v.to_string(), false)
+                            }
+                            Err(e) => (e, true),
+                        }
+                    }
+                }
+            } else if matches!(
+                name,
+                "TerminalOpen" | "TerminalSend" | "TerminalRead" | "TerminalSignal" | "TerminalClose"
+            ) {
+                self.execute_terminal_tool(session_id, name, input, cwd, cancelled)
+            } else if name == crate::code_tools::TOOL_CREATE_WORKTREE {
+                let wt_name = input["name"].as_str().unwrap_or("");
+                let enter = input.get("enter").and_then(Value::as_bool).unwrap_or(true);
+                match quixi_workspace::changes::WorktreeManager::create_worktree(Path::new(cwd), wt_name) {
+                    Ok(info) => {
+                        if enter {
+                            if let Some(new_cwd) = info["path"].as_str() {
+                                if let Some(s) = self.agent_sessions.write().get_mut(session_id) {
+                                    s.cwd = new_cwd.to_string();
+                                    self.persist_agent_session(s);
+                                } else if let Some(s) = self.code_sessions.write().get_mut(session_id) {
+                                    s.cwd = new_cwd.to_string();
+                                    self.persist_code_session(s);
+                                }
+                            }
+                        }
+                        (info.to_string(), false)
+                    }
+                    Err(e) => (format!("CreateWorktree failed: {e}"), true),
+                }
             } else {
-                agent_tools::execute_cancellable_with_mcp_identity(name,input,execution_cwd,execution_mode,&self.mcp_host,cancelled,mcp_identity.as_deref())
-            }
+                // Freshness check + pre-edit change capture for file mutations:
+                if name == agent_tools::TOOL_EDIT {
+                    let target = agent_tools::resolve_path(
+                        input["file_path"].as_str().unwrap_or(""),
+                        execution_cwd,
+                    );
+                    if let Err(stale) = self.observations.verify_not_stale(session_id, &target) {
+                        return (stale, true);
+                    }
+                    self.capture_turn_baseline(session_id, &target);
+                } else if name == agent_tools::TOOL_WRITE {
+                    let target = agent_tools::resolve_path(
+                        input["file_path"].as_str().unwrap_or(""),
+                        execution_cwd,
+                    );
+                    self.capture_turn_baseline(session_id, &target);
+                } else if name == crate::code_tools::TOOL_APPLY_PATCH {
+                    if let Ok(ops) = crate::code_tools::parse_patch_operations(
+                        input["patch"].as_str().unwrap_or(""),
+                        Path::new(execution_cwd),
+                    ) {
+                        for op in &ops {
+                            let p = match op {
+                                crate::code_tools::PatchFileOp::Add { path, .. }
+                                | crate::code_tools::PatchFileOp::Update { path, .. }
+                                | crate::code_tools::PatchFileOp::Delete { path } => path,
+                            };
+                            self.capture_turn_baseline(session_id, p);
+                        }
+                    }
+                }
+                let res = agent_tools::execute_cancellable_with_mcp_identity(
+                    name,
+                    input,
+                    execution_cwd,
+                    execution_mode,
+                    &self.mcp_host,
+                    cancelled,
+                    mcp_identity.as_deref(),
+                );
+                if !res.1 && matches!(name, agent_tools::TOOL_READ | agent_tools::TOOL_WRITE | agent_tools::TOOL_EDIT) {
+                    let target = agent_tools::resolve_path(
+                        input["file_path"].as_str().unwrap_or(""),
+                        execution_cwd,
+                    );
+                    self.observations.record(session_id, &target);
+                }
+                res
+            };
+            (
+                crate::spill::maybe_spill_tool_result(&self.data_dir, session_id, name, raw_out.0),
+                raw_out.1,
+            )
         };
         if !needs(&mode) {
             return execute(&mode);
+        }
+        // Smart Auto (`smartAuto`): same-model per-tool safety review (`dsh-experimental-auto-review`).
+        // Destructive commands, outside-workspace paths, and external MCP calls always ask the human.
+        let mut ai_review_note: Option<String> = None;
+        if mode == "smartAuto"
+            && !outside
+            && name != agent_tools::TOOL_MCP_CALL
+            && !(name == agent_tools::TOOL_BASH
+                && agent_tools::is_destructive_for_test(input["command"].as_str().unwrap_or("")))
+        {
+            match self.evaluate_smart_auto_safety(session_id, name, input, cwd) {
+                Ok(None) => return execute("smartAutoApproved"),
+                Ok(Some(risk)) => ai_review_note = Some(risk),
+                Err(fallback) => ai_review_note = Some(fallback),
+            }
         }
         if cancelled.load(Ordering::SeqCst) {return ("Task stopped. No action performed.".into(),true);}
         let request_id=Uuid::new_v4().to_string();
         let signal=Arc::new(AtomicU8::new(0));
         self.pending_approvals.write().insert(request_id.clone(),PendingToolApproval {
             session_id:session_id.into(), decision:signal.clone(),
-            request:json!({"requestId":request_id,"sessionId":session_id,"toolCallId":call_id,"toolName":name,"input":input,"cwd":cwd,"outsideWorkspace":outside,"mcpServerIdentity":mcp_identity,"subagent":self.subagent_for_call(session_id,call_id)}),
+            selected_subagent_model: Arc::new(parking_lot::Mutex::new(None)),
+            interaction_reply: Arc::new(parking_lot::Mutex::new(None)),
+            request:json!({"requestId":request_id,"sessionId":session_id,"toolCallId":call_id,"toolName":name,"input":input,"cwd":cwd,"outsideWorkspace":outside,"mcpServerIdentity":mcp_identity,"aiReviewNote":ai_review_note,"subagent":self.subagent_for_call(session_id,call_id)}),
         });
         self.permission_event(session_id,"tool_permission_requested");
         let start=Instant::now();
@@ -123,6 +794,58 @@ impl QuixiEngine {
             return ("The action was not approved or the task was stopped. No action was performed. Do not retry it without a new user request.".into(),true);
         }
         execute("auto")
+    }
+
+    /// Runs a prefix-stable same-model safety review for `smartAuto` mode.
+    /// Returns `Ok(None)` when explicitly classified `ALLOW:`, or `Ok(Some(reason))` / `Err(_)` (fail-closed) to ask the user.
+    fn evaluate_smart_auto_safety(
+        &self,
+        session_id: &str,
+        tool_name: &str,
+        input: &Value,
+        cwd: &str,
+    ) -> Result<Option<String>, String> {
+        let model = self
+            .agent_sessions
+            .read()
+            .get(session_id)
+            .map(|s| s.model.clone())
+            .or_else(|| self.code_sessions.read().get(session_id).map(|s| s.model.clone()))
+            .filter(|m| !m.trim().is_empty());
+        let args_preview: String = serde_json::to_string(input)
+            .unwrap_or_default()
+            .chars()
+            .take(2_000)
+            .collect();
+        let review_messages = vec![
+            json!({
+                "role": "system",
+                "content": "You are a strict fail-closed tool safety reviewer for a local coding workspace. Reply on a single line starting with `ALLOW:` ONLY for routine, non-destructive workspace builds, tests, lints, git read/branch checks, or safe local page reads. Reply `ASK: <short risk explanation>` for anything that deletes data, pushes/publishes externally, installs untrusted packages, modifies system settings, leaks secrets, or has uncertain blast radius."
+            }),
+            json!({
+                "role": "user",
+                "content": format!("Workspace: {cwd}\nTool: {tool_name}\nArguments: {args_preview}")
+            }),
+        ];
+        let turn = self
+            .provider_manager
+            .complete_turn_with_tools(&review_messages, &json!([]), model.as_deref(), |_| {})
+            .ok_or_else(|| "Smart Auto safety reviewer unavailable; requesting human approval.".to_string())?;
+        if turn.stream_error.is_some() || !turn.tool_calls.is_empty() {
+            return Err("Smart Auto safety check inconclusive; requesting human approval.".into());
+        }
+        let first_line = turn.text.lines().next().unwrap_or("").trim();
+        if first_line.starts_with("ALLOW:") || first_line == "ALLOW" {
+            Ok(None)
+        } else if let Some(reason) = first_line.strip_prefix("ASK:") {
+            Ok(Some(reason.trim().to_string()))
+        } else {
+            Ok(Some(if first_line.is_empty() {
+                "Safety review required manual confirmation.".into()
+            } else {
+                first_line.chars().take(200).collect()
+            }))
+        }
     }
 }
 

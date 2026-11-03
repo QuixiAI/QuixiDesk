@@ -3,11 +3,13 @@ fn tool_failure(error: String, provider: &str, model: &str) -> ProviderToolTurn 
     ProviderToolTurn {
         text: format!("Provider error: {error}"),
         thinking: String::new(),
+        reasoning_details: None,
         tool_calls: Vec::new(),
         response_items: Vec::new(),
         provider_name: provider.into(),
         model_id: model.into(),
         stream_error: Some(error),
+        usage: None,
     }
 }
 
@@ -63,7 +65,7 @@ fn responses_tool_payload(messages: &[Value], tools: &Value, model: &str) -> Val
 fn parse_responses_tool_stream<R: std::io::BufRead, F: FnMut(StreamChunk)>(
     reader: R,
     mut on_chunk: F,
-) -> Result<(String, String, Vec<ProviderToolCall>, Vec<Value>), String> {
+) -> Result<(String, String, Vec<ProviderToolCall>, Vec<Value>, Option<ProviderTokenUsage>), String> {
     let mut text = String::new();
     let mut thinking = String::new();
     for line in reader.lines() {
@@ -112,6 +114,7 @@ fn parse_responses_tool_stream<R: std::io::BufRead, F: FnMut(StreamChunk)>(
                             id: id.into(),
                             name: name.into(),
                             arguments: arguments.into(),
+                            extra_content: None,
                         });
                     }
                 }
@@ -129,7 +132,28 @@ fn parse_responses_tool_stream<R: std::io::BufRead, F: FnMut(StreamChunk)>(
                         on_chunk(StreamChunk::Text(text.clone()));
                     }
                 }
-                return Ok((text, thinking, calls, items));
+                let usage = ev["response"].get("usage").and_then(Value::as_object).map(|u| {
+                    let inp = u.get("input_tokens").and_then(Value::as_u64).unwrap_or(0);
+                    let out = u.get("output_tokens").and_then(Value::as_u64).unwrap_or(0);
+                    let cached = u
+                        .get("input_tokens_details")
+                        .and_then(|d| d.get("cached_tokens"))
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0);
+                    let rsn = u
+                        .get("output_tokens_details")
+                        .and_then(|d| d.get("reasoning_tokens"))
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0);
+                    ProviderTokenUsage {
+                        input_tokens: inp.saturating_sub(cached),
+                        output_tokens: out,
+                        cache_read_tokens: cached,
+                        cache_write_tokens: 0,
+                        reasoning_tokens: rsn,
+                    }
+                });
+                return Ok((text, thinking, calls, items, usage));
             }
             "error" | "response.failed" | "response.incomplete" => {
                 return Err(format!(
@@ -144,6 +168,7 @@ fn parse_responses_tool_stream<R: std::io::BufRead, F: FnMut(StreamChunk)>(
 }
 
 impl ProviderManager {
+    #[allow(dead_code)]
     fn complete_codex_tool_turn<F: FnMut(StreamChunk)>(
         &self,
         messages: &[Value],
@@ -152,13 +177,31 @@ impl ProviderManager {
         token: &str,
         on_chunk: &mut F,
     ) -> ProviderToolTurn {
+        self.complete_codex_tool_turn_with_effort(messages, tools, model, token, None, on_chunk)
+    }
+
+    fn complete_codex_tool_turn_with_effort<F: FnMut(StreamChunk)>(
+        &self,
+        messages: &[Value],
+        tools: &Value,
+        model: &str,
+        token: &str,
+        effort_override: Option<&str>,
+        on_chunk: &mut F,
+    ) -> ProviderToolTurn {
         let result = (|| -> Result<_, String> {
             let http = reqwest::blocking::Client::builder()
                 .connect_timeout(std::time::Duration::from_secs(15))
-                .timeout(std::time::Duration::from_secs(300))
+                .timeout(std::time::Duration::from_secs(600))
                 .build()
                 .map_err(|e| e.to_string())?;
-            let payload = responses_tool_payload(messages, tools, model);
+            let mut payload = responses_tool_payload(messages, tools, model);
+            if let Some(eff) = effort_override
+                .map(|s| s.trim().to_ascii_lowercase())
+                .filter(|s| matches!(s.as_str(), "low" | "medium" | "high"))
+            {
+                payload["reasoning"] = json!({ "effort": eff });
+            }
             let mut credential = token.to_string();
             for attempt in 0..2 {
                 let account = Self::extract_chatgpt_account_id(&credential)
@@ -196,14 +239,16 @@ impl ProviderManager {
             Err("OpenAI OAuth authentication failed".into())
         })();
         match result {
-            Ok((text, thinking, tool_calls, response_items)) => ProviderToolTurn {
+            Ok((text, thinking, tool_calls, response_items, usage)) => ProviderToolTurn {
                 text,
                 thinking,
+                reasoning_details: None,
                 tool_calls,
                 response_items,
                 provider_name: "OpenAI".into(),
                 model_id: model.into(),
                 stream_error: None,
+                usage,
             },
             Err(error) => tool_failure(error, "OpenAI", model),
         }

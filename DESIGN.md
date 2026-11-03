@@ -8,7 +8,7 @@ Provide a native workspace where people can ask questions, inspect local files, 
 
 The original interface uses a mint Q mark, a slate workspace palette, system typography, and simple outlined SVG controls. Light and dark themes share a consistent spacing scale and clear focus states. Product copy uses the QuixiDesk name. Model and provider names are confined to provider configuration and selection.
 
-The sidebar contains new work, search, projects, artifacts, schedules, tools, and local conversation history. The conversation area distinguishes user messages, assistant text, thinking state, and tool results. A bottom composer preserves unsent text while users navigate between conversations.
+The sidebar contains new work, search, projects, artifacts, schedules, tools, and local conversation history. The conversation area distinguishes user messages (with display secret masking), assistant text, thinking state, tool activity, interactive plan-review and user-question cards, per-turn changed-file diffs, and turn jump rails. A multi-tab workspace dock provides Files, Changes, persistent Terminal, and Tasks/Team views. A bottom composer offers Plan Mode, `/` commands, `@` file and session references, live checklist/goal bars, and preserves unsent text while users navigate between conversations.
 
 ## Interaction requirements
 
