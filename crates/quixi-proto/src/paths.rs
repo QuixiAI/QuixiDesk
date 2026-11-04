@@ -47,6 +47,10 @@ pub fn data_dir() -> PathBuf {
     test_profile().map(|p| p.join("data")).unwrap_or_else(|| home_dir().join(".quixi"))
 }
 
+pub fn logs_dir() -> PathBuf {
+    data_dir().join("logs")
+}
+
 /// Application-owned home fixtures, including CLI transcripts. OS HOME is untouched.
 pub fn account_home() -> PathBuf {
     test_profile().map(|p| p.join("home")).unwrap_or_else(home_dir)

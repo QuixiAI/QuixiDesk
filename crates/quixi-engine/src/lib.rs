@@ -1384,6 +1384,37 @@ impl QuixiEngine {
         json!(apps)
     }
 
+    pub fn read_diagnostic_logs(&self, max_lines: usize) -> Value {
+        let cap = max_lines.clamp(10, 500);
+        let logs_dir = self.data_dir.join("logs");
+        let app_log_path = logs_dir.join("quixi-desk.log");
+        let diag_path = logs_dir.join("provider-diagnostics.jsonl");
+        let tail_lines = |p: &Path| -> Vec<String> {
+            let Ok(raw) = fs::read_to_string(p) else {
+                return Vec::new();
+            };
+            let all: Vec<&str> = raw.lines().collect();
+            let start = all.len().saturating_sub(cap);
+            all[start..].iter().map(|s| (*s).to_owned()).collect()
+        };
+        json!({
+            "logsDir": logs_dir.to_string_lossy(),
+            "appLogPath": app_log_path.to_string_lossy(),
+            "diagnosticsPath": diag_path.to_string_lossy(),
+            "pid": std::process::id(),
+            "version": env!("CARGO_PKG_VERSION"),
+            "executablePath": std::env::current_exe().ok().map(|p| p.to_string_lossy().into_owned()),
+            "appLogTail": tail_lines(&app_log_path),
+            "providerDiagnosticsTail": tail_lines(&diag_path),
+        })
+    }
+
+    pub fn reveal_diagnostic_logs(&self) -> Value {
+        let logs_dir = self.data_dir.join("logs");
+        let _ = fs::create_dir_all(&logs_dir);
+        self.open_workspace_path(&logs_dir.to_string_lossy(), "", Some("finder"), false)
+    }
+
     pub fn open_workspace_path(
         &self,
         cwd: &str,

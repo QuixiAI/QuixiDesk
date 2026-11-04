@@ -146,6 +146,7 @@
             { title: "Open Artifacts studio", sub: "Preview, export, and iterate on HTML artifacts", icon: "artifacts", badge: "Page", run: () => navigate("artifacts") },
             { title: "Open Tools & MCP servers", sub: "Configure MCP servers and workspace skills", icon: "tools", badge: "Page", run: () => navigate("tools") },
             { title: "Open Settings", sub: "Providers, appearance, typography, and shortcuts", icon: "settings", badge: formatCombo("Mod+,"), run: () => navigate("settings") },
+            { title: "View diagnostic logs", sub: "Inspect app log, binary path, and redacted provider diagnostics", icon: "code", badge: "Logs", run: () => openDiagnosticLogsModal() },
             { title: "Open full Search page", sub: "Deep full-text search across transcripts", icon: "search", badge: formatCombo("Mod+K"), run: () => navigate("search") },
           ].filter((a) => match(a.title, a.sub));
           if (actions.length) groups.push(["Actions & Navigation", actions.slice(0, q ? 8 : 6)]);
@@ -302,6 +303,63 @@
           else app.toast("Open a conversation first to branch it.");
         }
       };
+
+      async function openDiagnosticLogsModal() {
+        const app = ctx.app();
+        if (!app) return;
+        const { el, button, dialog, rpc, copy, toast } = app;
+        const bodyHost = el("div", { class: "cordis-bundle-grid" }, el("p", { class: "hint" }, "Loading logs…"));
+        const refresh = async () => {
+          const info = await rpc("DesktopInfo", "readDiagnosticLogs", [120]);
+          const diagLines = info?.providerDiagnosticsTail || [];
+          const appLines = info?.appLogTail || [];
+          bodyHost.replaceChildren(
+            el(
+              "div",
+              { class: "cordis-bundle-card" },
+              el("strong", {}, "Running Process & Log Files"),
+              el("p", { class: "hint" }, `Version ${info?.version || "?"} · PID ${info?.pid || "?"} · Binary: ${info?.executablePath || "unknown"}`),
+              el("p", { class: "hint" }, `Logs directory: ${info?.logsDir || "~/.quixi/logs"}`),
+              el(
+                "div",
+                { class: "cordis-row-actions" },
+                button("Reveal in Finder", () => rpc("DesktopInfo", "showLogsInFileManager", []), "primary", "folder"),
+                button("Refresh", refresh, "quiet", "refresh"),
+                button("Copy diagnostics", async () => {
+                  await copy([...diagLines, "---", ...appLines].join("\n"));
+                  toast("Copied diagnostic logs.");
+                }, "quiet"),
+              ),
+            ),
+            el(
+              "div",
+              { class: "cordis-bundle-card" },
+              el("strong", {}, `Provider Diagnostics (${diagLines.length} recent events)`),
+              el(
+                "pre",
+                { class: "code-preview" },
+                diagLines.length ? diagLines.join("\n") : "No provider diagnostic events recorded yet in this session.",
+              ),
+            ),
+            el(
+              "div",
+              { class: "cordis-bundle-card" },
+              el("strong", {}, `Application Log (${appLines.length} recent lines)`),
+              el(
+                "pre",
+                { class: "code-preview" },
+                appLines.length ? appLines.join("\n") : "No application log lines recorded yet.",
+              ),
+            ),
+          );
+        };
+        const modal = dialog(
+          "Diagnostic Logs",
+          [bodyHost, el("div", { class: "dialog-actions" }, button("Close", () => modal.close(), "primary"))],
+          { wide: true },
+        );
+        await refresh();
+      }
 
       function openShortcutsModal() {
         const app = ctx.app();
@@ -566,7 +624,12 @@
                 el("h3", {}, "Typography, Zoom & Keyboard Shortcuts"),
                 el("p", { class: "hint" }, "Independent font scales for prose, code blocks, and terminals, interface zoom, and customizable keybindings."),
               ),
-              button(`Edit shortcuts (${modLabel()}/)`, () => openShortcutsModal(), "quiet"),
+              el(
+                "div",
+                { class: "cordis-row-actions" },
+                button("Diagnostic logs…", () => void openDiagnosticLogsModal(), "quiet", "code"),
+                button(`Edit shortcuts (${modLabel()}/)`, () => openShortcutsModal(), "quiet"),
+              ),
             ),
             zoomRow,
             makeStepper("Conversation text size", "content"),
