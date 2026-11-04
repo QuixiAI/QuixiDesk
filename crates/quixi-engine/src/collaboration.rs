@@ -43,6 +43,12 @@ pub struct PlanModeState {
     pub active: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_plan: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_status: Option<String>, // "reviewing" | "approved" | "changes_requested"
+    #[serde(default)]
+    pub updated_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -493,22 +499,33 @@ impl SessionCollaborationStore {
             return Err("TodoWrite accepts at most 100 items.".into());
         }
         let mut items = Vec::with_capacity(arr.len());
+        let mut seen_contents = HashSet::new();
+        let mut pending = 0usize;
+        let mut in_progress = 0usize;
+        let mut completed = 0usize;
         for entry in arr {
             let content = entry
                 .get("content")
                 .and_then(Value::as_str)
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
-                .ok_or("Each todo item needs a non-empty `content` string.")?;
+                .ok_or("Error: invalid todo: `content` must be a non-empty string")?;
+            let capped: String = content.chars().take(400).collect();
+            if !seen_contents.insert(capped.clone()) {
+                return Err(format!("Error: invalid todos: duplicate content \"{capped}\""));
+            }
             let status = entry
                 .get("status")
                 .and_then(Value::as_str)
                 .ok_or("Each todo item needs `status` (`pending`, `in_progress`, or `completed`).")?;
-            if !matches!(status, "pending" | "in_progress" | "completed") {
-                return Err(format!("Invalid todo status `{status}`."));
+            match status {
+                "pending" => pending += 1,
+                "in_progress" => in_progress += 1,
+                "completed" => completed += 1,
+                _ => return Err(format!("Invalid todo status `{status}`.")),
             }
             items.push(TodoItem {
-                content: content.chars().take(400).collect(),
+                content: capped,
                 status: status.to_string(),
             });
         }
@@ -516,7 +533,14 @@ impl SessionCollaborationStore {
         self.mutate(session_id, |st| {
             st.todos = items;
         });
-        Ok(json!({ "ok": true, "count": count }))
+        Ok(json!({
+            "ok": true,
+            "count": count,
+            "pending": pending,
+            "inProgress": in_progress,
+            "completed": completed,
+            "summary": format!("Updated todo list: {pending} pending, {in_progress} in progress, {completed} completed.")
+        }))
     }
 
     pub fn manage_goal(

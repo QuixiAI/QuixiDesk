@@ -1,0 +1,227 @@
+//! This module provides the Anthropic provider, which implements the `LanguageModel`
+//! and `Provider` traits for interacting with the Anthropic API.
+
+pub mod capabilities;
+/// Client implementation for Anthropic API.
+pub mod client;
+/// Conversion utilities for Anthropic types.
+pub mod conversions;
+pub mod extensions;
+pub mod language_model;
+pub mod settings;
+
+use crate::core::DynamicModel;
+use crate::core::capabilities::ModelName;
+use crate::core::utils::validate_base_url;
+use crate::error::Error;
+use crate::providers::anthropic::client::AnthropicOptions;
+use crate::providers::anthropic::settings::AnthropicProviderSettings;
+use serde::Serialize;
+
+/// The API version used for Anthropic requests.
+pub const ANTHROPIC_API_VERSION: &str = "2023-06-01";
+
+/// The Anthropic provider.
+#[derive(Debug, Serialize, Clone)]
+pub struct Anthropic<M: ModelName> {
+    /// Configuration settings for the Anthropic provider.
+    pub settings: AnthropicProviderSettings,
+    options: AnthropicOptions,
+    _phantom: std::marker::PhantomData<M>,
+}
+
+impl<M: ModelName> Anthropic<M> {
+    /// Anthropic provider setting builder.
+    pub fn builder() -> AnthropicBuilder<M> {
+        AnthropicBuilder::default()
+    }
+}
+
+impl Anthropic<DynamicModel> {
+    /// Creates an Anthropic provider with a dynamic model name using default settings.
+    ///
+    /// This allows you to specify the model name as a string rather than
+    /// using methods like `Anthropic::claude_sonnet_4_0()`, etc.
+    ///
+    /// **WARNING**: when using `DynamicModel`, model capabilities are not validated.
+    /// This means there is no compile-time guarantee that the model supports requested features.
+    ///
+    /// For custom configuration (API key, base URL, etc.), use the builder pattern:
+    /// `Anthropic::<DynamicModel>::builder().model_name(...).api_key(...).build()`
+    ///
+    /// # Parameters
+    ///
+    /// * `model_name` - The Anthropic model identifier (e.g., "claude-sonnet-4-0", "claude-opus-4")
+    ///
+    /// # Returns
+    ///
+    /// A configured `Anthropic<DynamicModel>` provider instance with default settings.
+    pub fn model_name(name: impl Into<String>) -> Self {
+        let settings = AnthropicProviderSettings::default();
+        let options = AnthropicOptions::builder()
+            .model(name.into())
+            .build()
+            .unwrap();
+
+        Anthropic {
+            settings,
+            options,
+            _phantom: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<M: ModelName> Default for Anthropic<M> {
+    /// Creates a new AnthropAI provider with default settings.
+    fn default() -> Self {
+        let settings = AnthropicProviderSettings::default();
+        let options = AnthropicOptions::builder()
+            .model(M::MODEL_NAME.to_string())
+            .build()
+            .unwrap();
+
+        Self {
+            settings,
+            options,
+            _phantom: std::marker::PhantomData,
+        }
+    }
+}
+
+/// Anthropic Provider Builder
+pub struct AnthropicBuilder<M: ModelName> {
+    settings: AnthropicProviderSettings,
+    options: AnthropicOptions,
+    _phantom: std::marker::PhantomData<M>,
+}
+
+impl<M: ModelName> Default for AnthropicBuilder<M> {
+    /// Creates a new AnthropAI provider with default settings.
+    fn default() -> Self {
+        let settings = AnthropicProviderSettings::default();
+        let options = AnthropicOptions::builder()
+            .model(M::MODEL_NAME.to_string())
+            .build()
+            .unwrap();
+
+        Self {
+            settings,
+            options,
+            _phantom: std::marker::PhantomData,
+        }
+    }
+}
+
+impl AnthropicBuilder<DynamicModel> {
+    /// Sets the model name from a string. e.g., "claude-sonnet-4-0", "claude-opus-4"
+    ///
+    /// **WARNING**: when using `DynamicModel`, model capabilities are not validated.
+    /// This means there is no compile-time guarantee that the model supports requested features.
+    ///
+    /// For compile-time model validation, use the constructor methods like `Anthropic::claude_sonnet_4_0()`.
+    ///
+    /// # Parameters
+    ///
+    /// * `model_name` - The Anthropic model identifier (e.g., "claude-sonnet-4-0", "claude-opus-4")
+    ///
+    /// # Returns
+    ///
+    /// The builder with the model name set.
+    pub fn model_name(mut self, model_name: impl Into<String>) -> Self {
+        self.options.model = model_name.into();
+        self
+    }
+}
+
+impl<M: ModelName> AnthropicBuilder<M> {
+    /// Sets the base URL for the Anthropic API.
+    ///
+    /// # Parameters
+    ///
+    /// * `base_url` - The base URL string for API requests.
+    ///
+    /// # Returns
+    ///
+    /// The builder with the base URL set.
+    pub fn base_url(mut self, base_url: impl Into<String>) -> Self {
+        self.settings.base_url = base_url.into();
+        self
+    }
+
+    /// Sets the API key for the Anthropic API.
+    ///
+    /// # Parameters
+    ///
+    /// * `api_key` - The API key string for authentication.
+    ///
+    /// # Returns
+    ///
+    /// The builder with the API key set.
+    pub fn api_key(mut self, api_key: impl Into<String>) -> Self {
+        self.settings.api_key = api_key.into();
+        self
+    }
+
+    /// Sets the name of the provider. Defaults to "anthropic".
+    ///
+    /// # Parameters
+    ///
+    /// * `provider_name` - The provider name string.
+    ///
+    /// # Returns
+    ///
+    /// The builder with the provider name set.
+    pub fn provider_name(mut self, provider_name: impl Into<String>) -> Self {
+        self.settings.provider_name = provider_name.into();
+        self
+    }
+
+    /// Sets a custom API path, overriding the default "/messages".
+    pub fn path(mut self, path: impl Into<String>) -> Self {
+        self.settings.path = Some(path.into());
+        self
+    }
+
+    /// Sets extra headers to merge into every request.
+    pub fn headers(mut self, headers: std::collections::HashMap<String, String>) -> Self {
+        self.settings.headers = Some(headers);
+        self
+    }
+
+    /// Sets extra body fields to merge into every request.
+    pub fn body(mut self, body: serde_json::Value) -> Self {
+        if let serde_json::Value::Object(map) = body {
+            self.settings.body = Some(map);
+        }
+        self
+    }
+
+    /// Builds the Anthropic provider.
+    ///
+    /// Validates the configuration and creates the provider instance.
+    ///
+    /// # Returns
+    ///
+    /// A `Result` containing the configured `Anthropic` provider or an `Error`.
+    pub fn build(self) -> Result<Anthropic<M>, Error> {
+        // validate base url
+        let base_url = validate_base_url(&self.settings.base_url)?;
+
+        // check api key exists
+        if self.settings.api_key.is_empty() {
+            return Err(Error::MissingField("api_key".to_string()));
+        }
+
+        Ok(Anthropic {
+            settings: AnthropicProviderSettings {
+                base_url,
+                ..self.settings
+            },
+            options: self.options,
+            _phantom: std::marker::PhantomData,
+        })
+    }
+}
+
+// Re-exports for convenience
+pub use capabilities::*;

@@ -16,6 +16,10 @@ members = [
     "bins/quixi-ssh-askpass",
     "bins/quixi-mcp-builtin",
 ]
+exclude = [
+    "vendor/aisdk",
+    "vendor/rmcp",
+]
 
 [workspace.package]
 version = "3.6556.16"
@@ -58,6 +62,7 @@ http = "1.1"
 objc = "0.2"
 cocoa = "0.26"
 
+aisdk = { path = "vendor/aisdk", default-features = false, features = ["language-model-request", "openai", "openaicompatible", "openaichatcompletions", "anthropic", "google", "openrouter", "deepseek", "xai", "groq", "mistral", "togetherai", "fireworks-ai", "opencode", "moonshotai", "siliconflow", "zhipuai"] }
 quixi-cordis = { path = "crates/quixi-cordis" }
 quixi-proto = { path = "crates/quixi-proto" }
 quixi-platform = { path = "crates/quixi-platform" }

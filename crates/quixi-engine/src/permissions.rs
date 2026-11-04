@@ -333,9 +333,23 @@ impl QuixiEngine {
                 true,
             );
         }
+        let plan_title = plan
+            .lines()
+            .next()
+            .unwrap_or("Plan")
+            .trim_start_matches('#')
+            .trim()
+            .chars()
+            .take(120)
+            .collect::<String>();
+        let now_ms = chrono::Utc::now().timestamp_millis();
         self.collaboration.mutate(session_id, |st| {
             st.plan_mode.last_plan = Some(plan.to_string());
+            st.plan_mode.plan_title = Some(plan_title);
+            st.plan_mode.plan_status = Some("reviewing".into());
+            st.plan_mode.updated_at = now_ms;
         });
+        self.emit_session_collab_updated(session_id);
         let request_id = Uuid::new_v4().to_string();
         let signal = Arc::new(AtomicU8::new(0));
         let reply = Arc::new(parking_lot::Mutex::new(None));
@@ -379,13 +393,22 @@ impl QuixiEngine {
         }
         let payload = reply.lock().clone().unwrap_or_else(|| json!({}));
         if outcome == 1 {
-            self.collaboration.set_plan_mode(session_id, false);
+            self.collaboration.mutate(session_id, |st| {
+                st.plan_mode.active = false;
+                st.plan_mode.plan_status = Some("approved".into());
+                st.plan_mode.updated_at = chrono::Utc::now().timestamp_millis();
+            });
             self.emit_session_collab_updated(session_id);
             (
                 json!({"approved": true, "note": "Plan approved by user; Plan Mode is now off. Proceed with implementation."}).to_string(),
                 false,
             )
         } else if let Some(fb) = payload["feedback"].as_str().filter(|s| !s.is_empty()) {
+            self.collaboration.mutate(session_id, |st| {
+                st.plan_mode.plan_status = Some("changes_requested".into());
+                st.plan_mode.updated_at = chrono::Utc::now().timestamp_millis();
+            });
+            self.emit_session_collab_updated(session_id);
             (
                 format!("Keep planning — user requested revisions:\n{fb}\n\nRevise the plan and submit via ExitPlanMode."),
                 true,
@@ -693,7 +716,7 @@ impl QuixiEngine {
                         additional_writable_roots: vec![],
                         session_temp_dir: None,
                     };
-                    match self.jobs.run_bash_with_timeout_promotion(
+                    match self.jobs.run_bash_with_timeout_promotion_and_progress(
                         session_id,
                         input["description"].as_str().unwrap_or(cmd_str),
                         Path::new(cwd),
@@ -702,6 +725,18 @@ impl QuixiEngine {
                         Duration::from_secs(timeout_secs),
                         cancelled,
                         (!cwd.trim().is_empty()).then_some(&policy),
+                        |line, elapsed_ms| {
+                            self.emit_turn_activity(
+                                session_id,
+                                json!({
+                                    "phase": "bash_output",
+                                    "callId": call_id,
+                                    "toolName": "Bash",
+                                    "line": line,
+                                    "elapsedMs": elapsed_ms,
+                                }),
+                            );
+                        },
                     ) {
                         Ok((out, is_err, promoted_job)) => {
                             if promoted_job.is_some() {

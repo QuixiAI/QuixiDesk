@@ -14,6 +14,7 @@ pub mod collaboration;
 pub mod workflows;
 pub mod session_titles;
 pub mod cordis_host;
+pub mod superagent;
 pub mod agent_tools;
 pub mod providers;
 mod local_ui;
@@ -405,6 +406,27 @@ impl QuixiEngine {
                 "type": "session_collab_updated",
                 "sessionId": session_id,
                 "collab": state,
+            }),
+        );
+    }
+
+    pub fn emit_turn_activity(&self, session_id: &str, activity: Value) {
+        if session_id.trim().is_empty() {
+            return;
+        }
+        let service = if self.agent_sessions.read().contains_key(session_id) {
+            "LocalAgentModeSessions"
+        } else {
+            "LocalSessions"
+        };
+        self.emit_eipc(
+            "quixi.web",
+            service,
+            "onEvent",
+            json!({
+                "type": "turn_activity",
+                "sessionId": session_id,
+                "activity": activity,
             }),
         );
     }
@@ -964,6 +986,165 @@ impl QuixiEngine {
         let updated = self.collaboration.get(session_id).forge_prs;
         json!({ "prs": updated })
     }
+
+    pub fn superagent_service(&self) -> Option<Arc<superagent::SuperagentService>> {
+        self.cordis
+            .runtime
+            .root_context()
+            .try_get(superagent::SUPERAGENT_SERVICE)
+    }
+
+    pub fn emit_superagent_changed(&self) {
+        if let Some(svc) = self.superagent_service() {
+            self.emit_eipc(
+                "quixi.web",
+                "Superagent",
+                "onChanged",
+                svc.panel_snapshot(),
+            );
+        }
+    }
+
+    pub fn ensure_superagent_main_session(
+        self: &Arc<Self>,
+        prompt_message: Option<&str>,
+    ) -> Result<String, String> {
+        let svc = self
+            .superagent_service()
+            .ok_or_else(|| "Superagent plugin is currently disabled.".to_string())?;
+        let existing_sid = svc.state.read().master_session_id.clone();
+        let default_cwd = std::env::current_dir()
+            .unwrap_or_else(|_| self.data_dir.clone())
+            .to_string_lossy()
+            .into_owned();
+        if let Some(sid) = existing_sid {
+            if self.agent_sessions.read().contains_key(&sid) {
+                if let Some(msg) = prompt_message.filter(|m| !m.trim().is_empty()) {
+                    self.send_agent_message(&sid, msg);
+                }
+                return Ok(sid);
+            }
+        }
+        let sid = "local_superagent_main".to_string();
+        let created = self.start_agent_session(&json!({
+            "sessionId": sid,
+            "title": "Superagent Main",
+            "agentPreset": "dsh-superagent-router",
+            "cwd": default_cwd,
+            "permissionMode": "auto",
+            "message": prompt_message.unwrap_or("")
+        }));
+        svc.mutate(|st| {
+            st.master_session_id = Some(created.clone());
+        });
+        self.emit_superagent_changed();
+        Ok(created)
+    }
+
+    pub fn open_or_dispatch_superagent_worker(
+        self: &Arc<Self>,
+        ticket_id: &str,
+        dispatch: bool,
+    ) -> Result<Value, String> {
+        let svc = self
+            .superagent_service()
+            .ok_or_else(|| "Superagent plugin is currently disabled.".to_string())?;
+        let (worker_sid, short_name, title, dir, dispatch_prompt) = svc.mutate(|st| {
+            let ticket = st
+                .tickets
+                .get_mut(ticket_id)
+                .ok_or_else(|| format!("Unknown ticket `{ticket_id}`"))?;
+            let mut prompt_text = String::new();
+            if dispatch {
+                let mut undelivered = Vec::new();
+                for inp in &mut ticket.inputs {
+                    if !inp.delivered {
+                        inp.delivered = true;
+                        undelivered.push(inp.text.clone());
+                    }
+                }
+                if let Some(asg) = ticket.assignments.last_mut() {
+                    asg.status = "running".into();
+                }
+                prompt_text = format!(
+                    "Authorized Ticket `{}` ({})\nOrigin Thread: {}\nMandate: {:?} (policyVersion {})\n{}\n\nInputs:\n{}\n\nInvestigate, verify, and report your outcome using `orchestrator_report`.",
+                    ticket.id,
+                    ticket.title,
+                    ticket.origin_thread,
+                    ticket.mandate.strength,
+                    ticket.mandate.policy_version,
+                    ticket
+                        .routing_note
+                        .as_deref()
+                        .map(|n| format!("Routing Note: {n}"))
+                        .unwrap_or_default(),
+                    if undelivered.is_empty() {
+                        "(Resume inspection and report progress)".to_string()
+                    } else {
+                        undelivered.join("\n---\n")
+                    }
+                );
+            }
+            Ok::<_, String>((
+                ticket.worker_session_id.clone(),
+                ticket.short_name.clone(),
+                ticket.title.clone(),
+                ticket.directory.clone(),
+                prompt_text,
+            ))
+        })?;
+
+        let exists = self.agent_sessions.read().contains_key(&worker_sid);
+        if !exists {
+            self.start_agent_session(&json!({
+                "sessionId": worker_sid,
+                "title": format!("Worker · {}", short_name),
+                "agentPreset": "dsh-superagent-worker",
+                "cwd": dir,
+                "permissionMode": "auto",
+                "message": if dispatch { dispatch_prompt.as_str() } else { "" }
+            }));
+        } else if dispatch && !dispatch_prompt.trim().is_empty() {
+            self.send_agent_message(&worker_sid, &dispatch_prompt);
+        }
+        self.emit_superagent_changed();
+        Ok(json!({
+            "sessionId": worker_sid,
+            "ticketId": ticket_id,
+            "title": title,
+            "dispatched": dispatch,
+        }))
+    }
+
+    pub fn dispatch_superagent_eval(
+        self: &Arc<Self>,
+        trigger_id: &str,
+    ) -> Result<Value, String> {
+        let svc = self
+            .superagent_service()
+            .ok_or_else(|| "Superagent plugin is currently disabled.".to_string())?;
+        let trig = svc
+            .state
+            .read()
+            .triggers
+            .get(trigger_id)
+            .cloned()
+            .ok_or_else(|| format!("Unknown trigger `{trigger_id}`"))?;
+        let prompt = format!(
+            "Incoming Superagent Candidate Trigger `{}`\nSource: {} ({})\nActor: {} (addressed: {})\nThread: {}\nTitle: {}\nText:\n{}\n\nRoute this candidate now: if it is an explicit human request, call `orchestrator_route`; if it is an inferred proactive candidate, call `orchestrator_eval` and then `orchestrator_eval_decide`.",
+            trig.id,
+            trig.source,
+            trig.scope,
+            trig.actor,
+            trig.addressed,
+            trig.threads.first().map(String::as_str).unwrap_or("github:general"),
+            trig.title,
+            trig.text
+        );
+        let sid = self.ensure_superagent_main_session(Some(&prompt))?;
+        Ok(json!({ "sessionId": sid, "triggerId": trigger_id }))
+    }
+
 
     pub fn export_session_zip(&self, session_id: &str) -> Result<(String, Vec<u8>), String> {
         let messages = if let Some(s) = self.agent_sessions.read().get(session_id) {
@@ -3695,6 +3876,15 @@ impl QuixiEngine {
             let mut step_retries: u32 = 0;
             let mut retry_chain_id: Option<String> = None;
             let mut terminal_step_failure: Option<cordis_host::llm_retry::LlmFailure> = None;
+            self.emit_turn_activity(
+                session_id,
+                json!({
+                    "phase": "analyzing",
+                    "step": round + 1,
+                    "preset": preset_id,
+                    "startedAt": Utc::now().timestamp_millis(),
+                }),
+            );
 
             let (turn, streamed_text, model_elapsed_ms, step_ttft_ms) = loop {
                 let mut attempt_streamed = false;
@@ -4301,11 +4491,25 @@ impl QuixiEngine {
             } else {
                 let history_snapshot = messages.clone();
                 let ptc_alias_map = cordis_host::make_ptc_alias_map(&resolved_step);
-                for call in &turn.tool_calls {
+                let total_calls_in_step = turn.tool_calls.len();
+                for (call_idx, call) in turn.tool_calls.iter().enumerate() {
                     if cancelled.load(Ordering::SeqCst) {
                         self.active_turn_changes.lock().remove(session_id);
                         return (String::new(), final_model);
                     }
+                    self.emit_turn_activity(
+                        session_id,
+                        json!({
+                            "phase": "tool_running",
+                            "step": round + 1,
+                            "toolIndex": call_idx + 1,
+                            "toolCount": total_calls_in_step,
+                            "callId": call.id,
+                            "toolName": call.name,
+                            "argsPreview": call.arguments.chars().take(512).collect::<String>(),
+                            "startedAt": Utc::now().timestamp_millis(),
+                        }),
+                    );
                     let parsed_input = serde_json::from_str::<Value>(&call.arguments);
 
                     // Pre-execute Cordis waterfall + monotonic guard check:
@@ -4565,6 +4769,16 @@ impl QuixiEngine {
                     if agent_tools::ToolResults::changes_workspace(&call.name, &output, is_error) {
                         mutated_files = true;
                     }
+                    self.emit_turn_activity(
+                        session_id,
+                        json!({
+                            "phase": "tool_settled",
+                            "step": round + 1,
+                            "callId": call.id,
+                            "toolName": call.name,
+                            "isError": is_error,
+                        }),
+                    );
                     result_blocks.push(json!({
                         "type": "tool_result",
                         "tool_use_id": call.id,
@@ -5163,9 +5377,29 @@ impl QuixiEngine {
                 &sid,
                 &cancelled,
                 |chunk| {
-                    let (delta_type, delta_key, delta_text) = match chunk {
-                        StreamChunk::Text(text) => ("text_delta", "text", text),
-                        StreamChunk::Thinking(thinking) => ("thinking_delta", "thinking", thinking),
+                    let event_json = match chunk {
+                        StreamChunk::Text(text) => json!({
+                            "type": "content_block_delta",
+                            "index": 0,
+                            "delta": { "type": "text_delta", "text": text }
+                        }),
+                        StreamChunk::Thinking(thinking) => json!({
+                            "type": "content_block_delta",
+                            "index": 0,
+                            "delta": { "type": "thinking_delta", "thinking": thinking }
+                        }),
+                        StreamChunk::ToolCallPreparing {
+                            id,
+                            name,
+                            arguments_preview,
+                            total_bytes,
+                        } => json!({
+                            "type": "tool_preparing",
+                            "id": id,
+                            "name": name,
+                            "argumentsPreview": arguments_preview,
+                            "totalBytes": total_bytes,
+                        }),
                     };
                     eng_emit.emit_eipc(
                         "quixi.web",
@@ -5179,14 +5413,7 @@ impl QuixiEngine {
                                 "type": "stream_event",
                                 "session_id": sid_emit,
                                 "parent_tool_use_id": null,
-                                "event": {
-                                    "type": "content_block_delta",
-                                    "index": 0,
-                                    "delta": {
-                                        "type": delta_type,
-                                        delta_key: delta_text
-                                    }
-                                }
+                                "event": event_json
                             }
                         }),
                     );
@@ -5774,9 +6001,29 @@ impl QuixiEngine {
                 &sid,
                 &cancelled,
                 |chunk| {
-                    let (delta_type, delta_key, delta_text) = match chunk {
-                        StreamChunk::Text(text) => ("text_delta", "text", text),
-                        StreamChunk::Thinking(thinking) => ("thinking_delta", "thinking", thinking),
+                    let event_json = match chunk {
+                        StreamChunk::Text(text) => json!({
+                            "type": "content_block_delta",
+                            "index": 0,
+                            "delta": { "type": "text_delta", "text": text }
+                        }),
+                        StreamChunk::Thinking(thinking) => json!({
+                            "type": "content_block_delta",
+                            "index": 0,
+                            "delta": { "type": "thinking_delta", "thinking": thinking }
+                        }),
+                        StreamChunk::ToolCallPreparing {
+                            id,
+                            name,
+                            arguments_preview,
+                            total_bytes,
+                        } => json!({
+                            "type": "tool_preparing",
+                            "id": id,
+                            "name": name,
+                            "argumentsPreview": arguments_preview,
+                            "totalBytes": total_bytes,
+                        }),
                     };
                     eng_emit.emit_eipc(
                         "quixi.web",
@@ -5789,14 +6036,7 @@ impl QuixiEngine {
                                 "type": "stream_event",
                                 "session_id": sid_emit,
                                 "parent_tool_use_id": null,
-                                "event": {
-                                    "type": "content_block_delta",
-                                    "index": 0,
-                                    "delta": {
-                                        "type": delta_type,
-                                        delta_key: delta_text
-                                    }
-                                }
+                                "event": event_json
                             }
                         }),
                     );

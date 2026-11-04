@@ -210,6 +210,18 @@ fn parse_anthropic_tool_stream<R: std::io::BufRead, F: FnMut(StreamChunk)>(
                 {
                     return Err("Invalid Anthropic block start".into());
                 }
+                if event["content_block"]["type"] == "tool_use" {
+                    let tid = event["content_block"]["id"].as_str().unwrap_or("").to_owned();
+                    let tname = event["content_block"]["name"].as_str().unwrap_or("").to_owned();
+                    if !tname.is_empty() {
+                        on_chunk(StreamChunk::ToolCallPreparing {
+                            id: tid,
+                            name: tname,
+                            arguments_preview: String::new(),
+                            total_bytes: 0,
+                        });
+                    }
+                }
             }
             Some("content_block_delta") => {
                 let i = event["index"].as_u64().ok_or("Missing block index")? as usize;
@@ -220,7 +232,16 @@ fn parse_anthropic_tool_stream<R: std::io::BufRead, F: FnMut(StreamChunk)>(
                 let d = &event["delta"];
                 match d["type"].as_str() {
                     Some("input_json_delta") if block["type"] == "tool_use" => {
-                        json.push_str(d["partial_json"].as_str().ok_or("Invalid JSON delta")?)
+                        let frag = d["partial_json"].as_str().ok_or("Invalid JSON delta")?;
+                        json.push_str(frag);
+                        if json.len() <= 256 || json.len() % 96 < frag.len().max(1) {
+                            on_chunk(StreamChunk::ToolCallPreparing {
+                                id: block["id"].as_str().unwrap_or("").to_owned(),
+                                name: block["name"].as_str().unwrap_or("").to_owned(),
+                                arguments_preview: json.chars().take(512).collect(),
+                                total_bytes: json.len(),
+                            });
+                        }
                     }
                     Some("text_delta") if block["type"] == "text" => {
                         let s = d["text"].as_str().ok_or("Invalid text delta")?;
@@ -415,6 +436,7 @@ fn anthropic_stream_turn<R: std::io::BufRead, F: FnMut(StreamChunk)>(
             match &chunk {
                 StreamChunk::Text(s) => partial_text.push_str(s),
                 StreamChunk::Thinking(s) => partial_thinking.push_str(s),
+                StreamChunk::ToolCallPreparing { .. } => {}
             }
             on_chunk(chunk);
         });

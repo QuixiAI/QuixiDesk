@@ -28,6 +28,8 @@
     subagents: new Map(),
     collab: new Map(),
     jobs: new Map(),
+    turnActivities: new Map(),
+    closedActivityGroups: new Set(),
     draftPlanMode: false,
     dockTab: "files",
     collapsed: localStorage.getItem("quixi.sidebar") === "closed",
@@ -1747,20 +1749,65 @@
         button("Clear", () => act("clear"), "quiet"),
       ));
     }
+    const planMode = collab.planMode;
+    if (planMode?.active) {
+      bars.push(el("div", { class: "dsh-plan-pill-bar", "aria-label": "Plan Mode active" },
+        el("span", { class: "dsh-plan-pill-badge" }, icon("spark", 13), "Plan Mode"),
+        el("span", { class: "dsh-plan-pill-text grow" }, "Read-only exploration & architecture design — edits paused until plan approval"),
+        button("Exit Plan", async () => {
+          const updated = await rpc(service(s), "setPlanMode", [s.sessionId, false]);
+          if (updated) state.collab.set(s.sessionId, updated);
+          renderPage();
+        }, "quiet"),
+      ));
+    }
+    if (planMode?.planMarkdown) {
+      const statusLabel =
+        planMode.planStatus === "approved"
+          ? "Approved · Implementing"
+          : planMode.planStatus === "awaiting_review"
+            ? "Awaiting review"
+            : planMode.active
+              ? "Drafting"
+              : "Saved plan";
+      const planTitle = planMode.planTitle || "Implementation Plan";
+      bars.push(el("div", { class: "dsh-plan-card-bar", "aria-label": "Session implementation plan" },
+        icon("file", 14),
+        el("div", { class: "grow" },
+          el("strong", {}, planTitle),
+          el("span", { class: "dsh-plan-status-chip " + (planMode.planStatus || "saved") }, statusLabel),
+        ),
+        button("View Plan", () => {
+          const modal = dialog(planTitle, [
+            el("p", { class: "hint" }, `Status: ${statusLabel}`),
+            el("div", { class: "dsh-plan-viewer-body" }, plainBody(planMode.planMarkdown)),
+            el("div", { class: "dialog-actions" }, button("Close", () => modal.close(), "primary")),
+          ], { wide: true });
+        }, "quiet"),
+      ));
+    }
     const todos = collab.todos || [];
     if (todos.length) {
       const done = todos.filter(t => t.status === "completed").length;
-      const active = todos.find(t => t.status === "in_progress");
-      bars.push(el("details", { class: "todo-bar", "data-disclosure": "composer-todos" },
+      const inProg = todos.filter(t => t.status === "in_progress");
+      const active = inProg[0] || todos.find(t => t.status === "pending");
+      const pct = Math.round((done / todos.length) * 100);
+      bars.push(el("details", { class: "todo-bar dsh-todo-dock", "data-disclosure": "composer-todos" },
         el("summary", {},
           icon("check", 13),
           el("strong", {}, `Tasks ${done}/${todos.length}`),
-          active ? el("span", { class: "todo-active" }, " · " + active.content) : null,
+          el("span", { class: "dsh-todo-meter", "aria-hidden": "true" },
+            el("span", { class: "dsh-todo-meter-fill", style: `width:${pct}%` }),
+          ),
+          active
+            ? el("span", { class: "todo-active" },
+                (active.status === "in_progress" ? "▸ " : "Next: ") + active.content)
+            : el("span", { class: "todo-active completed" }, "All tasks completed ✓"),
         ),
         el("ul", { class: "todo-list" },
           ...todos.map(t => el("li", { class: "todo-item " + t.status },
             el("span", { class: "todo-badge" }, t.status === "completed" ? "✓" : t.status === "in_progress" ? "▸" : "○"),
-            t.content,
+            el("span", { class: "todo-text" }, t.content),
           )),
         ),
       ));
@@ -2327,28 +2374,134 @@
     );
     return card;
   }
+  const DSH_DETAIL_FIELDS = [
+    "title", "description", "objective", "task", "task_name", "name",
+    "question", "questions", "prompt", "message", "command", "cmd",
+    "queries", "query", "pattern", "url", "uri", "file_path", "path",
+    "target", "action", "status",
+  ];
+  function extractLiveToolDetail(toolName, rawArgs) {
+    if (!rawArgs) return "";
+    let obj = typeof rawArgs === "object" ? rawArgs : null;
+    if (!obj && typeof rawArgs === "string") {
+      try {
+        obj = JSON.parse(rawArgs);
+      } catch {
+        for (const f of ["file_path", "path", "command", "description", "query", "pattern", "url", "title"]) {
+          const m = rawArgs.match(new RegExp(`"${f}"\\s*:\\s*"([^"\\\\]{1,140})`));
+          if (m?.[1]) return m[1].trim();
+        }
+        return "";
+      }
+    }
+    if (!obj || typeof obj !== "object") return "";
+    if (["Read", "Write", "Edit", "ListDirectory"].includes(toolName)) {
+      const p = obj.file_path || obj.path;
+      if (typeof p === "string" && p.trim()) {
+        const parts = p.trim().split(/[\\/]/).filter(Boolean);
+        return parts.slice(-2).join("/") || p.trim();
+      }
+    }
+    for (const k of DSH_DETAIL_FIELDS) {
+      const v = obj[k];
+      if (typeof v === "string" && v.trim()) {
+        const clean = v.trim().replace(/\s+/g, " ");
+        return clean.length > 120 ? clean.slice(0, 117) + "…" : clean;
+      }
+      if (Array.isArray(v) && v.length) {
+        const first = v[0];
+        if (typeof first === "string" && first.trim()) return first.trim().slice(0, 120);
+        if (first && typeof first.question === "string") return first.question.trim().slice(0, 120);
+      }
+    }
+    return "";
+  }
+  function classifyDshToolCategory(toolName, active) {
+    const n = String(toolName || "");
+    if (n === "Bash" || n.startsWith("Terminal") || n.startsWith("Job"))
+      return active ? "Running commands" : "Ran commands";
+    if (n === "Edit" || n === "ApplyPatch")
+      return active ? "Editing files" : "Edited files";
+    if (n === "Write")
+      return active ? "Writing files" : "Wrote files";
+    if (["Task", "SubagentFork", "Workflow", "Ralph"].includes(n))
+      return active ? "Coordinating subagents" : "Coordinated subagents";
+    if (["TodoWrite", "ExitPlanMode", "CreateGoal", "UpdateGoal"].includes(n))
+      return active ? "Updating the plan" : "Updated the plan";
+    if (n === "AskUserQuestion")
+      return active ? "Waiting for your action" : "Asked a question";
+    if (n === "WebSearch")
+      return active ? "Searching the web" : "Searched the web";
+    if (n === "WebFetch")
+      return active ? "Visiting web pages" : "Visited web pages";
+    if (n === "RunCode")
+      return active ? "Running code" : "Ran code";
+    if (["Grep", "Glob", "Lsp", "SessionSearch"].includes(n) || n.includes("Inspect"))
+      return active ? "Searching code" : "Searched code";
+    if (n === "Read" || n === "ListDirectory")
+      return active ? "Reading files" : "Read files";
+    return active ? "Calling tools" : "Completed actions";
+  }
+  function summarizeProcessGroupActivity(steps, active, turnAct) {
+    if (active && turnAct?.toolName) {
+      const cat = classifyDshToolCategory(turnAct.toolName, true);
+      const det = turnAct.detail || "";
+      return { label: cat, detail: det };
+    }
+    const pendingStep = active ? [...steps].reverse().find((s) => s.call && !s.result) : null;
+    if (pendingStep?.call) {
+      return {
+        label: classifyDshToolCategory(pendingStep.call.name, true),
+        detail: extractLiveToolDetail(pendingStep.call.name, pendingStep.call.input),
+      };
+    }
+    const counts = new Map();
+    for (const st of steps) {
+      if (!st.call?.name) continue;
+      const cat = classifyDshToolCategory(st.call.name, active);
+      counts.set(cat, (counts.get(cat) || 0) + 1);
+    }
+    if (!counts.size) return { label: active ? "Working with tools" : "Tool activity", detail: "" };
+    const topCats = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 2).map(([k]) => k);
+    const lastStep = steps[steps.length - 1];
+    const lastDetail = lastStep?.call ? extractLiveToolDetail(lastStep.call.name, lastStep.call.input) : "";
+    return { label: topCats.join(" · "), detail: active ? lastDetail : "" };
+  }
+  function formatTurnElapsed(startedAtMs) {
+    const secs = Math.max(0, Math.floor((Date.now() - (startedAtMs || Date.now())) / 1000));
+    const mins = Math.floor(secs / 60);
+    const rem = secs % 60;
+    return `${mins}:${String(rem).padStart(2, "0")}`;
+  }
+  let liveTurnClockTimer = null;
+
   function toolActivity(group, active, opened) {
+    const curSess = session();
+    const turnAct = curSess ? state.turnActivities.get(curSess.sessionId) : null;
     const failed = group.steps.filter((s) => s.result?.is_error).length;
     const fileOnly = group.steps.every((s) =>
-      ["Read", "ListDirectory", "Grep"].includes(s.call?.name),
+      ["Read", "ListDirectory", "Grep", "Glob", "Lsp"].includes(s.call?.name),
     );
-    const label = fileOnly
-      ? active
-        ? "Exploring files"
-        : "File activity"
-      : active
-        ? "Working with tools"
-        : "Tool activity";
+    const summaryInfo = summarizeProcessGroupActivity(group.steps, active, turnAct);
     const node = group.node;
-    node.className = "activity-group" + (failed ? " has-failures" : "");
+    node.className = "activity-group" + (failed ? " has-failures" : "") + (active ? " is-live" : "");
     node.dataset.disclosure = group.key;
-    node.open = opened.has(group.key);
+    const hasPendingStep = group.steps.some((s) => s.call && !s.result);
+    const autoOpenActive = active && hasPendingStep && !state.closedActivityGroups.has(group.key);
+    node.open = opened.has(group.key) || autoOpenActive;
+    node.addEventListener("toggle", () => {
+      if (active && !node.open) state.closedActivityGroups.add(group.key);
+      else if (node.open) state.closedActivityGroups.delete(group.key);
+    });
     node.append(
       el(
         "summary",
         {},
         icon(fileOnly ? "folder" : "tools", 14),
-        el("span", { class: "activity-label" }, label),
+        el("span", { class: "activity-label" + (active ? " dsh-live-shimmer" : "") }, summaryInfo.label),
+        summaryInfo.detail
+          ? el("span", { class: "activity-live-detail", title: summaryInfo.detail }, "· " + summaryInfo.detail)
+          : null,
         el(
           "span",
           { class: "activity-count" },
@@ -2448,6 +2601,11 @@
           el("small", { class: "tool-step-status" }, status),
         ),
       );
+      if (active && !result && call?.name === "Bash" && turnAct?.bashTail && (!turnAct.toolId || turnAct.toolId === step.id)) {
+        row.append(
+          el("div", { class: "dsh-bash-live-tail" }, "▸ " + turnAct.bashTail),
+        );
+      }
       if (call)
         row.append(
           el(
@@ -2844,31 +3002,77 @@
     for (const activity of groups)
       toolActivity(activity, activity === group && running(s), opened);
     const stream = state.streams.get(s.sessionId);
-    if (stream && running(s)) {
-      if (stream.thinking)
+    let turnAct = state.turnActivities.get(s.sessionId);
+    if (running(s) && !turnAct) {
+      turnAct = {
+        startedAtMs: Date.now(),
+        phase: "analyzing",
+        step: 1,
+        preparingTools: new Map(),
+      };
+      state.turnActivities.set(s.sessionId, turnAct);
+    }
+    if (running(s)) {
+      if (stream?.thinking) {
+        const firstLine = stream.thinking.trim().split("\n").find((l) => l.trim()) || "Reasoning…";
         result.push(
           el(
             "details",
-            { class: "thinking" },
-            el("summary", {}, "Thinking"),
+            { class: "thinking is-streaming", open: true },
+            el("summary", {},
+              el("span", { class: "dsh-live-shimmer" }, "Analyzing the request"),
+              el("span", { class: "thinking-preview" }, " · " + firstLine.slice(0, 96)),
+            ),
             stream.thinking,
           ),
         );
-      if (stream.text)
+      }
+      if (stream?.text) {
         result.push(
           el(
             "article",
-            { class: "message assistant" },
+            { class: "message assistant is-streaming" },
             el("div", { class: "role" }, "QuixiDesk"),
             plainBody(stream.text),
           ),
         );
+      }
+      const prepEntries = turnAct?.preparingTools ? [...turnAct.preparingTools.values()] : [];
+      let statusLabel = "Analyzing the request";
+      let statusDetail = turnAct?.step > 1 ? `Step ${turnAct.step}` : "";
+      if (prepEntries.length) {
+        const latestPrep = prepEntries[prepEntries.length - 1];
+        statusLabel = `Preparing ${latestPrep.name}`;
+        const kb = latestPrep.bytes >= 1024 ? ` (${(latestPrep.bytes / 1024).toFixed(1)} KB)` : "";
+        statusDetail = (latestPrep.detail || "") + kb;
+      } else if (turnAct?.phase === "subagent_step" && turnAct.subagentTitle) {
+        statusLabel = `Coordinating subagents · ${turnAct.subagentTitle}`;
+        statusDetail = `Step ${turnAct.subagentStep || 1}` + (turnAct.detail ? ` · ${turnAct.detail}` : "");
+      } else if (turnAct?.phase === "tool_running" && turnAct.toolName) {
+        statusLabel = classifyDshToolCategory(turnAct.toolName, true);
+        statusDetail = turnAct.detail || "";
+      } else if (stream?.text) {
+        statusLabel = "Writing response";
+        statusDetail = turnAct?.step > 1 ? `Step ${turnAct.step}` : "";
+      } else if (stream?.thinking) {
+        statusLabel = "Analyzing the request";
+        statusDetail = turnAct?.step > 1 ? `Step ${turnAct.step}` : "Reasoning";
+      }
       result.push(
         el(
           "div",
-          { class: "live-status", role: "status" },
+          { class: "live-status dsh-running-turn-bar", role: "status", "data-live-turn-clock": "true" },
           el("span", { class: "pulse" }),
-          "Working…",
+          el("div", { class: "dsh-running-turn-main grow" },
+            el("div", { class: "dsh-running-turn-line" },
+              el("strong", { class: "dsh-live-shimmer" }, statusLabel),
+              statusDetail ? el("span", { class: "dsh-running-turn-detail" }, " · " + statusDetail) : null,
+            ),
+            turnAct?.bashTail
+              ? el("div", { class: "dsh-bash-live-tail" }, "▸ " + turnAct.bashTail)
+              : null,
+          ),
+          el("span", { class: "dsh-turn-elapsed", "data-elapsed-clock": "true" }, formatTurnElapsed(turnAct?.startedAtMs)),
         ),
       );
     }
@@ -2956,6 +3160,21 @@
         }
         renderTranscript();
       }, 250);
+    }
+    clearInterval(liveTurnClockTimer);
+    liveTurnClockTimer = null;
+    if (running(s) && target.querySelector('[data-live-turn-clock="true"]')) {
+      liveTurnClockTimer = setInterval(() => {
+        const cur = session();
+        const clockEl = document.querySelector('[data-elapsed-clock="true"]');
+        if (!clockEl || !cur || !running(cur)) {
+          clearInterval(liveTurnClockTimer);
+          liveTurnClockTimer = null;
+          return;
+        }
+        const act = state.turnActivities.get(cur.sessionId);
+        clockEl.textContent = formatTurnElapsed(act?.startedAtMs);
+      }, 1000);
     }
     refreshConversationFind(false);
     if (nearBottom) target.scrollTop = target.scrollHeight;
@@ -4982,6 +5201,10 @@
       window.QuixiCordis?.syncFromHostSnapshot(payload);
       return;
     }
+    if (channel === "superagent:changed" || channel.includes("Superagent_$_onChanged")) {
+      window.dispatchEvent(new CustomEvent("quixi:superagent-changed", { detail: payload }));
+      return;
+    }
     if (channel === "quixi:mcp-interaction") { pollMcpInteractions(); return; }
     if (channel === "quixi:mcp-updated") {
       if (state.page === "tools") loadTools({ poll: true });
@@ -5016,6 +5239,42 @@
       }
       return;
     }
+    if (payload.type === "turn_activity" && payload.activity) {
+      const actIn = payload.activity;
+      let curAct = state.turnActivities.get(id);
+      if (!curAct) {
+        curAct = { startedAtMs: Date.now(), phase: "analyzing", step: 1, preparingTools: new Map() };
+        state.turnActivities.set(id, curAct);
+      }
+      curAct.phase = actIn.phase || curAct.phase;
+      if (actIn.step) curAct.step = actIn.step;
+      if (actIn.phase === "analyzing") {
+        curAct.preparingTools.clear();
+        curAct.toolName = null;
+        curAct.detail = "";
+        curAct.bashTail = "";
+      } else if (actIn.phase === "tool_running") {
+        curAct.preparingTools.clear();
+        curAct.toolId = actIn.toolId || null;
+        curAct.toolName = actIn.toolName || null;
+        curAct.detail = actIn.detail || extractLiveToolDetail(actIn.toolName, actIn.input);
+        curAct.bashTail = "";
+      } else if (actIn.phase === "bash_output") {
+        curAct.toolId = actIn.toolId || curAct.toolId;
+        curAct.toolName = "Bash";
+        if (actIn.line) curAct.bashTail = actIn.line;
+      } else if (actIn.phase === "subagent_step") {
+        curAct.subagentTitle = actIn.title || "Subagent";
+        curAct.subagentStep = actIn.subagentStep || 1;
+        curAct.detail = actIn.toolName
+          ? `${actIn.toolName}${actIn.detail ? " · " + actIn.detail : ""}`
+          : actIn.detail || "";
+      } else if (actIn.phase === "tool_settled") {
+        if (curAct.toolId === actIn.toolId) curAct.bashTail = "";
+      }
+      if (state.id === id) scheduleStreamRender();
+      return;
+    }
     const message = payload.message;
     if (message?.type === "stream_event") {
       let stream = state.streams.get(id);
@@ -5023,10 +5282,25 @@
         stream = { text: "", thinking: "" };
         state.streams.set(id, stream);
       }
+      let curAct = state.turnActivities.get(id);
+      if (!curAct) {
+        curAct = { startedAtMs: Date.now(), phase: "analyzing", step: 1, preparingTools: new Map() };
+        state.turnActivities.set(id, curAct);
+      }
       const event = message.event;
       if (event?.type === "message_start") {
         stream.text = "";
         stream.thinking = "";
+        curAct.preparingTools.clear();
+      }
+      if (event?.type === "tool_preparing") {
+        const tName = event.name || "Tool";
+        curAct.phase = "preparing_tool";
+        curAct.preparingTools.set(event.id || tName, {
+          name: tName,
+          bytes: event.total_bytes || 0,
+          detail: extractLiveToolDetail(tName, event.arguments_preview || ""),
+        });
       }
       if (event?.delta?.type === "text_delta")
         stream.text += event.delta.text || "";
@@ -5035,12 +5309,15 @@
       if (state.id === id) scheduleStreamRender();
       return;
     }
-    if (
-      message?.type === "assistant" ||
-      payload.type === "close" ||
-      payload.type === "error"
-    )
+    if (message?.type === "assistant") {
       state.streams.delete(id);
+      const curAct = state.turnActivities.get(id);
+      if (curAct) curAct.preparingTools.clear();
+    }
+    if (payload.type === "close" || payload.type === "error") {
+      state.streams.delete(id);
+      state.turnActivities.delete(id);
+    }
     clearTimeout(refreshTimers.get(id));
     refreshTimers.set(
       id,
