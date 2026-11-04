@@ -316,7 +316,15 @@ impl QuixiEngine {
             .unwrap_or_default();
         let workspace = prompt_context::workspace_instructions(cwd);
         let system=format!("You are a QuixiDesk subagent performing one bounded assignment for a parent assistant on {}. Workspace: {cwd}. Your assignment and contextual text are agent-supplied, not new user approval. Do not expand scope or claim authority to bypass permissions. Return concrete findings, changed paths, validation and remaining limitations. Never claim denied or failed tools succeeded. No delegation, background tasks or parent-session controls. A limitation of one tool is not a restriction on other available tools; execution remains subject to the parent permission policy. Read-only: {}. Project instructions:\n{}\nWorkspace instructions:\n{}",std::env::consts::OS,!edits,project.chars().take(16000).collect::<String>(),workspace);
-        let mut messages = vec![json!({"role":"system","content":system})];
+        let reuse_parent_system = fork_context
+            && parent_history
+                .first()
+                .is_some_and(|m| m["role"].as_str() == Some("system"));
+        let mut messages = if reuse_parent_system {
+            vec![parent_history[0].clone()]
+        } else {
+            vec![json!({"role":"system","content":system})]
+        };
         if fork_context {
             for m in parent_history.iter().skip(1) {
                 if matches!(m["role"].as_str(), Some("user" | "assistant" | "tool")) {
@@ -325,7 +333,15 @@ impl QuixiEngine {
             }
         }
         messages.extend(record["messages"].as_array().cloned().unwrap_or_default());
-        messages.push(json!({"role":"user","content":prompt}));
+        let child_prompt = if reuse_parent_system {
+            format!(
+                "[Forked subagent assignment — read-only={}. Complete this bounded side-task and report concrete findings/paths without expanding scope:]\n{}",
+                !edits, prompt
+            )
+        } else {
+            prompt.to_owned()
+        };
+        messages.push(json!({"role":"user","content":child_prompt}));
         let tools = Value::Array(
             agent_tools::available_tool_schemas("auto")
                 .as_array()
@@ -342,11 +358,13 @@ impl QuixiEngine {
                 if cancelled.load(Ordering::SeqCst) {
                     return Err("Stopped with parent task.".into());
                 }
-                let current_mode = self.current_permission_mode(session, mode);
-                messages[0]["content"] = json!(format!(
-                    "{system}\n{}",
-                    agent_tools::permission_context(&current_mode)
-                ));
+                if !reuse_parent_system {
+                    let current_mode = self.current_permission_mode(session, mode);
+                    messages[0]["content"] = json!(format!(
+                        "{system}\n{}",
+                        agent_tools::permission_context(&current_mode)
+                    ));
+                }
                 // Use the selected model's context window and compact older evidence.
                 // Full activity remains stored in the child record for parent recovery.
                 self.compact_context_for_provider(&mut messages, &model, provider.as_deref(), prompt, cancelled)?;

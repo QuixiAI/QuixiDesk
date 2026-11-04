@@ -126,8 +126,12 @@ impl QuixiEngine {
             return Ok(json!({"dispatched":true,"queued":true,"delivery":delivery,"messageUuid":uuid}));
         }
         drop(pending);
+        let is_first_prompt = !prior.iter().any(|m| m["type"].as_str() == Some("user"));
         if agent.is_some() { self.send_agent_message_content(session_id,text,Some(&uuid),content); }
         else {self.send_code_message_content(session_id,text,Some(&uuid),content);}
+        if is_first_prompt && !text.trim().is_empty() {
+            self.auto_title_session_on_first_prompt(session_id, text);
+        }
         Ok(json!({"dispatched":true,"messageUuid":uuid}))
     }
 
@@ -177,6 +181,22 @@ impl QuixiEngine {
         if agent.is_some() { self.send_agent_message_content(sid,text,Some(uuid),content); }
         else { self.send_code_message_content(sid,text,Some(uuid),content); }
         Ok(json!({"dispatched":true,"queued":false,"messageUuid":uuid}))
+    }
+
+    /// Promotes every queued FIFO message in `sid` into `steer` delivery (`Cmd/Ctrl+Enter` when draft is empty).
+    pub fn steer_all_pending_messages(self: &Arc<Self>, sid: &str) -> Result<Value, String> {
+        let _submission = self.chat_submission.lock();
+        let mut pending = self.pending_messages.lock();
+        let Some(queue) = pending.get_mut(sid) else {
+            return Ok(json!({ "steered": 0 }));
+        };
+        let mut count = 0usize;
+        for msg in queue.iter_mut() {
+            msg["delivery"] = json!("steer");
+            msg["held"] = json!(false);
+            count += 1;
+        }
+        Ok(json!({ "steered": count }))
     }
 
     pub(crate) fn take_steering(&self, sid: &str) -> Vec<Value> {

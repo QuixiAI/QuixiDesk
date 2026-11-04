@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/quixi-cordis",
     "crates/quixi-proto",
     "crates/quixi-platform",
     "crates/quixi-workspace",
@@ -57,6 +58,7 @@ http = "1.1"
 objc = "0.2"
 cocoa = "0.26"
 
+quixi-cordis = { path = "crates/quixi-cordis" }
 quixi-proto = { path = "crates/quixi-proto" }
 quixi-platform = { path = "crates/quixi-platform" }
 quixi-workspace = { path = "crates/quixi-workspace" }

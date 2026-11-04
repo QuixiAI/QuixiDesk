@@ -21,6 +21,7 @@ ignore.workspace = true
 regex.workspace = true
 globset.workspace = true
 tempfile.workspace = true
+quixi-cordis.workspace = true
 quixi-proto.workspace = true
 quixi-platform.workspace = true
 quixi-workspace.workspace = true

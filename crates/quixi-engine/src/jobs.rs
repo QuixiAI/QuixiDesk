@@ -367,6 +367,68 @@ impl JobRegistry {
         out
     }
 
+    /// Runs a foreground bash command up to `foreground_timeout`. If it completes before the
+    /// deadline, cleans up the transient job entry and returns `(formatted_output, is_error)`.
+    /// If the deadline expires while still running, promotes the process into a persistent
+    /// background job (`dsh-tool-bash` timeout-to-background mechanic) instead of killing it!
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_bash_with_timeout_promotion(
+        &self,
+        owner: &str,
+        label: &str,
+        cwd: &Path,
+        command: &str,
+        data_dir: &Path,
+        foreground_timeout: Duration,
+        cancelled: &AtomicBool,
+        sandbox_policy: Option<&quixi_platform::sandbox::SandboxPolicy>,
+    ) -> Result<(String, bool, Option<String>), String> {
+        let view = self.start_bash(owner, label, cwd, command, data_dir, sandbox_policy)?;
+        let job_id = view.id.clone();
+        match self.read_consuming(owner, &job_id, Some(foreground_timeout), cancelled) {
+            Err(err) => {
+                let _ = self.kill(owner, &job_id, Some("Cancelled during foreground wait"));
+                Err(err)
+            }
+            Ok(val) => {
+                let status = val["job"]["status"].as_str().unwrap_or("failed").to_owned();
+                let output = val["output"].as_str().unwrap_or("").trim_end().to_owned();
+                let detail = val["job"]["detail"].as_str().unwrap_or("").to_owned();
+                if matches!(status.as_str(), "running" | "stopping") {
+                    let secs = foreground_timeout.as_secs().max(1);
+                    let mut msg = output;
+                    if !msg.is_empty() {
+                        msg.push('\n');
+                    }
+                    msg.push_str(&format!(
+                        "[Foreground timeout ({secs}s) reached; command is still running and was promoted to background job `{job_id}` rather than killed. Call `JobOutput(job_id: \"{job_id}\", wait_seconds: 15)` to monitor or `JobKill(job_id: \"{job_id}\")` to stop it.]"
+                    ));
+                    Ok((msg, false, Some(job_id)))
+                } else {
+                    if let Some(removed) = self.jobs.lock().remove(&job_id) {
+                        if let Some(sp) = removed.spill_path {
+                            let _ = fs::remove_file(sp);
+                        }
+                    }
+                    let exit_line = if detail.starts_with("exit code:") {
+                        let code = detail.trim_start_matches("exit code:").trim();
+                        format!("[exit code {code}]")
+                    } else if status == "completed" {
+                        "[exit code 0]".to_owned()
+                    } else {
+                        format!("[{status}: {detail}]")
+                    };
+                    let formatted = if output.is_empty() {
+                        exit_line
+                    } else {
+                        format!("{output}\n{exit_line}")
+                    };
+                    Ok((formatted, status != "completed", None))
+                }
+            }
+        }
+    }
+
     /// Consuming model read (`JobOutput`), optionally waiting up to `wait_timeout` for settlement.
     pub fn read_consuming(
         &self,
@@ -605,6 +667,19 @@ pub fn job_and_terminal_tool_schemas() -> Vec<Value> {
                 }
             }
         }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "TerminalList",
+                "description": "List open and recently exited persistent PTY terminal sessions owned by this conversation.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                    "additionalProperties": false
+                }
+            }
+        }),
     ]
 }
 
@@ -648,5 +723,36 @@ mod tests {
         assert!(obs["text"].as_str().unwrap().contains("alpha\nbeta"));
         // Foreign session rejected
         assert!(reg.read_at("other-sess", &view.id, 0).is_err());
+    }
+
+    #[test]
+    fn foreground_bash_promotes_to_background_job_on_timeout_without_killing_child() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = JobRegistry::new();
+        let (out, is_err, promoted) = reg
+            .run_bash_with_timeout_promotion(
+                "sess-promote",
+                "long build",
+                tmp.path(),
+                "printf 'phase-1\\n'; sleep 0.5; printf 'phase-2\\n'",
+                tmp.path(),
+                Duration::from_millis(120),
+                &AtomicBool::new(false),
+                None,
+            )
+            .unwrap();
+        assert!(!is_err);
+        let jid = promoted.expect("must promote to background job");
+        assert!(out.contains("promoted to background job"));
+        let settled = reg
+            .read_consuming(
+                "sess-promote",
+                &jid,
+                Some(Duration::from_secs(3)),
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        assert_eq!(settled["job"]["status"], "completed");
+        assert!(settled["output"].as_str().unwrap().contains("phase-2"));
     }
 }

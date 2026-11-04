@@ -217,6 +217,8 @@ pub(crate) fn action_allowed(name: &str, mode: &str) -> bool {
                 | TOOL_EDIT
                 | crate::code_tools::TOOL_APPLY_PATCH
                 | crate::code_tools::TOOL_CREATE_WORKTREE
+                | crate::cordis_host::seams::RUN_CODE_TOOL_NAME
+                | crate::cordis_host::TOOL_PLUGIN_MANAGER
                 | "TerminalOpen"
                 | "TerminalSend"
                 | "TerminalSignal"
@@ -247,6 +249,14 @@ pub fn requires_approval(name: &str, _input: &Value, mode: &str) -> bool {
 }
 
 pub fn requires_approval_with_host(name: &str, input: &Value, mode: &str, host: &McpHost) -> bool {
+    if name == crate::cordis_host::TOOL_PLUGIN_MANAGER
+        && matches!(
+            input.get("action").and_then(Value::as_str),
+            Some("list_bundles" | "list_plugins")
+        )
+    {
+        return false;
+    }
     if name == TOOL_MCP_CALL && !matches!(mode,"auto"|"bypassPermissions") {
         return !host.is_builtin_server(input["server"].as_str().unwrap_or_default())
             || mcp_tool_needs_confirm(input["server"].as_str().unwrap_or_default(),input["tool"].as_str().unwrap_or_default());
@@ -482,16 +492,148 @@ fn looks_destructive(command: &str) -> bool {
 /// Validate required arguments before any side effect, including truncated model output.
 /// Dynamic MCP aliases are resolved against the immutable per-turn registry at dispatch.
 /// Parsing checks shape only; an unknown alias still fails the normal tool dispatcher.
+pub(crate) fn cordis_extra_tool_schemas() -> Vec<Value> {
+    vec![
+        json!({
+            "type": "function",
+            "function": {
+                "name": crate::cordis_host::TOOL_WEB_SEARCH,
+                "description": "Search the live web with 1-10 concurrent queries.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "queries": { "type": "array", "items": { "type": "string" } },
+                        "query": { "type": "string" }
+                    },
+                    "additionalProperties": false
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": crate::cordis_host::TOOL_SUBAGENT_FORK,
+                "description": "Fork a child subagent seeded with the current conversation prefix.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "description": { "type": "string" },
+                        "prompt": { "type": "string" },
+                        "allow_edits": { "type": "boolean" }
+                    },
+                    "required": ["description", "prompt"],
+                    "additionalProperties": false
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": crate::cordis_host::seams::RUN_CODE_TOOL_NAME,
+                "description": "Execute async JavaScript/TypeScript with programmatic `tools.*` SDK bindings.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "description": { "type": "string" },
+                        "code": { "type": "string" },
+                        "timeout_seconds": { "type": "integer" }
+                    },
+                    "required": ["description", "code"],
+                    "additionalProperties": false
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": crate::cordis_host::TOOL_PLUGIN_MANAGER,
+                "description": "Manage live Cordis plugin bundles and rows.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string" },
+                        "target": { "type": "string" },
+                        "enabled": { "type": "boolean" },
+                        "manifest": { "type": "object" },
+                        "client_js": { "type": "string" },
+                        "readme_md": { "type": "string" }
+                    },
+                    "required": ["action"],
+                    "additionalProperties": false
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": crate::cordis_host::TOOL_CORDIS_INSPECT_LIST,
+                "description": "List live Cordis fibers, services, events, tools, and UI slots.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "platform": { "type": "string" }
+                    },
+                    "additionalProperties": false
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": crate::cordis_host::TOOL_CORDIS_INSPECT_QUERY,
+                "description": "Filter live Cordis registry entries by keyword.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string" }
+                    },
+                    "required": ["query"],
+                    "additionalProperties": false
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": crate::cordis_host::TOOL_PROPOSE_ACTION,
+                "description": "Propose an interactive Action Card below the response.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string" },
+                        "title": { "type": "string" },
+                        "brief": { "type": "string" },
+                        "details": { "type": "string" },
+                        "placement": { "type": "string" },
+                        "target_bundle_id": { "type": "string" }
+                    },
+                    "required": ["action", "title", "brief", "details"],
+                    "additionalProperties": false
+                }
+            }
+        }),
+    ]
+}
+
 pub(crate) fn validate_provider_input(name: &str, input: &Value) -> Result<(), String> {
-    if name.starts_with("mcp_") && input.is_object() { Ok(()) }
-    else { validate_input(name,input) }
+    if name.starts_with("mcp_") && input.is_object() {
+        return Ok(());
+    }
+    match validate_input(name, input) {
+        Ok(()) => Ok(()),
+        // Allow dynamically installed user-bundle tools (`EchoGreeting`, etc.) when arguments are a JSON object.
+        Err(ref msg) if msg.starts_with("Unknown tool ") && input.is_object() => Ok(()),
+        Err(other) => Err(other),
+    }
 }
 
 pub fn validate_input(name: &str, input: &Value) -> Result<(), String> {
     let schemas = available_tool_schemas_with_options("auto", true);
     let task_schema = crate::subagents::schema();
+    let cordis_schemas = cordis_extra_tool_schemas();
     let schema = schemas.as_array().unwrap().iter()
         .chain(std::iter::once(&task_schema))
+        .chain(cordis_schemas.iter())
         .find(|s| s["function"]["name"] == name)
         .ok_or_else(|| format!("Unknown tool `{name}`."))?;
     let object = input.as_object().ok_or("Tool arguments must be an object.")?;
@@ -544,12 +686,21 @@ pub fn repeatable_observation(name: &str, input: &Value) -> bool {
             | "JobList"
             | "JobOutput"
             | "TerminalRead"
+            | "TerminalList"
             | crate::collaboration::TOOL_GET_GOAL
             | crate::collaboration::TOOL_TEAM_LIST
             | crate::workflows::TOOL_SESSION_SEARCH
+            | crate::cordis_host::TOOL_WEB_SEARCH
+            | crate::cordis_host::TOOL_CORDIS_INSPECT_LIST
+            | crate::cordis_host::TOOL_CORDIS_INSPECT_QUERY
             | TOOL_WEB_FETCH
             | TOOL_MCP_DISCOVER
-    ) || (name == TOOL_MCP_CALL
+    ) || (name == crate::cordis_host::TOOL_PLUGIN_MANAGER
+        && matches!(
+            input.get("action").and_then(Value::as_str),
+            Some("list_bundles" | "list_plugins")
+        ))
+        || (name == TOOL_MCP_CALL
         && !mcp_tool_needs_confirm(
             input["server"].as_str().unwrap_or_default(),
             input["tool"].as_str().unwrap_or_default(),
@@ -569,11 +720,18 @@ impl ToolResults {
     }
     pub fn changes_workspace(name: &str, output: &str, is_error: bool) -> bool {
         (Self::is_file_mutation(name) && !is_error)
-            || (matches!(name, "TerminalSend" | crate::code_tools::TOOL_CREATE_WORKTREE) && !is_error)
-            || (name == "Task" && serde_json::from_str::<Value>(output).is_ok_and(|v|v["workspaceMayHaveChanged"]==true))
+            || (matches!(
+                name,
+                "TerminalSend"
+                    | crate::code_tools::TOOL_CREATE_WORKTREE
+                    | crate::cordis_host::seams::RUN_CODE_TOOL_NAME
+            ) && !is_error)
+            || (matches!(name, "Task" | crate::cordis_host::TOOL_SUBAGENT_FORK)
+                && serde_json::from_str::<Value>(output)
+                    .is_ok_and(|v| v["workspaceMayHaveChanged"] == true))
     }
     fn cacheable(name: &str, input: &Value) -> bool {
-        // MCP state, terminal sends, and interactive collaboration tools are stateful and never cached.
+        // MCP state, terminal sends, PTC scripts, and interactive collaboration tools are stateful and never cached.
         !matches!(
             name,
             TOOL_MCP_CALL
@@ -582,6 +740,10 @@ impl ToolResults {
                 | "TerminalSignal"
                 | "TerminalClose"
                 | "JobKill"
+                | crate::cordis_host::seams::RUN_CODE_TOOL_NAME
+                | crate::cordis_host::TOOL_PLUGIN_MANAGER
+                | crate::cordis_host::TOOL_PROPOSE_ACTION
+                | crate::cordis_host::TOOL_SUBAGENT_FORK
                 | crate::collaboration::TOOL_TODO_WRITE
                 | crate::collaboration::TOOL_EXIT_PLAN_MODE
                 | crate::collaboration::TOOL_ASK_USER

@@ -22,6 +22,7 @@ pub(crate) fn resolve_folder_path(raw: &str, home: &Path) -> Result<PathBuf, Str
     }
 }
 
+#[allow(dead_code)]
 fn matching_snippet(query: &str, title: &str, messages: &[Value]) -> Option<String> {
     std::iter::once(title.to_string())
         .chain(messages.iter().flat_map(|m| {
@@ -66,46 +67,74 @@ impl QuixiEngine {
     }
 
     pub fn search_local_sessions(&self, query: &str, limit: usize) -> Vec<Value> {
-        let query = query.trim().to_lowercase();
-        if query.is_empty() {
+        let trimmed = query.trim();
+        if trimmed.is_empty() {
             return vec![];
         }
-        let mut matches: Vec<(u64, Value)> = self
+        let collect_body = |messages: &[Value]| -> String {
+            let mut out = String::new();
+            for m in messages {
+                if let Some(arr) = m.pointer("/message/content").and_then(Value::as_array) {
+                    for b in arr {
+                        if b["type"] == "thinking" {
+                            continue;
+                        }
+                        if let Some(t) = b.get("text").and_then(Value::as_str) {
+                            out.push_str(t);
+                            out.push('\n');
+                        }
+                    }
+                }
+            }
+            out
+        };
+
+        let mut docs: Vec<crate::cordis_host::sqlite_fts::FtsSessionDoc> = self
             .agent_sessions
             .read()
             .values()
-            .filter_map(|s| {
-                matching_snippet(&query, &s.title, &s.buffered_messages).map(|snippet| {
-                    (
-                        s.last_activity_at,
-                        json!({"sessionId":s.session_id,"snippet":snippet}),
-                    )
+            .map(|s| crate::cordis_host::sqlite_fts::FtsSessionDoc {
+                session_id: s.session_id.clone(),
+                workspace: s.cwd.clone(),
+                title: s.title.clone(),
+                content: collect_body(&s.buffered_messages),
+                updated_at: s.last_activity_at,
+            })
+            .collect();
+        {
+            let transcripts = self.code_transcripts.read();
+            for s in self.code_sessions.read().values() {
+                let msgs = transcripts
+                    .get(&s.session_id)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
+                docs.push(crate::cordis_host::sqlite_fts::FtsSessionDoc {
+                    session_id: s.session_id.clone(),
+                    workspace: s.cwd.clone(),
+                    title: s.title.clone(),
+                    content: collect_body(msgs),
+                    updated_at: s.last_activity_at,
+                });
+            }
+        }
+
+        let fts_hits = self.cordis.search_sessions_fts(&docs, trimmed, limit);
+        let mut results: Vec<Value> = fts_hits
+            .into_iter()
+            .map(|h| {
+                json!({
+                    "sessionId": h.session_id,
+                    "title": h.title,
+                    "snippet": h.snippet,
+                    "score": h.score,
                 })
             })
             .collect();
-        let transcripts = self.code_transcripts.read();
-        matches.extend(self.code_sessions.read().values().filter_map(|s| {
-            matching_snippet(
-                &query,
-                &s.title,
-                transcripts
-                    .get(&s.session_id)
-                    .map(Vec::as_slice)
-                    .unwrap_or(&[]),
-            )
-            .map(|snippet| {
-                (
-                    s.last_activity_at,
-                    json!({"sessionId":s.session_id,"snippet":snippet}),
-                )
-            })
-        }));
-        matches.sort_by(|a, b| b.0.cmp(&a.0));
-        let mut results: Vec<_> = matches.into_iter().take(limit).map(|(_, v)| v).collect();
         if results.len() >= limit {
             return results;
         }
-        for result in quixi_workspace::TranscriptSearchEngine::search_transcripts(&query, limit) {
+        let query_lower = trimmed.to_lowercase();
+        for result in quixi_workspace::TranscriptSearchEngine::search_transcripts(&query_lower, limit) {
             if results.len() >= limit {
                 break;
             }

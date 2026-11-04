@@ -525,6 +525,57 @@ impl QuixiEngine {
             );
         }
 
+        if name == crate::cordis_host::TOOL_CORDIS_INSPECT_LIST {
+            let platform = input.get("platform").and_then(Value::as_str);
+            return (self.cordis.cordis_inspect_list(platform).to_string(), false);
+        }
+        if name == crate::cordis_host::TOOL_CORDIS_INSPECT_QUERY {
+            let q = input.get("query").and_then(Value::as_str).unwrap_or("");
+            return (self.cordis.cordis_inspect_query(q).to_string(), false);
+        }
+        if name == crate::cordis_host::TOOL_PROPOSE_ACTION {
+            return self.execute_propose_action_tool(session_id, input);
+        }
+        if name == crate::cordis_host::TOOL_WEB_SEARCH {
+            return match self
+                .cordis
+                .runtime
+                .root_context()
+                .try_get(crate::cordis_host::capabilities::WEB_SERVICE)
+            {
+                Some(web) => {
+                    let queries: Vec<String> = input
+                        .get("queries")
+                        .and_then(Value::as_array)
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|v| v.as_str().map(str::to_owned))
+                                .collect()
+                        })
+                        .or_else(|| {
+                            input
+                                .get("query")
+                                .and_then(Value::as_str)
+                                .map(|s| vec![s.to_owned()])
+                        })
+                        .unwrap_or_default();
+                    match web.search_multi(&queries) {
+                        Ok(out) => (
+                            crate::spill::maybe_spill_tool_result(
+                                &self.data_dir,
+                                session_id,
+                                name,
+                                out,
+                            ),
+                            false,
+                        ),
+                        Err(err) => (err, true),
+                    }
+                }
+                None => ("WebSearch plugin is currently disabled.".into(), true),
+            };
+        }
+
         // Dedicated interactive collaboration flows:
         if name == crate::collaboration::TOOL_EXIT_PLAN_MODE {
             return self.run_plan_review(session_id, call_id, input, cancelled);
@@ -603,12 +654,66 @@ impl QuixiEngine {
         let execute = |execution_mode: &str| -> (String, bool) {
             let raw_out = if name == "Artifact" {
                 self.create_local_artifact(session_id, input)
+            } else if name == crate::cordis_host::TOOL_PLUGIN_MANAGER {
+                self.execute_plugin_manager_tool(input)
             } else if name == crate::workflows::TOOL_WORKING_DIRECTORY {
                 self.execute_working_directory_tool(session_id, cwd, input)
             } else if name == crate::workflows::TOOL_SESSION_SEARCH {
                 self.execute_session_search_tool(session_id, cwd, input)
             } else if name == crate::collaboration::TOOL_PRESENT {
                 self.execute_present_tool(session_id, cwd, input)
+            } else if name == agent_tools::TOOL_BASH
+                && input.get("run_in_background").and_then(Value::as_bool) != Some(true)
+                && !session_id.trim().is_empty()
+                && self.cordis.is_row_active("tool-jobs-terminal")
+                && self.cordis.bash_runtime_config().promote_timeout_to_job
+            {
+                let cmd_str = input["command"].as_str().unwrap_or("");
+                if cmd_str.trim().is_empty() {
+                    ("No command provided.".to_string(), true)
+                } else if agent_tools::is_destructive_for_test(cmd_str)
+                    && !matches!(execution_mode, "auto" | "bypassPermissions")
+                {
+                    (
+                        format!(
+                            "Blocked by QuixiDesk permission mode '{execution_mode}': this command looks destructive. Switch the session pill from Manual to Auto if that is really intended."
+                        ),
+                        true,
+                    )
+                } else {
+                    let bash_cfg = self.cordis.bash_runtime_config();
+                    let timeout_secs = input
+                        .get("timeout_seconds")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(bash_cfg.default_timeout_secs)
+                        .clamp(1, 3600);
+                    let policy = quixi_platform::sandbox::SandboxPolicy {
+                        mode: quixi_platform::sandbox::SandboxMode::from_permission_mode(execution_mode),
+                        workspace_root: PathBuf::from(cwd),
+                        additional_writable_roots: vec![],
+                        session_temp_dir: None,
+                    };
+                    match self.jobs.run_bash_with_timeout_promotion(
+                        session_id,
+                        input["description"].as_str().unwrap_or(cmd_str),
+                        Path::new(cwd),
+                        cmd_str,
+                        &self.data_dir,
+                        Duration::from_secs(timeout_secs),
+                        cancelled,
+                        (!cwd.trim().is_empty()).then_some(&policy),
+                    ) {
+                        Ok((out, is_err, promoted_job)) => {
+                            if promoted_job.is_some() {
+                                self.emit_session_collab_updated(session_id);
+                            } else if !is_err {
+                                self.observe_forge_from_bash(session_id, cwd, cmd_str, &out);
+                            }
+                            (out, is_err)
+                        }
+                        Err(e) => (format!("Failed to run command: {e}"), true),
+                    }
+                }
             } else if name == agent_tools::TOOL_BASH
                 && input.get("run_in_background").and_then(Value::as_bool) == Some(true)
             {
@@ -673,7 +778,12 @@ impl QuixiEngine {
                 }
             } else if matches!(
                 name,
-                "TerminalOpen" | "TerminalSend" | "TerminalRead" | "TerminalSignal" | "TerminalClose"
+                "TerminalOpen"
+                    | "TerminalSend"
+                    | "TerminalRead"
+                    | "TerminalSignal"
+                    | "TerminalClose"
+                    | "TerminalList"
             ) {
                 self.execute_terminal_tool(session_id, name, input, cwd, cancelled)
             } else if name == crate::code_tools::TOOL_CREATE_WORKTREE {
@@ -681,15 +791,29 @@ impl QuixiEngine {
                 let enter = input.get("enter").and_then(Value::as_bool).unwrap_or(true);
                 match quixi_workspace::changes::WorktreeManager::create_worktree(Path::new(cwd), wt_name) {
                     Ok(info) => {
-                        if enter {
-                            if let Some(new_cwd) = info["path"].as_str() {
-                                if let Some(s) = self.agent_sessions.write().get_mut(session_id) {
-                                    s.cwd = new_cwd.to_string();
-                                    self.persist_agent_session(s);
-                                } else if let Some(s) = self.code_sessions.write().get_mut(session_id) {
-                                    s.cwd = new_cwd.to_string();
-                                    self.persist_code_session(s);
-                                }
+                        let wt_path = info["path"].as_str().unwrap_or("").to_owned();
+                        let wt_branch = info["branch"].as_str().unwrap_or("").to_owned();
+                        let resolved_name = info["name"].as_str().unwrap_or(wt_name).to_owned();
+                        if !wt_path.is_empty() {
+                            self.collaboration.set_worktree(
+                                session_id,
+                                Some(crate::collaboration::WorktreeRecord {
+                                    name: resolved_name,
+                                    path: wt_path.clone(),
+                                    branch: wt_branch,
+                                    origin_cwd: cwd.to_owned(),
+                                    created_at: chrono::Utc::now().timestamp_millis(),
+                                }),
+                            );
+                            self.emit_session_collab_updated(session_id);
+                        }
+                        if enter && !wt_path.is_empty() {
+                            if let Some(s) = self.agent_sessions.write().get_mut(session_id) {
+                                s.cwd = wt_path.clone();
+                                self.persist_agent_session(s);
+                            } else if let Some(s) = self.code_sessions.write().get_mut(session_id) {
+                                s.cwd = wt_path;
+                                self.persist_code_session(s);
                             }
                         }
                         (info.to_string(), false)
@@ -758,6 +882,7 @@ impl QuixiEngine {
         // Destructive commands, outside-workspace paths, and external MCP calls always ask the human.
         let mut ai_review_note: Option<String> = None;
         if mode == "smartAuto"
+            && self.cordis.is_row_active("auto-review")
             && !outside
             && name != agent_tools::TOOL_MCP_CALL
             && !(name == agent_tools::TOOL_BASH

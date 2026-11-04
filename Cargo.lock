@@ -3226,6 +3226,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "quixi-cordis"
+version = "3.6556.16"
+dependencies = [
+ "chrono",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "quixi-disclaimer"
 version = "3.6556.16"
 dependencies = [
@@ -3249,6 +3262,7 @@ dependencies = [
  "keyring",
  "libc",
  "parking_lot",
+ "quixi-cordis",
  "quixi-mcp",
  "quixi-netstack",
  "quixi-platform",
@@ -3283,6 +3297,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "dirs",
+ "quixi-cordis",
  "quixi-engine",
  "quixi-mcp",
  "quixi-netstack",

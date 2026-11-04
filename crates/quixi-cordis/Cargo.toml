@@ -1,0 +1,16 @@
+[package]
+name = "quixi-cordis"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Spatiotemporal plugin kernel for QuixiDesk: revertible effects, reactive coeffects, inertial fibers, scoped waterfalls, and live profile reconciliation."
+
+[dependencies]
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+chrono.workspace = true

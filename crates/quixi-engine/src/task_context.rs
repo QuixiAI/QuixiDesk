@@ -149,6 +149,7 @@ impl TaskContext {
 
     /// Filter a tool-definition array (native or OpenAI function format).
     /// Also accepts an envelope with a `tools` array; unknown shapes are untouched.
+    #[allow(dead_code)]
     pub fn filter_tools(&self, tools: &mut Value) {
         if self.artifact_enabled {
             return;

@@ -12,6 +12,8 @@ pub mod jobs;
 pub mod code_tools;
 pub mod collaboration;
 pub mod workflows;
+pub mod session_titles;
+pub mod cordis_host;
 pub mod agent_tools;
 pub mod providers;
 mod local_ui;
@@ -95,6 +97,7 @@ pub struct QuixiEngine {
     pub jobs: jobs::JobRegistry,
     pub collaboration: collaboration::SessionCollaborationStore,
     pub observations: code_tools::WorkspaceObservationService,
+    pub cordis: cordis_host::HostPluginSystem,
     active_turn_changes: parking_lot::Mutex<
         HashMap<
             String,
@@ -105,6 +108,50 @@ pub struct QuixiEngine {
         >,
     >,
     last_turn_usage: RwLock<HashMap<String, TurnRunTelemetry>>,
+}
+
+/// Computes `dsh`'s `increasedForkTitle`: `"Title"` -> `"Title (1)"` -> `"Title (2)"`
+/// (and fullwidth `"Title（1）"` -> `"Title（2）"`), avoiding collisions with existing siblings.
+pub fn increased_fork_title(base_title: &str, existing_titles: &[String]) -> String {
+    let trimmed = base_title.trim();
+    let (stem, fullwidth, start_num) = if let Some(open) = trimmed.rfind(" (") {
+        if let Some(num_str) = trimmed[open + 2..].strip_suffix(')') {
+            if let Ok(n) = num_str.parse::<u32>() {
+                (&trimmed[..open], false, n + 1)
+            } else {
+                (trimmed, false, 1)
+            }
+        } else {
+            (trimmed, false, 1)
+        }
+    } else if let Some(open) = trimmed.rfind('（') {
+        if let Some(num_str) = trimmed[open + '（'.len_utf8()..].strip_suffix('）') {
+            if let Ok(n) = num_str.parse::<u32>() {
+                (&trimmed[..open], true, n + 1)
+            } else {
+                (trimmed, false, 1)
+            }
+        } else {
+            (trimmed, false, 1)
+        }
+    } else {
+        (trimmed, false, 1)
+    };
+
+    let existing_set: std::collections::HashSet<&str> =
+        existing_titles.iter().map(String::as_str).collect();
+    let mut n = start_num;
+    loop {
+        let candidate = if fullwidth {
+            format!("{stem}（{n}）")
+        } else {
+            format!("{stem} ({n})")
+        };
+        if !existing_set.contains(candidate.as_str()) {
+            return candidate;
+        }
+        n += 1;
+    }
 }
 
 impl QuixiEngine {
@@ -310,12 +357,14 @@ impl QuixiEngine {
             jobs: jobs::JobRegistry::new(),
             collaboration: collaboration::SessionCollaborationStore::new(data_dir.clone()),
             observations: code_tools::WorkspaceObservationService::new(),
+            cordis: cordis_host::HostPluginSystem::boot(&data_dir),
             active_turn_changes: parking_lot::Mutex::new(HashMap::new()),
             last_turn_usage: RwLock::new(HashMap::new()),
         });
 
         engine.load_persisted_sessions();
         engine.load_session_recovery();
+        engine.upgrade_legacy_session_titles();
         engine.load_local_artifacts();
         engine.load_subagents();
         engine.start_scheduler();
@@ -487,7 +536,559 @@ impl QuixiEngine {
                     Err(e) => (format!("TerminalClose failed: {e}"), true),
                 }
             }
+            "TerminalList" => {
+                let list = self.shell_host.terminals.list(session_id);
+                (
+                    json!({ "terminals": list, "count": list.len() }).to_string(),
+                    false,
+                )
+            }
             other => (format!("Unknown terminal tool `{other}`"), true),
+        }
+    }
+
+    pub fn emit_cordis_changed(&self) {
+        let snap = self.cordis.plugin_manager_snapshot();
+        self.emit("cordis:changed", snap.clone());
+        self.emit_eipc(
+            "quixi.web",
+            "CordisPlugins",
+            "onChanged",
+            snap,
+        );
+    }
+
+    pub fn execute_plugin_manager_tool(&self, input: &Value) -> (String, bool) {
+        let action = input.get("action").and_then(Value::as_str).unwrap_or("");
+        match action {
+            "list_bundles" | "list_plugins" => (
+                self.cordis.plugin_manager_snapshot().to_string(),
+                false,
+            ),
+            "set_bundle" => {
+                let target = input.get("target").and_then(Value::as_str).unwrap_or("");
+                let enabled = input.get("enabled").and_then(Value::as_bool).unwrap_or(true);
+                match self
+                    .cordis
+                    .profile_store
+                    .set_bundle_enabled(target, enabled)
+                    .and_then(|_| self.cordis.reconcile_live())
+                {
+                    Ok(snap) => {
+                        self.emit_cordis_changed();
+                        (
+                            json!({
+                                "applied": true,
+                                "bundle": target,
+                                "enabled": enabled,
+                                "activeRowIds": snap["activeRowIds"],
+                            })
+                            .to_string(),
+                            false,
+                        )
+                    }
+                    Err(e) => (e, true),
+                }
+            }
+            "set_plugin" => {
+                let target = input.get("target").and_then(Value::as_str).unwrap_or("");
+                let enabled = input.get("enabled").and_then(Value::as_bool).unwrap_or(true);
+                match self
+                    .cordis
+                    .profile_store
+                    .set_row_enabled(target, enabled)
+                    .and_then(|_| self.cordis.reconcile_live())
+                {
+                    Ok(snap) => {
+                        self.emit_cordis_changed();
+                        (
+                            json!({
+                                "applied": true,
+                                "row": target,
+                                "enabled": enabled,
+                                "activeRowIds": snap["activeRowIds"],
+                            })
+                            .to_string(),
+                            false,
+                        )
+                    }
+                    Err(e) => (e, true),
+                }
+            }
+            "install_user_bundle" => {
+                let Some(manifest_val) = input.get("manifest") else {
+                    return ("`install_user_bundle` requires a `manifest` object.".into(), true);
+                };
+                let manifest: quixi_cordis::BundleManifest =
+                    match serde_json::from_value(manifest_val.clone()) {
+                        Ok(m) => m,
+                        Err(e) => return (format!("Invalid BundleManifest JSON: {e}"), true),
+                    };
+                let client_js = input.get("client_js").and_then(Value::as_str);
+                let readme_md = input.get("readme_md").and_then(Value::as_str);
+                let bundle_id = manifest.id.clone();
+                match self
+                    .cordis
+                    .profile_store
+                    .install_user_bundle(manifest, client_js, readme_md)
+                    .and_then(|_| self.cordis.reconcile_live())
+                {
+                    Ok(_) => {
+                        self.emit_cordis_changed();
+                        (
+                            json!({
+                                "applied": true,
+                                "installedBundle": bundle_id,
+                                "enabled": true,
+                            })
+                            .to_string(),
+                            false,
+                        )
+                    }
+                    Err(e) => (e, true),
+                }
+            }
+            "remove_user_bundle" => {
+                let target = input.get("target").and_then(Value::as_str).unwrap_or("");
+                match self
+                    .cordis
+                    .profile_store
+                    .remove_user_bundle(target)
+                    .and_then(|_| self.cordis.reconcile_live())
+                {
+                    Ok(_) => {
+                        self.emit_cordis_changed();
+                        (
+                            json!({ "applied": true, "removedBundle": target }).to_string(),
+                            false,
+                        )
+                    }
+                    Err(e) => (e, true),
+                }
+            }
+            other => (format!("Unknown PluginManager action `{other}`."), true),
+        }
+    }
+
+    pub fn execute_propose_action_tool(&self, session_id: &str, input: &Value) -> (String, bool) {
+        let action = input
+            .get("action")
+            .and_then(Value::as_str)
+            .unwrap_or("create_personalized_page");
+        if !matches!(action, "create_personalized_page" | "enable_official_plugin") {
+            return (
+                format!("Unsupported ProposeAction kind `{action}`."),
+                true,
+            );
+        }
+        let title = input.get("title").and_then(Value::as_str).unwrap_or("Suggested Plugin");
+        let brief = input.get("brief").and_then(Value::as_str).unwrap_or("");
+        let details = input.get("details").and_then(Value::as_str).unwrap_or("");
+        let placement = input
+            .get("placement")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let target_bundle = input
+            .get("target_bundle_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+
+        let card = self.collaboration.propose_action_card(
+            session_id,
+            action,
+            title,
+            brief,
+            details,
+            placement,
+            target_bundle,
+        );
+        self.emit_session_collab_updated(session_id);
+        (
+            json!({
+                "proposed": true,
+                "card": card,
+            })
+            .to_string(),
+            false,
+        )
+    }
+
+    pub fn resolve_action_card(
+        &self,
+        session_id: &str,
+        card_id: &str,
+        decision: &str,
+        placement: Option<String>,
+    ) -> Result<Value, String> {
+        let state = self.collaboration.get(session_id);
+        let Some(existing) = state.action_cards.iter().find(|c| c.id == card_id).cloned() else {
+            return Err(format!("Unknown action card `{card_id}`"));
+        };
+        let chosen_placement = placement
+            .or_else(|| existing.placement.clone())
+            .unwrap_or_else(|| "sidebar-right".into());
+
+        match decision {
+            "dismiss" => {
+                let updated = self.collaboration.update_action_card_status(
+                    session_id,
+                    card_id,
+                    "dismissed",
+                    Some(chosen_placement),
+                    existing.target_bundle_id,
+                );
+                self.emit_session_collab_updated(session_id);
+                Ok(json!({ "ok": true, "card": updated }))
+            }
+            "undo" => {
+                if let Some(ref bid) = existing.target_bundle_id {
+                    let _ = self.cordis.profile_store.set_bundle_enabled(bid, false);
+                    let _ = self.cordis.reconcile_live();
+                    self.emit_cordis_changed();
+                }
+                let updated = self.collaboration.update_action_card_status(
+                    session_id,
+                    card_id,
+                    "undone",
+                    Some(chosen_placement),
+                    existing.target_bundle_id,
+                );
+                self.emit_session_collab_updated(session_id);
+                Ok(json!({ "ok": true, "card": updated }))
+            }
+            "accept" | "restore" => {
+                let bundle_id = if existing.action == "enable_official_plugin" {
+                    let bid = existing
+                        .target_bundle_id
+                        .clone()
+                        .unwrap_or_else(|| "quixi-experimental-forge".into());
+                    self.cordis.profile_store.set_bundle_enabled(&bid, true)?;
+                    self.cordis.reconcile_live()?;
+                    self.emit_cordis_changed();
+                    bid
+                } else {
+                    let slug: String = existing
+                        .target_bundle_id
+                        .clone()
+                        .unwrap_or_else(|| {
+                            let s: String = existing
+                                .title
+                                .chars()
+                                .map(|c| {
+                                    if c.is_ascii_alphanumeric() {
+                                        c.to_ascii_lowercase()
+                                    } else {
+                                        '-'
+                                    }
+                                })
+                                .collect();
+                            format!("custom-{}", s.trim_matches('-').chars().take(32).collect::<String>())
+                        });
+                    if decision == "restore"
+                        && self
+                            .cordis
+                            .profile_store
+                            .all_bundles()
+                            .iter()
+                            .any(|b| b.id == slug)
+                    {
+                        self.cordis.profile_store.set_bundle_enabled(&slug, true)?;
+                        self.cordis.reconcile_live()?;
+                        self.emit_cordis_changed();
+                    } else {
+                        let safe_title = serde_json::to_string(&existing.title).unwrap_or_default();
+                        let safe_brief = serde_json::to_string(&existing.brief).unwrap_or_default();
+                        let safe_details =
+                            serde_json::to_string(&existing.details).unwrap_or_default();
+                        let safe_placement =
+                            serde_json::to_string(&chosen_placement).unwrap_or_default();
+                        let safe_slug = serde_json::to_string(&slug).unwrap_or_default();
+                        let client_js = format!(
+                            r#"window.QuixiCordis?.definePlugin({{
+  id: {safe_slug},
+  title: {safe_title},
+  setup(ctx) {{
+    ctx.registerPersonalizedSurface({{
+      id: {safe_slug},
+      title: {safe_title},
+      brief: {safe_brief},
+      details: {safe_details},
+      placement: {safe_placement},
+    }});
+  }}
+}});"#
+                        );
+                        let manifest = quixi_cordis::BundleManifest {
+                            id: slug.clone(),
+                            version: "1.0.0".into(),
+                            title: existing.title.clone(),
+                            description: existing.brief.clone(),
+                            category: "Personalized".into(),
+                            official: false,
+                            experimental: false,
+                            listed_by_default: true,
+                            default_enabled: true,
+                            locked: false,
+                            source: None,
+                            readme_markdown: None,
+                            client_script: None,
+                            declarative: json!({ "placement": chosen_placement }),
+                            rows: vec![quixi_cordis::PluginRowSpec {
+                                id: format!("{slug}-ui"),
+                                plugin: format!("user-bundle:{slug}"),
+                                title: existing.title.clone(),
+                                description: existing.brief.clone(),
+                                disabled: false,
+                                locked: false,
+                                isolate: std::collections::BTreeMap::new(),
+                                config: json!({}),
+                                config_schema: None,
+                            }],
+                        };
+                        let readme = format!(
+                            "# {}\n\n{}\n\n## Specification\n\n{}",
+                            existing.title, existing.brief, existing.details
+                        );
+                        self.cordis.profile_store.install_user_bundle(
+                            manifest,
+                            Some(&client_js),
+                            Some(&readme),
+                        )?;
+                        self.cordis.reconcile_live()?;
+                        self.emit_cordis_changed();
+                    }
+                    slug
+                };
+
+                let updated = self.collaboration.update_action_card_status(
+                    session_id,
+                    card_id,
+                    "accepted",
+                    Some(chosen_placement),
+                    Some(bundle_id.clone()),
+                );
+                self.emit_session_collab_updated(session_id);
+                Ok(json!({ "ok": true, "bundleId": bundle_id, "card": updated }))
+            }
+            other => Err(format!("Unsupported card decision `{other}`")),
+        }
+    }
+
+    pub fn observe_forge_from_bash(
+        &self,
+        session_id: &str,
+        cwd: &str,
+        cmd_str: &str,
+        output: &str,
+    ) {
+        if session_id.trim().is_empty() || cwd.trim().is_empty() {
+            return;
+        }
+        let Some(forge) = self
+            .cordis
+            .runtime
+            .root_context()
+            .try_get(cordis_host::capabilities::FORGE_SERVICE)
+        else {
+            return;
+        };
+        let (urls, pushed_or_gh) =
+            cordis_host::capabilities::ForgeGithubService::detect_pr_targets(cmd_str, output);
+        if urls.is_empty() && !pushed_or_gh {
+            return;
+        }
+        let mut changed = false;
+        let path = Path::new(cwd);
+        for url in &urls {
+            let src = if cmd_str.contains("gh pr create") {
+                "created"
+            } else {
+                "referenced"
+            };
+            if let Ok(pr) = forge.inspect_pr(path, Some(url), src) {
+                self.collaboration.upsert_forge_pr(session_id, pr);
+                changed = true;
+            }
+        }
+        if urls.is_empty() && pushed_or_gh {
+            if let Ok(pr) = forge.inspect_pr(path, None, "discovered") {
+                if pr.number > 0 {
+                    self.collaboration.upsert_forge_pr(session_id, pr);
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.emit_session_collab_updated(session_id);
+        }
+    }
+
+    pub fn refresh_session_forge(&self, session_id: &str) -> Value {
+        let cwd = self
+            .agent_sessions
+            .read()
+            .get(session_id)
+            .map(|s| s.cwd.clone())
+            .or_else(|| self.code_sessions.read().get(session_id).map(|s| s.cwd.clone()))
+            .unwrap_or_default();
+        if cwd.trim().is_empty() {
+            return json!({ "prs": [], "error": "No workspace directory selected." });
+        }
+        let Some(forge) = self
+            .cordis
+            .runtime
+            .root_context()
+            .try_get(cordis_host::capabilities::FORGE_SERVICE)
+        else {
+            return json!({ "prs": [], "error": "GitHub Forge plugin is disabled." });
+        };
+        let path = Path::new(&cwd);
+        let existing = self.collaboration.get(session_id).forge_prs;
+        if existing.is_empty() {
+            if let Ok(pr) = forge.inspect_pr(path, None, "discovered") {
+                if pr.number > 0 {
+                    self.collaboration.upsert_forge_pr(session_id, pr);
+                }
+            }
+        } else {
+            for item in existing {
+                if !item.dismissed {
+                    if let Ok(pr) = forge.inspect_pr(path, Some(&item.url), &item.binding_source) {
+                        self.collaboration.upsert_forge_pr(session_id, pr);
+                    }
+                }
+            }
+        }
+        self.emit_session_collab_updated(session_id);
+        let updated = self.collaboration.get(session_id).forge_prs;
+        json!({ "prs": updated })
+    }
+
+    pub fn export_session_zip(&self, session_id: &str) -> Result<(String, Vec<u8>), String> {
+        let messages = if let Some(s) = self.agent_sessions.read().get(session_id) {
+            s.buffered_messages.clone()
+        } else if self.code_sessions.read().contains_key(session_id) {
+            self.code_transcripts
+                .read()
+                .get(session_id)
+                .cloned()
+                .unwrap_or_default()
+        } else {
+            return Err("Conversation not found.".into());
+        };
+        let collab = self.collaboration.client_view(session_id);
+        let md_val = self.export_session_markdown(session_id);
+        let md = md_val["markdown"].as_str().unwrap_or_default();
+        let bytes = self
+            .cordis
+            .build_session_zip_bytes(session_id, &messages, &collab, md);
+        let filename = format!("quixi-session-{session_id}.zip");
+        Ok((filename, bytes))
+    }
+
+    /// Branches a conversation at `upto_message_uuid` (or full completed history when omitted)
+    /// into a new sibling session using `dsh`'s `increasedForkTitle` (`"Title (1)"`, `"Title (2)"`).
+    pub fn fork_session_branch(
+        self: &Arc<Self>,
+        session_id: &str,
+        upto_message_uuid: Option<&str>,
+    ) -> Result<Value, String> {
+        let agent = self.agent_sessions.read().get(session_id).cloned();
+        let code = self.code_sessions.read().get(session_id).cloned();
+        if agent.is_none() && code.is_none() {
+            return Err("Conversation not found.".into());
+        }
+        let messages = agent
+            .as_ref()
+            .map(|s| s.buffered_messages.clone())
+            .unwrap_or_else(|| {
+                self.code_transcripts
+                    .read()
+                    .get(session_id)
+                    .cloned()
+                    .unwrap_or_default()
+            });
+        let slice_end = match upto_message_uuid.filter(|s| !s.trim().is_empty()) {
+            Some(uuid) => messages
+                .iter()
+                .position(|m| m["uuid"].as_str() == Some(uuid))
+                .map(|idx| idx + 1)
+                .unwrap_or(messages.len()),
+            None => messages.len(),
+        };
+        let mut forked_msgs = messages[..slice_end].to_vec();
+        let new_sid = format!("local_{}", Uuid::new_v4());
+        for m in &mut forked_msgs {
+            m["session_id"] = json!(new_sid);
+        }
+        let last_uuid = forked_msgs
+            .last()
+            .and_then(|m| m["uuid"].as_str())
+            .unwrap_or("")
+            .to_owned();
+        let origin = Some(quixi_proto::SessionForkOrigin {
+            session_id: session_id.to_owned(),
+            message_uuid: last_uuid,
+        });
+        let now = Utc::now().timestamp_millis() as u64;
+        let existing_titles: Vec<String> = self
+            .agent_sessions
+            .read()
+            .values()
+            .map(|s| s.title.clone())
+            .chain(self.code_sessions.read().values().map(|s| s.title.clone()))
+            .collect();
+
+        let parent_preset = self.collaboration.agent_preset(session_id);
+        self.collaboration.set_agent_preset(&new_sid, &parent_preset);
+        self.collaboration.set_title_pinned(&new_sid, true);
+
+        if let Some(mut sess) = agent {
+            let next_title = increased_fork_title(&sess.title, &existing_titles);
+            sess.session_id = new_sid.clone();
+            sess.forked_from = origin;
+            sess.cli_session_id = Some(Uuid::new_v4().to_string());
+            sess.title = next_title.clone();
+            sess.created_at = now;
+            sess.last_activity_at = now;
+            sess.is_running = false;
+            sess.is_archived = false;
+            sess.is_starred = false;
+            sess.error = None;
+            sess.pending_tool_permissions.clear();
+            sess.buffered_messages = forked_msgs;
+            self.persist_agent_session(&sess);
+            self.agent_sessions.write().insert(new_sid.clone(), sess);
+            self.emit_eipc(
+                "quixi.web",
+                "LocalAgentModeSessions",
+                "onEvent",
+                json!({ "type": "session_updated", "sessionId": new_sid }),
+            );
+            Ok(json!({ "sessionId": new_sid, "title": next_title, "kind": "agent" }))
+        } else {
+            let mut sess = code.unwrap();
+            let next_title = increased_fork_title(&sess.title, &existing_titles);
+            sess.session_id = new_sid.clone();
+            sess.forked_from = origin;
+            sess.title = next_title.clone();
+            sess.created_at = now;
+            sess.last_activity_at = now;
+            sess.turn_running = false;
+            sess.is_archived = false;
+            sess.is_starred = false;
+            self.code_transcripts
+                .write()
+                .insert(new_sid.clone(), forked_msgs);
+            self.persist_code_session(&sess);
+            self.code_sessions.write().insert(new_sid.clone(), sess);
+            self.emit_eipc(
+                "quixi.web",
+                "LocalSessions",
+                "onEvent",
+                json!({ "type": "session_updated", "sessionId": new_sid }),
+            );
+            Ok(json!({ "sessionId": new_sid, "title": next_title, "kind": "code" }))
         }
     }
 
@@ -2919,6 +3520,13 @@ impl QuixiEngine {
         let mut compactions_count = 0u32;
         let mut ever_mutated_in_turn = false;
         let mut non_mutating_rounds = 0usize;
+        let mut creator_skills_loaded = false;
+        let mut frozen_system_prompt: Option<String> = None;
+        let mut last_runtime_snapshot: Option<String> = None;
+        let turn_number = transcript
+            .iter()
+            .filter(|m| m["type"] == "user" && m.pointer("/message/content/0/type") == Some(&json!("text")))
+            .count();
 
         for round in 0..MAX_ROUNDS {
             rounds_used = round + 1;
@@ -2952,21 +3560,52 @@ impl QuixiEngine {
             }
             let mode = self.current_permission_mode(session_id, permission_mode);
             let collab_snapshot = self.collaboration.get(session_id);
+            let preset_id = if collab_snapshot.agent_preset.trim().is_empty() {
+                self.cordis.default_preset_id()
+            } else {
+                collab_snapshot.agent_preset.clone()
+            };
             let artifacts: Vec<Value> = self.artifacts.read().values()
                 .filter(|a| a["createdBySessionId"] == session_id)
                 .map(|a| json!({"id":a["id"], "title":a["title"], "createdBySessionId":a["createdBySessionId"]}))
                 .collect();
             let task_context = task_context::TaskContext::derive(&task_request, &artifacts, session_id, previous_artifact_turn);
-            let mut tools = agent_tools::available_tool_schemas_with_options(&mode, collab_snapshot.team.enabled);
-            task_context.filter_tools(&mut tools);
-            if cwd.trim().is_empty() {
-                tools.as_array_mut().unwrap().retain(|tool| !chat_workflows::needs_workspace(tool["function"]["name"].as_str().unwrap_or_default()));
-            }
-            tools.as_array_mut().unwrap().push(subagents::schema());
+
+            // Step-time Cordis tool resolution (`dsh-tools` `resolve`): evaluates `when` predicates,
+            // preset/session restrictions, and Native vs. PTC `RunCode` projection!
+            let act_ctx = cordis_host::seams::ToolActivationCtx {
+                session_id: session_id.to_owned(),
+                preset_id: preset_id.clone(),
+                model: resolved_model.clone(),
+                cwd: cwd.to_owned(),
+                permission_mode: mode.clone(),
+                plan_active: collab_snapshot.plan_mode.active,
+                team_enabled: collab_snapshot.team.enabled,
+                artifact_enabled: task_context.artifact_enabled,
+                web_search_ready: self.cordis.web_search_ready(),
+                creator_skills_loaded,
+            };
+            let resolved_step = self.cordis.resolve_step_tools(&act_ctx);
+            let mut tools = Value::Array(resolved_step.model_schemas.clone());
+
             let mut budget = self.provider_manager.mcp_tool_budget(&resolved_model);
-            if defer_direct_mcp { budget.enabled = false; }
-            let registry=mcp_registry::Registry::build(self.mcp_host.ready_tools(&self.mcp_workspace(cwd)),tools.as_array().unwrap(),budget);
-            tools.as_array_mut().unwrap().extend(registry.schemas.iter().cloned());
+            if defer_direct_mcp
+                || preset_id == "minimal"
+                || resolved_step.executor == cordis_host::seams::ToolExecutorKind::PtcRunCode
+            {
+                budget.enabled = false;
+            }
+            let registry = mcp_registry::Registry::build(
+                self.mcp_host.ready_tools(&self.mcp_workspace(cwd)),
+                tools.as_array().unwrap(),
+                budget,
+            );
+            if preset_id != "minimal"
+                && resolved_step.executor == cordis_host::seams::ToolExecutorKind::Native
+            {
+                tools.as_array_mut().unwrap().extend(registry.schemas.iter().cloned());
+            }
+
             let skills_block = self.skills_index_block();
             let mut permission = agent_tools::permission_context(&mode);
             if collab_snapshot.plan_mode.active {
@@ -2974,18 +3613,59 @@ impl QuixiEngine {
                 permission.push_str(collaboration::PLAN_MODE_GUIDANCE);
             }
             let capabilities = registry.context();
+            let prompt_input = cordis_host::seams::PromptAssembleInput {
+                scope: Some(quixi_cordis::ScopeKey::session(
+                    session_id.to_owned(),
+                    Some(preset_id.clone()),
+                )),
+                session_id: session_id.to_owned(),
+                preset_id: preset_id.clone(),
+                model: resolved_model.clone(),
+                provider: String::new(),
+                cwd: cwd.to_owned(),
+                permission_mode: mode.clone(),
+                plan_active: collab_snapshot.plan_mode.active,
+                team_enabled: collab_snapshot.team.enabled,
+                tools_enabled: true,
+                project_instructions: project_instructions.clone(),
+                workspace_instructions: workspace_instructions.clone(),
+                mcp_capabilities: capabilities.clone(),
+                artifact_guidance: task_context.guidance().to_owned(),
+                skills_catalog: skills_block.clone(),
+                sdk_declarations: resolved_step.sdk_declarations.clone(),
+            };
+            let cordis_prompt = self.cordis.assemble_prompt(&prompt_input);
+
+            // KV-cache preservation (`dsh-system-prompt`): pin node-0 `system` prompt on round 0
+            // and emit mid-turn `cwd`/`permission`/`plan` changes as tail runtime-context snapshots!
+            if let Some(ref pinned) = frozen_system_prompt {
+                messages[0]["content"] = json!(pinned);
+                if last_runtime_snapshot.as_deref() != Some(cordis_prompt.runtime_context_snapshot.as_str())
+                    && !cordis_prompt.runtime_context_snapshot.is_empty()
+                {
+                    messages.push(json!({
+                        "role": "user",
+                        "content": cordis_prompt.runtime_context_snapshot.clone()
+                    }));
+                    last_runtime_snapshot = Some(cordis_prompt.runtime_context_snapshot);
+                }
+            } else {
+                messages[0]["content"] = json!(cordis_prompt.system_prompt.clone());
+                frozen_system_prompt = Some(cordis_prompt.system_prompt);
+                last_runtime_snapshot = Some(cordis_prompt.runtime_context_snapshot);
+            }
+
             let assembled = prompt_context::PromptContext {
                 cwd, project: &project_instructions, workspace: &workspace_instructions,
                 permission: &permission, capabilities: &capabilities,
                 artifact: task_context.guidance(), skills: &skills_block, tools_enabled: true,
             };
-            messages[0]["content"] = json!(assembled.render());
             self.prompt_contexts.write().insert(session_id.to_owned(), assembled.diagnostics(
                 round, &mode,
                 tools.as_array().unwrap().iter().map(|t| t["function"]["name"].clone()).collect(),
                 task_context.artifact_reason,
             ));
-            match self.compact_context_with_checkpoint(&mut messages,&resolved_model,prompt,cancelled) {
+            match self.compact_context_with_checkpoint(&mut messages, &tools, &resolved_model, prompt, cancelled) {
                 Ok((compacted, checkpoint_opt)) if compacted && !session_id.trim().is_empty() => {
                     compactions_count += 1;
                     if let Some((summary, shadowed)) = checkpoint_opt {
@@ -3011,13 +3691,28 @@ impl QuixiEngine {
                 }
             }
             let mut streamed_text = false;
+            let model_started = std::time::Instant::now();
+            let mut first_token_ms: Option<u64> = None;
             let turn = match self.provider_manager.complete_turn_with_tools_for_provider_and_effort(
                 &messages,
                 &tools,
                 Some(&resolved_model),
                 None,
                 session_effort.as_deref(),
-                &mut |chunk| { if !cancelled.load(Ordering::SeqCst) { if let StreamChunk::Text(text)=&chunk { if !text.is_empty() {streamed_text=true;self.record_partial_reply(session_id,cancelled,text);} } on_chunk(chunk); } },
+                &mut |chunk| {
+                    if !cancelled.load(Ordering::SeqCst) {
+                        if first_token_ms.is_none() {
+                            first_token_ms = Some(model_started.elapsed().as_millis() as u64);
+                        }
+                        if let StreamChunk::Text(text) = &chunk {
+                            if !text.is_empty() {
+                                streamed_text = true;
+                                self.record_partial_reply(session_id, cancelled, text);
+                            }
+                        }
+                        on_chunk(chunk);
+                    }
+                },
             ) {
                 Some(turn) => turn,
                 None => {
@@ -3089,6 +3784,9 @@ impl QuixiEngine {
                 }
             }
 
+            let model_elapsed_ms = model_started.elapsed().as_millis() as u64;
+            let step_ttft_ms = first_token_ms.unwrap_or(model_elapsed_ms);
+
             if let Some(ref err) = turn.stream_error {
                 let lower = err.to_lowercase();
                 if overflow_retries == 0
@@ -3101,7 +3799,7 @@ impl QuixiEngine {
                 {
                     overflow_retries += 1;
                     if let Ok((_, checkpoint_opt)) = self
-                        .force_overflow_compaction(&mut messages, &resolved_model, None, prompt, cancelled)
+                        .force_overflow_compaction(&mut messages, &tools, &resolved_model, None, prompt, cancelled)
                     {
                         if let Some((summary, shadowed)) = checkpoint_opt {
                             if !session_id.trim().is_empty() {
@@ -3150,6 +3848,29 @@ impl QuixiEngine {
             }
 
             if turn.tool_calls.is_empty() {
+                if !session_id.trim().is_empty() {
+                    let u = turn.usage.clone().unwrap_or_default();
+                    self.collaboration.record_step_telemetry(
+                        session_id,
+                        collaboration::StepTelemetryRecord {
+                            turn_index: turn_number,
+                            step_index: round,
+                            model: final_model.clone(),
+                            ttft_ms: step_ttft_ms,
+                            model_ms: model_elapsed_ms,
+                            tool_ms: 0,
+                            input_tokens: u.input_tokens,
+                            output_tokens: u.output_tokens,
+                            cache_read_tokens: u.cache_read_tokens,
+                            cache_write_tokens: u.cache_write_tokens,
+                            reasoning_tokens: u.reasoning_tokens,
+                            context_tokens: latest_context_tokens,
+                            tool_names: Vec::new(),
+                            ptc_subcalls: Vec::new(),
+                            recorded_at: Utc::now().timestamp_millis(),
+                        },
+                    );
+                }
                 if !streamed_text && !turn.text.is_empty() { self.record_partial_reply(session_id,cancelled,&turn.text);on_chunk(StreamChunk::Text(turn.text.clone())); }
                 let steering = self.take_steering(session_id);
                 if !steering.is_empty() {
@@ -3276,10 +3997,18 @@ impl QuixiEngine {
             }
             messages.push(wire_assistant);
 
-            // 2. Execute requested tools (with parallel fan-out when multiple read-only Task calls arrive together).
+            // 2. Execute requested tools through the Cordis pipeline (rolling parallel pool for
+            //    concurrency-safe calls, PTC `RunCode` worker, `SubagentFork`, custom user-bundle
+            //    handlers, and pre/around/post waterfalls).
+            let tools_started = std::time::Instant::now();
             let mut result_blocks: Vec<Value> = Vec::new();
             let mut mutated_files = false;
             let mut discovered_nested: Vec<(String, String)> = Vec::new();
+            let mut post_batch_contexts: Vec<String> = Vec::new();
+            let mut step_ptc_subcalls: Vec<Value> = Vec::new();
+            let scoped_cordis_ctx = self.cordis.runtime.root_context().scoped(
+                quixi_cordis::ScopeKey::session(session_id.to_owned(), Some(preset_id.clone())),
+            );
 
             let all_parallel_ro_tasks = turn.tool_calls.len() >= 2
                 && turn.tool_calls.iter().all(|c| {
@@ -3287,6 +4016,27 @@ impl QuixiEngine {
                         && serde_json::from_str::<Value>(&c.arguments).is_ok_and(|inp| {
                             inp.get("allow_edits").and_then(Value::as_bool) != Some(true)
                                 && inp.get("model").and_then(Value::as_str).is_none_or(|m| m.trim().is_empty() || m.trim() == resolved_model)
+                        })
+                });
+
+            let all_parallel_safe_obs = !all_parallel_ro_tasks
+                && turn.tool_calls.len() >= 2
+                && turn.tool_calls.len() <= 10
+                && turn.tool_calls.iter().all(|c| {
+                    registry.route(&c.name).is_none()
+                        && serde_json::from_str::<Value>(&c.arguments).is_ok_and(|inp| {
+                            resolved_step
+                                .capabilities
+                                .get(&c.name)
+                                .is_some_and(|reg| {
+                                    reg.custom_handler.is_none() && (reg.is_concurrency_safe)(&inp)
+                                })
+                                && !agent_tools::requires_approval_with_host(
+                                    &c.name,
+                                    &inp,
+                                    &mode,
+                                    &self.mcp_host,
+                                )
                         })
                 });
 
@@ -3339,44 +4089,300 @@ impl QuixiEngine {
                         "content": output
                     }));
                 }
+            } else if all_parallel_safe_obs {
+                let parallel_outcomes: Vec<(String, bool)> = std::thread::scope(|scope| {
+                    let handles: Vec<_> = turn
+                        .tool_calls
+                        .iter()
+                        .map(|call| {
+                            let input = serde_json::from_str::<Value>(&call.arguments)
+                                .unwrap_or_else(|_| json!({}));
+                            let cid = call.id.as_str();
+                            let cname = call.name.as_str();
+                            scope.spawn(move || {
+                                if cname == "LoadSkill" {
+                                    self.load_skill(&input)
+                                } else if cname == "ListSkills" {
+                                    self.list_skills_tool(&input)
+                                } else {
+                                    self.execute_tool_with_approval(
+                                        session_id,
+                                        cid,
+                                        cname,
+                                        &input,
+                                        cwd,
+                                        permission_mode,
+                                        cancelled,
+                                    )
+                                }
+                            })
+                        })
+                        .collect();
+                    handles
+                        .into_iter()
+                        .map(|h| h.join().unwrap_or_else(|_| ("Tool worker panicked.".into(), true)))
+                        .collect()
+                });
+                for (call, (output, is_error)) in turn.tool_calls.iter().zip(parallel_outcomes) {
+                    result_blocks.push(json!({
+                        "type": "tool_result",
+                        "tool_use_id": call.id,
+                        "is_error": is_error,
+                        "content": output
+                    }));
+                }
             } else {
                 let history_snapshot = messages.clone();
+                let ptc_alias_map = cordis_host::make_ptc_alias_map(&resolved_step);
                 for call in &turn.tool_calls {
                     if cancelled.load(Ordering::SeqCst) {
                         self.active_turn_changes.lock().remove(session_id);
                         return (String::new(), final_model);
                     }
                     let parsed_input = serde_json::from_str::<Value>(&call.arguments);
+
+                    // Pre-execute Cordis waterfall + monotonic guard check:
+                    if let Ok(ref input_val) = parsed_input {
+                        let pre = scoped_cordis_ctx.waterfall(
+                            "tools/pre-execute",
+                            json!({
+                                "sessionId": session_id,
+                                "toolName": call.name,
+                                "args": input_val,
+                                "decision": "allow",
+                            }),
+                            |v| v,
+                        );
+                        if pre["decision"].as_str() == Some("deny") {
+                            let reason = pre["reason"]
+                                .as_str()
+                                .unwrap_or("Blocked by pre-execute policy")
+                                .to_owned();
+                            result_blocks.push(json!({
+                                "type": "tool_result",
+                                "tool_use_id": call.id,
+                                "is_error": true,
+                                "content": reason,
+                            }));
+                            continue;
+                        }
+                        if let Some(tools_svc) = scoped_cordis_ctx.try_get(cordis_host::seams::TOOLS_SERVICE) {
+                            if let Some(guard_reason) =
+                                tools_svc.check_guards(scoped_cordis_ctx.scope(), &call.name, input_val, &act_ctx)
+                            {
+                                result_blocks.push(json!({
+                                    "type": "tool_result",
+                                    "tool_use_id": call.id,
+                                    "is_error": true,
+                                    "content": guard_reason,
+                                }));
+                                continue;
+                            }
+                        }
+                    }
+
+                    let timeout_ms_hint = resolved_step
+                        .capabilities
+                        .get(&call.name)
+                        .and_then(|r| r.timeout_ms);
+
                     let (output, is_error) = match &parsed_input {
                         Ok(input) if registry.route(&call.name).is_some()=>{
                             let route=registry.route(&call.name).unwrap();let input=route.input(input);
                             tool_results.run(agent_tools::TOOL_MCP_CALL,&input,||self.execute_tool_with_approval_and_mcp_identity(session_id,&call.id,agent_tools::TOOL_MCP_CALL,&input,cwd,permission_mode,cancelled,Some(&route.identity)))
                         },
-                        Ok(input) => tool_results.run(&call.name, input, || {
-                            if call.name == "Task" {
-                                if delegated_tasks >= subagents::MAX_TASKS_PER_TURN {return ("This turn has reached its four-subagent limit. Continue in the parent or report remaining work.".into(), true);}
-                                delegated_tasks += 1;
-                                self.run_subagent_with_context(session_id, &call.id, input, cwd, permission_mode, &resolved_model, &history_snapshot, cancelled)
-                            } else if call.name == workflows::TOOL_RALPH {
-                                self.run_ralph_loop(session_id, &call.id, input, cwd, permission_mode, &resolved_model, cancelled)
-                            } else if call.name == workflows::TOOL_WORKFLOW {
-                                self.run_structured_workflow(session_id, &call.id, input, cwd, permission_mode, &resolved_model, cancelled)
-                            } else if call.name == "Artifact" {
-                                if !task_context.artifact_enabled {
-                                    return ("Artifact is not enabled for this task. No preview was changed.".into(), true);
-                                }
-                                self.execute_tool_with_approval(session_id, &call.id, &call.name, input, cwd, permission_mode, cancelled)
-                            } else if call.name == "LoadSkill" {
-                                self.load_skill(input)
-                            } else if call.name == "ListSkills" {
-                                self.list_skills_tool(input)
-                            } else {
-                                self.execute_tool_with_approval(session_id, &call.id, &call.name, input, cwd,
-                                    permission_mode, cancelled)
-                            }
-                        }),
+                        Ok(input) => {
+                            let exec_outcome = scoped_cordis_ctx.waterfall(
+                                "tools/execute",
+                                json!({ "toolName": call.name, "timeoutMs": timeout_ms_hint }),
+                                |_| {
+                                    let pair = tool_results.run(&call.name, input, || {
+                                        if call.name == cordis_host::seams::RUN_CODE_TOOL_NAME {
+                                            if !matches!(
+                                                self.current_permission_mode(session_id, permission_mode).as_str(),
+                                                "auto" | "bypassPermissions"
+                                            ) {
+                                                // Request approval for RunCode in manual/acceptEdits modes:
+                                                let gate = self.execute_tool_with_approval(
+                                                    session_id,
+                                                    &call.id,
+                                                    "Bash",
+                                                    &json!({ "command": format!("echo 'RunCode: {}'", input["description"].as_str().unwrap_or("script")) }),
+                                                    cwd,
+                                                    permission_mode,
+                                                    cancelled,
+                                                );
+                                                if gate.1 {
+                                                    return gate;
+                                                }
+                                            }
+                                            let Some(ptc) = scoped_cordis_ctx.try_get(cordis_host::capabilities::PTC_RUNTIME_SERVICE) else {
+                                                return ("PTC runtime plugin is currently disabled.".into(), true);
+                                            };
+                                            let code_str = input["code"].as_str().unwrap_or("");
+                                            let req_to = input.get("timeout_seconds").and_then(Value::as_u64);
+                                            let cur_mode = self.current_permission_mode(session_id, permission_mode);
+                                            let policy = quixi_platform::sandbox::SandboxPolicy {
+                                                mode: quixi_platform::sandbox::SandboxMode::from_permission_mode(&cur_mode),
+                                                workspace_root: PathBuf::from(cwd),
+                                                additional_writable_roots: vec![],
+                                                session_temp_dir: None,
+                                            };
+                                            let outcome = ptc.run_code(
+                                                code_str,
+                                                Path::new(cwd),
+                                                req_to,
+                                                cancelled,
+                                                (!cwd.trim().is_empty()).then_some(&policy),
+                                                |sub_tool, sub_args| {
+                                                    let Some(canon) = cordis_host::lookup_ptc_tool(sub_tool, &ptc_alias_map) else {
+                                                        return (format!("Tool `{sub_tool}` is not available in this session scope."), true);
+                                                    };
+                                                    if let Some(reg) = resolved_step.capabilities.get(&canon) {
+                                                        if let Some(ref handler) = reg.custom_handler {
+                                                            let tctx = cordis_host::seams::ToolExecContext {
+                                                                session_id,
+                                                                call_id: &call.id,
+                                                                cwd,
+                                                                permission_mode,
+                                                                resolved_model: &resolved_model,
+                                                            };
+                                                            return handler(&canon, sub_args, &tctx);
+                                                        }
+                                                    }
+                                                    if canon == "LoadSkill" {
+                                                        self.load_skill(sub_args)
+                                                    } else if canon == "ListSkills" {
+                                                        self.list_skills_tool(sub_args)
+                                                    } else {
+                                                        self.execute_tool_with_approval(
+                                                            session_id,
+                                                            &call.id,
+                                                            &canon,
+                                                            sub_args,
+                                                            cwd,
+                                                            permission_mode,
+                                                            cancelled,
+                                                        )
+                                                    }
+                                                },
+                                            );
+                                            step_ptc_subcalls.extend(outcome.subcalls);
+                                            (
+                                                crate::spill::maybe_spill_tool_result(
+                                                    &self.data_dir,
+                                                    session_id,
+                                                    &call.name,
+                                                    outcome.output,
+                                                ),
+                                                outcome.is_error,
+                                            )
+                                        } else if let Some(custom_reg) = resolved_step
+                                            .capabilities
+                                            .get(&call.name)
+                                            .filter(|r| r.custom_handler.is_some())
+                                        {
+                                            let handler = custom_reg.custom_handler.as_ref().unwrap();
+                                            let tctx = cordis_host::seams::ToolExecContext {
+                                                session_id,
+                                                call_id: &call.id,
+                                                cwd,
+                                                permission_mode,
+                                                resolved_model: &resolved_model,
+                                            };
+                                            let raw = handler(&call.name, input, &tctx);
+                                            (
+                                                crate::spill::maybe_spill_tool_result(
+                                                    &self.data_dir,
+                                                    session_id,
+                                                    &call.name,
+                                                    raw.0,
+                                                ),
+                                                raw.1,
+                                            )
+                                        } else if call.name == cordis_host::TOOL_SUBAGENT_FORK {
+                                            if delegated_tasks >= subagents::MAX_TASKS_PER_TURN {
+                                                return ("This turn has reached its four-subagent limit. Continue in the parent or report remaining work.".into(), true);
+                                            }
+                                            delegated_tasks += 1;
+                                            let fork_input = json!({
+                                                "title": input["description"].as_str().unwrap_or("Forked subagent"),
+                                                "prompt": input["prompt"].as_str().unwrap_or(""),
+                                                "allow_edits": input.get("allow_edits").and_then(Value::as_bool).unwrap_or(false),
+                                                "fork_context": true,
+                                            });
+                                            self.run_subagent_with_context(
+                                                session_id,
+                                                &call.id,
+                                                &fork_input,
+                                                cwd,
+                                                permission_mode,
+                                                &resolved_model,
+                                                &history_snapshot,
+                                                cancelled,
+                                            )
+                                        } else if call.name == "Task" {
+                                            if delegated_tasks >= subagents::MAX_TASKS_PER_TURN {return ("This turn has reached its four-subagent limit. Continue in the parent or report remaining work.".into(), true);}
+                                            delegated_tasks += 1;
+                                            self.run_subagent_with_context(session_id, &call.id, input, cwd, permission_mode, &resolved_model, &history_snapshot, cancelled)
+                                        } else if call.name == workflows::TOOL_RALPH {
+                                            self.run_ralph_loop(session_id, &call.id, input, cwd, permission_mode, &resolved_model, cancelled)
+                                        } else if call.name == workflows::TOOL_WORKFLOW {
+                                            self.run_structured_workflow(session_id, &call.id, input, cwd, permission_mode, &resolved_model, cancelled)
+                                        } else if call.name == "Artifact" {
+                                            if !task_context.artifact_enabled {
+                                                return ("Artifact is not enabled for this task. No preview was changed.".into(), true);
+                                            }
+                                            self.execute_tool_with_approval(session_id, &call.id, &call.name, input, cwd, permission_mode, cancelled)
+                                        } else if call.name == "LoadSkill" {
+                                            let sk_name = input
+                                                .get("skill_id")
+                                                .or_else(|| input.get("name"))
+                                                .and_then(Value::as_str)
+                                                .unwrap_or("")
+                                                .to_lowercase();
+                                            if sk_name.contains("cordis")
+                                                || sk_name.contains("plugin")
+                                                || sk_name.contains("personalized")
+                                            {
+                                                creator_skills_loaded = true;
+                                            }
+                                            self.load_skill(input)
+                                        } else if call.name == "ListSkills" {
+                                            self.list_skills_tool(input)
+                                        } else {
+                                            self.execute_tool_with_approval(session_id, &call.id, &call.name, input, cwd,
+                                                permission_mode, cancelled)
+                                        }
+                                    });
+                                    json!({ "output": pair.0, "isError": pair.1 })
+                                },
+                            );
+                            (
+                                exec_outcome["output"].as_str().unwrap_or_default().to_owned(),
+                                exec_outcome["isError"].as_bool().unwrap_or(false),
+                            )
+                        }
                         Err(error) => (format!("Invalid tool arguments: {error}"), true),
                     };
+
+                    // Post-execute Cordis waterfall (`spill-policy`, `repeat-tool-reminder`):
+                    let post = scoped_cordis_ctx.waterfall(
+                        "tools/post-execute",
+                        json!({
+                            "sessionId": session_id,
+                            "toolName": call.name,
+                            "isError": is_error,
+                            "additionalContexts": [],
+                        }),
+                        |v| v,
+                    );
+                    if let Some(arr) = post["additionalContexts"].as_array() {
+                        for item in arr.iter().filter_map(Value::as_str) {
+                            post_batch_contexts.push(item.to_owned());
+                        }
+                    }
+
                     if !is_error && !cwd.trim().is_empty() {
                         if let Ok(ref input) = parsed_input {
                             if let Some(raw_p) = input.get("file_path").or_else(|| input.get("path")).and_then(Value::as_str) {
@@ -3399,6 +4405,30 @@ impl QuixiEngine {
                         "content": output
                     }));
                 }
+            }
+            let tool_elapsed_ms = tools_started.elapsed().as_millis() as u64;
+            if !session_id.trim().is_empty() {
+                let u = turn.usage.clone().unwrap_or_default();
+                self.collaboration.record_step_telemetry(
+                    session_id,
+                    collaboration::StepTelemetryRecord {
+                        turn_index: turn_number,
+                        step_index: round,
+                        model: final_model.clone(),
+                        ttft_ms: step_ttft_ms,
+                        model_ms: model_elapsed_ms,
+                        tool_ms: tool_elapsed_ms,
+                        input_tokens: u.input_tokens,
+                        output_tokens: u.output_tokens,
+                        cache_read_tokens: u.cache_read_tokens,
+                        cache_write_tokens: u.cache_write_tokens,
+                        reasoning_tokens: u.reasoning_tokens,
+                        context_tokens: latest_context_tokens,
+                        tool_names: turn.tool_calls.iter().map(|c| c.name.clone()).collect(),
+                        ptc_subcalls: step_ptc_subcalls,
+                        recorded_at: Utc::now().timestamp_millis(),
+                    },
+                );
             }
             if mutated_files {
                 ever_mutated_in_turn = true;
@@ -3438,6 +4468,14 @@ impl QuixiEngine {
                 messages.push(json!({
                     "role": "user",
                     "content": nudge
+                }));
+            }
+            // FIFO `additionalContexts` from `tools/post-execute` waterfalls (`dsh-tools` rule:
+            // flushed strictly AFTER all `role: "tool"` messages of the batch settle!).
+            for extra_ctx in post_batch_contexts {
+                messages.push(json!({
+                    "role": "user",
+                    "content": extra_ctx
                 }));
             }
             // Analysis-paralysis / uncommitted-drift guard: nudge when 15 or 30 consecutive
@@ -3576,26 +4614,56 @@ impl QuixiEngine {
                     .collect()
             })
             .unwrap_or_default();
-        let cwd = opts
+        let mut cwd = opts
             .get("cwd")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
             .unwrap_or_else(|| folders.first().cloned().unwrap_or_default());
+        let effort_level = opts
+            .get("effortLevel")
+            .or_else(|| opts.get("effort"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("medium")
+            .to_string();
+        let chosen_preset = opts
+            .get("agentPreset")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| self.cordis.default_preset_id());
+        self.collaboration
+            .set_agent_preset(&session_id, &chosen_preset);
+        let want_worktree = opts
+            .get("createWorktree")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         let message = opts
             .get("message")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        let title = opts
+        let auto_title = opts
+            .get("autoTitle")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let explicit_title = opts
             .get("title")
             .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        if explicit_title.is_some() && !auto_title {
+            self.collaboration.set_title_pinned(&session_id, true);
+        }
+        let title = explicit_title
             .map(|s| s.to_string())
             .unwrap_or_else(|| {
-                if message.is_empty() {
+                if message.trim().is_empty() {
                     "QuixiDesk Session".to_string()
                 } else {
-                    message.chars().take(48).collect()
+                    session_titles::smart_fallback_title(&message)
                 }
             });
         let requested_model = opts.get("model").and_then(|v| v.as_str());
@@ -3612,6 +4680,27 @@ impl QuixiEngine {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
+        if want_worktree && !cwd.trim().is_empty() && Path::new(&cwd).is_dir() {
+            if let Ok(wt) =
+                quixi_workspace::changes::WorktreeManager::create_worktree(Path::new(&cwd), &title)
+            {
+                if let Some(wt_path) = wt["path"].as_str().filter(|s| !s.is_empty()) {
+                    let wt_branch = wt["branch"].as_str().unwrap_or("").to_owned();
+                    let wt_name = wt["name"].as_str().unwrap_or("worktree").to_owned();
+                    self.collaboration.set_worktree(
+                        &session_id,
+                        Some(collaboration::WorktreeRecord {
+                            name: wt_name,
+                            path: wt_path.to_owned(),
+                            branch: wt_branch,
+                            origin_cwd: cwd.clone(),
+                            created_at: now_ms as i64,
+                        }),
+                    );
+                    cwd = wt_path.to_owned();
+                }
+            }
+        }
         let folder_exists=!cwd.is_empty() && Path::new(&cwd).is_dir();
         let sess = LocalAgentSession {
             session_id: session_id.clone(),
@@ -3622,7 +4711,7 @@ impl QuixiEngine {
             user_selected_project_uuids: vec![],
             is_running: !message.is_empty(),
             model,
-            effort_level: "medium".to_string(),
+            effort_level,
             created_at: now_ms,
             last_activity_at: now_ms,
             is_archived: false,
@@ -3661,6 +4750,7 @@ impl QuixiEngine {
 
         if !message.is_empty() {
             self.send_agent_message_with_uuid(&session_id, &message, message_uuid.as_deref());
+            self.auto_title_session_on_first_prompt(&session_id, &message);
         }
 
         session_id
@@ -3750,8 +4840,11 @@ impl QuixiEngine {
                     .provider_manager
                     .resolve_connected_model(Some(&sess.model));
                 session_model = sess.model.clone();
-                if sess.title == "QuixiDesk Session" && !prompt.is_empty() {
-                    sess.title = prompt.chars().take(48).collect();
+                if sess.title == "QuixiDesk Session"
+                    && !prompt.trim().is_empty()
+                    && !self.collaboration.is_title_pinned(session_id)
+                {
+                    sess.title = session_titles::smart_fallback_title(prompt);
                 }
                 sess.buffered_messages.push(user_msg.clone());
                 cwd = sess.cwd.clone();
@@ -4168,12 +5261,34 @@ impl QuixiEngine {
             .filter(|s| !s.trim().is_empty())
             .map(|s| s.to_string());
         let now_ms = Utc::now().timestamp_millis() as u64;
-        let cwd = opts
+        let mut cwd = opts
             .get("cwd")
             .and_then(|v| v.as_str())
             .filter(|s| !s.trim().is_empty() && *s != "~")
             .map(|s| s.to_string())
             .unwrap_or_default();
+        let origin_cwd = cwd.clone();
+        let effort = opts
+            .get("effort")
+            .or_else(|| opts.get("effortLevel"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("medium")
+            .to_string();
+        let chosen_preset = opts
+            .get("agentPreset")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| self.cordis.default_preset_id());
+        self.collaboration
+            .set_agent_preset(&session_id, &chosen_preset);
+        let want_worktree = opts
+            .get("createWorktree")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         let prompt = opts
             .get("message")
             .or_else(|| opts.get("prompt"))
@@ -4182,16 +5297,25 @@ impl QuixiEngine {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        let title = opts
+        let auto_title = opts
+            .get("autoTitle")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let explicit_title = opts
             .get("title")
             .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        if explicit_title.is_some() && !auto_title {
+            self.collaboration.set_title_pinned(&session_id, true);
+        }
+        let title = explicit_title
             .map(|s| s.to_string())
             .unwrap_or_else(|| {
-                if prompt.is_empty() {
+                if prompt.trim().is_empty() {
                     "QuixiDesk Code Session".to_string()
                 } else {
-                    prompt.chars().take(48).collect()
+                    session_titles::smart_fallback_title(&prompt)
                 }
             });
         let permission_mode = opts
@@ -4200,6 +5324,27 @@ impl QuixiEngine {
             .filter(|s| !s.is_empty())
             .unwrap_or("default")
             .to_string();
+        if want_worktree && !cwd.trim().is_empty() && Path::new(&cwd).is_dir() {
+            if let Ok(wt) =
+                quixi_workspace::changes::WorktreeManager::create_worktree(Path::new(&cwd), &title)
+            {
+                if let Some(wt_path) = wt["path"].as_str().filter(|s| !s.is_empty()) {
+                    let wt_branch = wt["branch"].as_str().unwrap_or("").to_owned();
+                    let wt_name = wt["name"].as_str().unwrap_or("worktree").to_owned();
+                    self.collaboration.set_worktree(
+                        &session_id,
+                        Some(collaboration::WorktreeRecord {
+                            name: wt_name,
+                            path: wt_path.to_owned(),
+                            branch: wt_branch,
+                            origin_cwd: origin_cwd.clone(),
+                            created_at: now_ms as i64,
+                        }),
+                    );
+                    cwd = wt_path.to_owned();
+                }
+            }
+        }
         let branch = if cwd.trim().is_empty() {None} else {quixi_workspace::GitPoolEngine::inspect_repo(Path::new(&cwd)).branch};
         let requested_model = opts.get("model").and_then(|v| v.as_str());
         let model = self
@@ -4209,12 +5354,12 @@ impl QuixiEngine {
         let sess = LocalCodeSession {
             session_id: session_id.clone(),
             forked_from: None,
-            cwd: cwd.clone(),
-            origin_cwd: cwd,
+            cwd,
+            origin_cwd,
             is_running: true,
             turn_running: !prompt.is_empty(),
             model,
-            effort: "medium".to_string(),
+            effort,
             created_at: now_ms,
             last_activity_at: now_ms,
             is_archived: false,
@@ -4256,6 +5401,7 @@ impl QuixiEngine {
 
         if !prompt.is_empty() {
             self.send_code_message_with_uuid(&session_id, &prompt, message_uuid.as_deref());
+            self.auto_title_session_on_first_prompt(&session_id, &prompt);
         }
 
         session_id
@@ -4308,8 +5454,9 @@ impl QuixiEngine {
                 .resolve_connected_model(Some(&sess.model));
             if (sess.title == "QuixiDesk Code Session" || sess.title.trim().is_empty())
                 && !prompt.trim().is_empty()
+                && !self.collaboration.is_title_pinned(session_id)
             {
-                sess.title = prompt.chars().take(48).collect();
+                sess.title = session_titles::smart_fallback_title(prompt);
             }
             session_model = sess.model.clone();
             cwd = sess.cwd.clone();
