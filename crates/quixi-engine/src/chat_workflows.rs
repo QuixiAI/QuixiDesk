@@ -248,6 +248,120 @@ impl QuixiEngine {
         else if self.code_sessions.read().contains_key(sid) {self.send_code_message_content(sid,text,uuid,content);}
     }
 
+    /// Retries a turn IN PLACE inside the same session without spawning new `Recent` items!
+    /// - If `target_uuid` is supplied (message-bubble `Retry`), rewinds `buffered_messages` back to
+    ///   that message's request point in place and re-runs it in the same session.
+    /// - Otherwise (`TurnErrorItem` `Retry`), strips trailing `turn_error`, `result`, `llm_retry*`,
+    ///   and legacy `"Provider error:"` items and continues from completed tool outputs (or resends
+    ///   the last user message) in place.
+    pub fn retry_failed_turn(self: &Arc<Self>, session_id: &str, target_uuid: Option<&str>) -> Result<Value, String> {
+        let _submission = self.chat_submission.lock();
+        let mut sessions = self.agent_sessions.write();
+        let Some(sess) = sessions.get_mut(session_id) else {
+            drop(sessions);
+            let code = self.code_sessions.read().get(session_id).cloned().ok_or("This conversation no longer exists.")?;
+            if code.turn_running {
+                return Err("This task is already running.".into());
+            }
+            return Err("Use message retry on CLI sessions.".into());
+        };
+        if sess.is_running {
+            return Err("This task is already running.".into());
+        }
+        if let Some(target) = target_uuid.map(str::trim).filter(|s| !s.is_empty()) {
+            let index = fork_point(&sess.buffered_messages, target)?;
+            let req = sess.buffered_messages[index].clone();
+            let uuid = req["uuid"].as_str().unwrap_or("").to_string();
+            let content = req
+                .pointer("/message/content")
+                .and_then(Value::as_array)
+                .cloned()
+                .ok_or("This message cannot be retried.")?;
+            let prompt = content
+                .iter()
+                .find(|b| b["type"] == "text" && b.get("attachment").is_none())
+                .and_then(|b| b["text"].as_str())
+                .unwrap_or("")
+                .to_string();
+            sess.buffered_messages.truncate(index);
+            self.persist_agent_session(sess);
+            drop(sessions);
+            self.send_agent_message_content(session_id, &prompt, (!uuid.is_empty()).then_some(uuid.as_str()), content);
+            return Ok(json!({ "retried": true, "mode": "rewind_in_place", "sessionId": session_id }));
+        }
+        while let Some(last) = sess.buffered_messages.last() {
+            let t = last.get("type").and_then(Value::as_str).unwrap_or("");
+            let is_legacy_err = t == "assistant"
+                && last
+                    .pointer("/message/content")
+                    .and_then(Value::as_array)
+                    .is_some_and(|blocks| {
+                        !blocks.iter().any(|b| b["type"] == "tool_use")
+                            && blocks.iter().any(|b| {
+                                b["type"] == "text"
+                                    && b["text"].as_str().is_some_and(|s| {
+                                        let tr = s.trim_start();
+                                        tr.starts_with("Provider error:") || tr.starts_with("Provider turn failed:")
+                                    })
+                            })
+                    });
+            if matches!(t, "turn_error" | "result" | "llm_retry" | "llm_retry_started" | "llm_retry_cancelled")
+                || is_legacy_err
+            {
+                sess.buffered_messages.pop();
+            } else {
+                break;
+            }
+        }
+        let Some(tail) = sess.buffered_messages.last().cloned() else {
+            return Err("No message available to retry.".into());
+        };
+        let tail_is_tool_result = tail["type"] == "user"
+            && tail
+                .pointer("/message/content")
+                .and_then(Value::as_array)
+                .is_some_and(|blocks| blocks.iter().any(|b| b["type"] == "tool_result"));
+        if tail_is_tool_result {
+            let last_req_uuid = sess
+                .buffered_messages
+                .iter()
+                .rev()
+                .find(|m| {
+                    m["type"] == "user"
+                        && m.pointer("/message/content")
+                            .and_then(Value::as_array)
+                            .is_some_and(|b| b.iter().any(|x| matches!(x["type"].as_str(), Some("text" | "image_url"))))
+                })
+                .and_then(|m| m["uuid"].as_str())
+                .unwrap_or("")
+                .to_string();
+            self.persist_agent_session(sess);
+            drop(sessions);
+            self.resume_agent_turn_in_place(session_id, &last_req_uuid);
+            return Ok(json!({ "retried": true, "mode": "continue_from_tools", "sessionId": session_id }));
+        }
+        if tail["type"] == "user" {
+            let popped = sess.buffered_messages.pop().unwrap();
+            let uuid = popped["uuid"].as_str().unwrap_or("").to_string();
+            let content = popped
+                .pointer("/message/content")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let prompt = content
+                .iter()
+                .find(|b| b["type"] == "text" && b.get("attachment").is_none())
+                .and_then(|b| b["text"].as_str())
+                .unwrap_or("")
+                .to_string();
+            self.persist_agent_session(sess);
+            drop(sessions);
+            self.send_agent_message_content(session_id, &prompt, (!uuid.is_empty()).then_some(uuid.as_str()), content);
+            return Ok(json!({ "retried": true, "mode": "resend_last_user", "sessionId": session_id }));
+        }
+        Err("Nothing failed at the end of this conversation.".into())
+    }
+
     /// Edits and retries are new branches. The original transcript is never truncated.
     pub fn fork_chat_message(self: &Arc<Self>, session_id:&str, options:&Value) -> Result<Value,String> {
         let _submission=self.chat_submission.lock();
@@ -273,17 +387,27 @@ impl QuixiEngine {
         let mut history=messages[..index].to_vec();
         for message in &mut history {message["session_id"]=json!(sid);}
         let now=Utc::now().timestamp_millis() as u64;
+        let existing_titles: Vec<String> = self
+            .agent_sessions
+            .read()
+            .values()
+            .map(|s| s.title.clone())
+            .chain(self.code_sessions.read().values().map(|s| s.title.clone()))
+            .collect();
         if let Some(mut session)=agent {
+            let base = session.title.trim_end_matches(" · branch");
             session.session_id=sid.clone();session.forked_from=origin;session.cli_session_id=Some(Uuid::new_v4().to_string());
-            session.title=format!("{} · branch",session.title.trim_end_matches(" · branch"));
+            session.title=crate::increased_fork_title(base, &existing_titles);
             session.created_at=now;session.last_activity_at=now;session.is_archived=false;session.is_starred=false;
             session.error=None;session.pending_tool_permissions.clear();session.buffered_messages=history;
             self.persist_agent_session(&session);self.agent_sessions.write().insert(sid.clone(),session);
             self.send_agent_message_content(&sid,&text,None,content);
             Ok(json!(self.agent_sessions.read().get(&sid)))
         } else {
-            let mut session=code.unwrap();session.session_id=sid.clone();session.forked_from=origin;
-            session.title=format!("{} · branch",session.title.trim_end_matches(" · branch"));session.created_at=now;session.last_activity_at=now;
+            let mut session=code.unwrap();
+            let base = session.title.trim_end_matches(" · branch");
+            session.session_id=sid.clone();session.forked_from=origin;
+            session.title=crate::increased_fork_title(base, &existing_titles);session.created_at=now;session.last_activity_at=now;
             session.is_archived=false;session.is_starred=false;
             self.code_transcripts.write().insert(sid.clone(),history);self.persist_code_session(&session);self.code_sessions.write().insert(sid.clone(),session);
             self.send_code_message_content(&sid,&text,None,content);

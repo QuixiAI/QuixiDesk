@@ -1205,6 +1205,11 @@ impl EipcRouter {
                 let sid=args.first().and_then(Value::as_str).unwrap_or_default();
                 self.engine.fork_chat_message(sid,args.get(1).unwrap_or(&Value::Null)).unwrap_or_else(|error|json!({"error":error}))
             }
+            ("LocalAgentModeSessions" | "LocalSessions", "retryFailedTurn") => {
+                let sid = args.first().and_then(Value::as_str).unwrap_or_default();
+                let msg_uuid = args.get(1).and_then(Value::as_str);
+                self.engine.retry_failed_turn(sid, msg_uuid).unwrap_or_else(|error| json!({"error": error}))
+            }
             ("LocalAgentModeSessions", "sendMessage") => {
                 if args.is_empty() {
                     return Value::Null;

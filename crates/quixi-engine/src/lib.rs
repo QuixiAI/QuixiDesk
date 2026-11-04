@@ -3675,7 +3675,7 @@ impl QuixiEngine {
                 "content": text
             }));
         } }
-        if !current_request_recorded && !messages.last().is_some_and(|m|m["role"]=="user" && (m["content"].as_str()==Some(prompt) || m["content"].as_array().is_some_and(|blocks|blocks.first().and_then(|b|b["text"].as_str())==Some(prompt))))
+        if !prompt.trim().is_empty() && !current_request_recorded && !messages.last().is_some_and(|m|m["role"]=="user" && (m["content"].as_str()==Some(prompt) || m["content"].as_array().is_some_and(|blocks|blocks.first().and_then(|b|b["text"].as_str())==Some(prompt))))
         {
             messages.push(json!({ "role": "user", "content": prompt }));
         }
@@ -3898,7 +3898,7 @@ impl QuixiEngine {
                 }),
             );
 
-            let (turn, streamed_text, model_elapsed_ms, step_ttft_ms) = loop {
+            let (mut turn, streamed_text, model_elapsed_ms, step_ttft_ms) = loop {
                 let mut attempt_streamed = false;
                 let attempt_started = std::time::Instant::now();
                 let mut attempt_ttft: Option<u64> = None;
@@ -4267,6 +4267,39 @@ impl QuixiEngine {
                 break;
             }
             used_tools = true;
+
+            // Ensure every incoming `tool_call` ID is unique across `messages` (OpenRouter's
+            // synthesized 6-digit `call_XXXXXX` IDs for Gemini can collide over 50+ step runs,
+            // which otherwise corrupts OpenRouter's `tool_call_id -> function_name` mapping and
+            // triggers Google AI Studio HTTP 400 `Request contains an invalid argument`).
+            {
+                let mut existing_ids: std::collections::HashSet<String> = messages
+                    .iter()
+                    .filter_map(|m| m.get("tool_calls").and_then(Value::as_array))
+                    .flatten()
+                    .filter_map(|tc| tc.get("id").and_then(Value::as_str).map(str::to_owned))
+                    .collect();
+                let mut remapped: Vec<(String, String)> = Vec::new();
+                for (idx, call) in turn.tool_calls.iter_mut().enumerate() {
+                    if !existing_ids.insert(call.id.clone()) {
+                        let fresh = format!("{}_s{}_{}", call.id, round, idx);
+                        existing_ids.insert(fresh.clone());
+                        remapped.push((call.id.clone(), fresh.clone()));
+                        call.id = fresh;
+                    }
+                }
+                if !remapped.is_empty() {
+                    if let Some(Value::Array(ref mut rds)) = turn.reasoning_details {
+                        for entry in rds.iter_mut() {
+                            if let Some(cur_id) = entry.get("id").and_then(Value::as_str).map(str::to_owned) {
+                                if let Some((_, new_id)) = remapped.iter().find(|(old, _)| old == &cur_id) {
+                                    entry["id"] = json!(new_id);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
 
             let mut repeat_nudge: Option<String> = None;
             let mut stop_loop = false;
@@ -5168,7 +5201,15 @@ impl QuixiEngine {
         self.send_agent_message_content(session_id, prompt, provided_uuid, vec![json!({"type":"text","text":prompt})]);
     }
 
-    fn send_agent_message_content(self: &Arc<Self>, session_id: &str, prompt: &str, provided_uuid: Option<&str>, content: Vec<Value>) {
+    pub(crate) fn send_agent_message_content(self: &Arc<Self>, session_id: &str, prompt: &str, provided_uuid: Option<&str>, content: Vec<Value>) {
+        self.send_agent_message_content_with_mode(session_id, prompt, provided_uuid, content, true);
+    }
+
+    pub(crate) fn resume_agent_turn_in_place(self: &Arc<Self>, session_id: &str, last_user_uuid: &str) {
+        self.send_agent_message_content_with_mode(session_id, "", Some(last_user_uuid), vec![], false);
+    }
+
+    fn send_agent_message_content_with_mode(self: &Arc<Self>, session_id: &str, prompt: &str, provided_uuid: Option<&str>, content: Vec<Value>, append_user_msg: bool) {
         let user_msg_uuid = provided_uuid
             .filter(|s| !s.trim().is_empty())
             .map(|s| s.to_string())
@@ -5245,7 +5286,9 @@ impl QuixiEngine {
                 {
                     sess.title = session_titles::smart_fallback_title(prompt);
                 }
-                sess.buffered_messages.push(user_msg.clone());
+                if append_user_msg {
+                    sess.buffered_messages.push(user_msg.clone());
+                }
                 cwd = sess.cwd.clone();
                 session_permission_mode = sess.permission_mode.clone();
                 self.persist_agent_session(sess);
@@ -5263,32 +5306,34 @@ impl QuixiEngine {
             std::thread::sleep(std::time::Duration::from_millis(120));
             if cancelled.load(Ordering::SeqCst) { return; }
 
-            eng.emit_eipc(
-                "quixi.web",
-                "LocalAgentModeSessions",
-                "onEvent",
-                json!({
-                    "type": "message",
-                    "sessionId": sid,
-                    "message": user_msg,
-                    "userMessageUuid": user_msg_uuid
-                }),
-            );
-            let mut replay_user_msg = user_msg.clone();
-            if let Some(obj) = replay_user_msg.as_object_mut() {
-                obj.insert("isReplay".to_string(), json!(true));
+            if append_user_msg {
+                eng.emit_eipc(
+                    "quixi.web",
+                    "LocalAgentModeSessions",
+                    "onEvent",
+                    json!({
+                        "type": "message",
+                        "sessionId": sid,
+                        "message": user_msg,
+                        "userMessageUuid": user_msg_uuid
+                    }),
+                );
+                let mut replay_user_msg = user_msg.clone();
+                if let Some(obj) = replay_user_msg.as_object_mut() {
+                    obj.insert("isReplay".to_string(), json!(true));
+                }
+                eng.emit_eipc(
+                    "quixi.web",
+                    "LocalAgentModeSessions",
+                    "onEvent",
+                    json!({
+                        "type": "message",
+                        "sessionId": sid,
+                        "message": replay_user_msg,
+                        "userMessageUuid": user_msg_uuid
+                    }),
+                );
             }
-            eng.emit_eipc(
-                "quixi.web",
-                "LocalAgentModeSessions",
-                "onEvent",
-                json!({
-                    "type": "message",
-                    "sessionId": sid,
-                    "message": replay_user_msg,
-                    "userMessageUuid": user_msg_uuid
-                }),
-            );
             eng.emit_eipc(
                 "quixi.web",
                 "LocalAgentModeSessions",

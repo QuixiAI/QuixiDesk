@@ -530,6 +530,7 @@
           render();
         }),
       ),
+      !state.collapsed ? makeSidebarResizer() : null,
     );
     const crumb =
       state.page === "chat"
@@ -611,7 +612,21 @@
     ])
       if (list.length) {
         target.append(el("div", { class: "section-label" }, label));
-        for (const s of list)
+        for (const s of list) {
+          const fullTitle = s.title || "Untitled task";
+          const linkBtn = button(
+            [
+              running(s) ? el("span", { class: "running-dot" }) : null,
+              fullTitle,
+            ],
+            () => {
+              state.project = s.spaceId || null;
+              state.folder = s.cwd || "";
+              navigate("chat", s.sessionId);
+            },
+            "session-link",
+          );
+          linkBtn.title = fullTitle;
           target.append(
             el(
               "div",
@@ -619,22 +634,16 @@
                 class:
                   "recent-row" + (state.id === s.sessionId ? " current" : ""),
               },
-              button(
-                [
-                  running(s) ? el("span", { class: "running-dot" }) : null,
-                  s.title || "Untitled task",
-                ],
-                () => {
-                  state.project = s.spaceId || null;
-                  state.folder = s.cwd || "";
-                  navigate("chat", s.sessionId);
-                },
-                "session-link",
+              linkBtn,
+              el(
+                "span",
+                { class: "recent-row-actions" },
+                ib(`Delete conversation: ${fullTitle}`, "trash", () => deleteSession(s)),
+                button("···", () => sessionMenu(s), "more"),
               ),
-              ib(`Delete conversation: ${s.title || "Untitled task"}`, "trash", () => deleteSession(s)),
-              button("···", () => sessionMenu(s), "more"),
             ),
           );
+        }
       }
     if (!visible.length)
       target.append(
@@ -1673,6 +1682,22 @@
       if (b) b.disabled = false;
     }
   }
+  async function retryTurnInPlace(s, messageUuid = null) {
+    if (running(s)) {
+      toast("Stop the current task before retrying.", true);
+      return;
+    }
+    const args = messageUuid ? [s.sessionId, messageUuid] : [s.sessionId];
+    const res = await rpc(service(s), "retryFailedTurn", args);
+    if (res?.error) throw new Error(res.error);
+    s.isRunning = true;
+    state.stopped.delete(s.sessionId);
+    state.streams.set(s.sessionId, { text: "", thinking: "" });
+    await refreshSession(s.sessionId);
+    renderTranscript();
+    updateSendButton();
+    toast("Retrying in this conversation…");
+  }
   async function forkMessage(s,message,text) {
     if(running(s)){toast("Stop the current task before creating a branch.",true);return;}
     const branch=await rpc(service(s),"forkMessage",[s.sessionId,{messageUuid:message.uuid,...(text!==undefined?{text}: {})}]);
@@ -1950,6 +1975,7 @@
     return String(n);
   }
   function contextMeterPill(s) {
+    if (window.QuixiSlots?.entries("composer.footer")?.length) return null;
     const m = state.collab.get(s.sessionId)?.contextMeter;
     if (!m || (!m.projectedTokens && !m.pressureTokens)) return null;
     const used = m.projectedTokens || m.pressureTokens || 0;
@@ -3225,7 +3251,7 @@
         { class: "dsh-turn-error-actions" },
         code ? el("code", { class: "dsh-turn-error-code" }, code) : null,
         retryUserMsg && !running(s)
-          ? button("Retry", () => forkMessage(s, retryUserMsg), "quiet")
+          ? button("Retry", () => retryTurnInPlace(s), "quiet")
           : null,
       ),
     );
@@ -3455,7 +3481,7 @@
             role === "assistant" ? capabilityUI.readAloudControl(texts) : null,
             role === "assistant" && id ? button("Branch", () => forkConversationBranch(s, id), "quiet") : null,
             role === "user" && id ? button("Edit",()=>editMessage(s,message),"quiet") : null,
-            id ? button("Retry",()=>forkMessage(s,message),"quiet") : null,
+            id ? button("Retry",()=>retryTurnInPlace(s, id),"quiet") : null,
           ),
         );
         result.push(article);
@@ -4884,6 +4910,57 @@
         ),
       );
   }
+  const DEFAULT_SIDEBAR_WIDTH = 248;
+  const MIN_SIDEBAR_WIDTH = 180;
+  const MAX_SIDEBAR_WIDTH = 440;
+  function setSidebarWidthPx(px, persist = false) {
+    const clamped = Math.max(MIN_SIDEBAR_WIDTH, Math.min(MAX_SIDEBAR_WIDTH, Math.round(px)));
+    document.documentElement.style.setProperty("--sidebar-width", `${clamped}px`);
+    if (persist) {
+      try { localStorage.setItem("quixi.sidebarWidth", String(clamped)); } catch {}
+    }
+    return clamped;
+  }
+  function makeSidebarResizer() {
+    const handle = el("div", {
+      class: "sidebar-resizer",
+      role: "separator",
+      "aria-orientation": "vertical",
+      "aria-label": "Resize sidebar",
+      title: "Drag to resize sidebar · Double-click to reset",
+    });
+    handle.addEventListener("dblclick", (e) => {
+      e.preventDefault();
+      try { localStorage.removeItem("quixi.sidebarWidth"); } catch {}
+      document.documentElement.style.setProperty("--sidebar-width", `${DEFAULT_SIDEBAR_WIDTH}px`);
+    });
+    handle.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      handle.setPointerCapture?.(e.pointerId);
+      handle.classList.add("is-dragging");
+      document.body.style.userSelect = "none";
+      document.body.style.cursor = "col-resize";
+      let latestWidth = parseInt(getComputedStyle(document.documentElement).getPropertyValue("--sidebar-width"), 10) || DEFAULT_SIDEBAR_WIDTH;
+      const onMove = (ev) => {
+        latestWidth = setSidebarWidthPx(ev.clientX, false);
+      };
+      const onUp = (ev) => {
+        handle.releasePointerCapture?.(ev.pointerId);
+        handle.classList.remove("is-dragging");
+        document.body.style.userSelect = "";
+        document.body.style.cursor = "";
+        setSidebarWidthPx(latestWidth, true);
+        window.removeEventListener("pointermove", onMove);
+        window.removeEventListener("pointerup", onUp);
+        window.removeEventListener("pointercancel", onUp);
+      };
+      window.addEventListener("pointermove", onMove);
+      window.addEventListener("pointerup", onUp);
+      window.addEventListener("pointercancel", onUp);
+    });
+    return handle;
+  }
   function applyTheme() {
     const choice = localStorage.getItem("quixi.theme") || "dark";
     state.theme = choice;
@@ -4895,6 +4972,10 @@
         : choice;
     const proseFont = localStorage.getItem("quixi.proseFont") || "sans";
     document.documentElement.dataset.proseFont = proseFont;
+    const savedWidth = Number(localStorage.getItem("quixi.sidebarWidth"));
+    if (Number.isFinite(savedWidth) && savedWidth >= MIN_SIDEBAR_WIDTH) {
+      setSidebarWidthPx(savedWidth, false);
+    }
   }
   async function providerDirectory() {
     await loadProviders();

@@ -107,6 +107,14 @@ impl<M: ModelName> LanguageModel for OpenAIChatCompletions<M> {
                         ));
                     }
 
+                    if let Some(details) = choice.delta.reasoning_details
+                        && !details.is_null()
+                    {
+                        results.push(LanguageModelStreamChunk::Delta(
+                            LanguageModelStreamChunkType::ReasoningDetails(details),
+                        ));
+                    }
+
                     // Text delta
                     if let Some(content) = choice.delta.content
                         && !content.is_empty()
@@ -242,6 +250,12 @@ impl<M: ModelName> LanguageModel for OpenAIChatCompletions<M> {
                                 }));
                             }
                             "tool_calls" | "function_call" => {
+                                if reasoning_open {
+                                    reasoning_open = false;
+                                    results.push(LanguageModelStreamChunk::Delta(
+                                        LanguageModelStreamChunkType::ReasoningEnd,
+                                    ));
+                                }
                                 // Send accumulated tool calls in deterministic index order
                                 for (index, (id, name, args, extra)) in &accumulated_tool_calls {
                                     let resolved_id = if id.is_empty() {

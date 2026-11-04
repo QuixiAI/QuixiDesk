@@ -1332,10 +1332,17 @@ td.diff-empty {
 .cordis-stat-trigger {
   cursor: pointer;
   color: var(--muted);
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .cordis-stat-trigger:hover {
   color: var(--text);
+}
+
+.cordis-composer-footer .cordis-row-actions {
+  flex-wrap: nowrap;
+  overflow-x: auto;
 }
 
 /* =========================================================================

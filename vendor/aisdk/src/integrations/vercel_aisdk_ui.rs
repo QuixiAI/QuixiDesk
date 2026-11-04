@@ -410,6 +410,8 @@ fn map_language_model_chunk_to_vercel_ui(
             }
         }
 
+        LanguageModelStreamChunkType::ReasoningDetails(_) => Vec::new(),
+
         LanguageModelStreamChunkType::ReasoningEnd => {
             if options.send_reasoning && options.send_finish {
                 vec![VercelUIStream::ReasoningEnd {

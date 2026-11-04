@@ -249,7 +249,7 @@ summary {
 }
 .shell {
   display: grid;
-  grid-template-columns: 224px minmax(0, 1fr);
+  grid-template-columns: var(--sidebar-width, 248px) minmax(0, 1fr);
   height: 100dvh;
   overflow: hidden;
 }
@@ -265,6 +265,22 @@ summary {
   padding: 16px 10px 10px;
   min-width: 0;
   overflow: hidden;
+  position: relative;
+}
+.sidebar-resizer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 6px;
+  cursor: col-resize;
+  z-index: 25;
+  -webkit-app-region: no-drag;
+  transition: background 120ms ease;
+}
+.sidebar-resizer:hover,
+.sidebar-resizer.is-dragging {
+  background: color-mix(in srgb, var(--accent) 55%, transparent);
 }
 .brand {
   display: flex;
@@ -359,15 +375,39 @@ summary {
   background: transparent;
   border: 0;
   flex: 1;
+  width: 100%;
   min-width: 0;
   font-size: 12.5px;
   font-weight: 420;
   color: color-mix(in srgb, var(--text) 78%, var(--muted));
   display: block;
 }
-.recent-row > .icon,
-.recent-row > .more {
+.recent-row:hover > .session-link,
+.recent-row:focus-within > .session-link {
+  padding-right: 54px;
+}
+.recent-row-actions {
+  position: absolute;
+  right: 3px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
   opacity: 0;
+  pointer-events: none;
+  padding-left: 12px;
+  border-radius: 0 7px 7px 0;
+  background: linear-gradient(90deg, transparent, var(--raised) 26%);
+  transition: opacity 120ms ease;
+}
+.recent-row:hover > .recent-row-actions,
+.recent-row:focus-within > .recent-row-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+.recent-row-actions > .icon,
+.recent-row-actions > .more {
   width: 24px;
   height: 24px;
   min-width: 24px;
@@ -376,14 +416,11 @@ summary {
   background: transparent;
   border: 0;
   color: var(--muted);
-  transition: opacity 120ms ease;
+  flex-shrink: 0;
 }
-.recent-row > .icon { flex-shrink: 0; }
-.recent-row:hover > .icon,
-.recent-row:focus-within > .icon,
-.recent-row:hover > .more,
-.recent-row:focus-within > .more {
-  opacity: 0.85;
+.recent-row-actions > .icon:hover,
+.recent-row-actions > .more:hover {
+  color: var(--text);
 }
 .running-dot {
   width: 6px;
@@ -1337,7 +1374,7 @@ body[data-platform="macos"] .topbar {
     padding-inline: 8px;
   }
   .shell {
-    grid-template-columns: 210px minmax(0, 1fr);
+    grid-template-columns: var(--sidebar-width, 220px) minmax(0, 1fr);
   }
   .suggestions {
     grid-template-columns: 1fr;

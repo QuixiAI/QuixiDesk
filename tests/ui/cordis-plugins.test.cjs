@@ -1005,6 +1005,36 @@ test("Back/Forward topbar history, floating Find-in-Page case toggle, Output Sty
     fixBtn.click();
     await wait();
     assert.match(w.document.getElementById("prompt").value, /ReferenceError: chartData is not defined/);
+
+    // 8. Recent items expose full-name hover tooltips, left sidebar drag-resizes, and Retry runs in place without cloning Recent:
+    const recentLink = w.document.querySelector("#recents .session-link");
+    assert.equal(recentLink.title, "Kernel Audit", "Recent items must expose full title tooltip on hover");
+    const resizer = w.document.querySelector(".sidebar .sidebar-resizer");
+    assert.ok(resizer, "Left sidebar must render drag-resize splitter");
+    resizer.dispatchEvent(new w.MouseEvent("pointerdown", { button: 0, clientX: 248, bubbles: true }));
+    w.dispatchEvent(new w.MouseEvent("pointermove", { clientX: 312, bubbles: true }));
+    w.dispatchEvent(new w.MouseEvent("pointerup", { clientX: 312, bubbles: true }));
+    assert.equal(w.document.documentElement.style.getPropertyValue("--sidebar-width"), "312px");
+    assert.equal(w.localStorage.getItem("quixi.sidebarWidth"), "312");
+    resizer.dispatchEvent(new w.MouseEvent("dblclick", { bubbles: true }));
+    assert.equal(w.document.documentElement.style.getPropertyValue("--sidebar-width"), "248px");
+
+    const recentsBeforeRetry = w.document.querySelectorAll("#recents .recent-row").length;
+    const msgRetryBtn = Array.from(w.document.querySelectorAll(".message-actions button")).find(
+      (b) => b.textContent.trim() === "Retry",
+    );
+    assert.ok(msgRetryBtn);
+    msgRetryBtn.click();
+    await wait();
+    assert.ok(
+      calls.some((c) => c.member === "retryFailedTurn" && c.args[0] === "sess-cordis-1" && c.args[1] === "a-find-1"),
+      "Message Retry must invoke retryFailedTurn in place instead of forkMessage",
+    );
+    assert.equal(
+      w.document.querySelectorAll("#recents .recent-row").length,
+      recentsBeforeRetry,
+      "Retry must never create a new item in Recent",
+    );
   } finally {
     f.close();
   }

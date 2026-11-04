@@ -524,6 +524,8 @@ pub enum LanguageModelStreamChunkType {
     ReasoningStart,
     /// Reasoning summary text chunk.
     ReasoningDelta(String),
+    /// Provider-specific structured/encrypted reasoning metadata (e.g. OpenRouter/Gemini `reasoning_details`).
+    ReasoningDetails(serde_json::Value),
     /// Reasoning end emitted after reasoning.
     ReasoningEnd,
     /// Tool call start emitted before tool execution, contains details on the
