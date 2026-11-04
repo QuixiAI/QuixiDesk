@@ -213,11 +213,19 @@ fn default_agent_preset() -> String {
     "standard".to_string()
 }
 
+fn default_output_style() -> String {
+    "normal".to_string()
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionCollabState {
     #[serde(default = "default_agent_preset")]
     pub agent_preset: String,
+    #[serde(default = "default_output_style")]
+    pub output_style: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_style_instructions: Option<String>,
     #[serde(default)]
     pub todos: Vec<TodoItem>,
     #[serde(default)]
@@ -244,6 +252,39 @@ pub struct SessionCollabState {
     pub title_pinned: bool,
     #[serde(default)]
     pub title_generated: bool,
+}
+
+impl SessionCollabState {
+    pub fn output_style_guidance(&self) -> Option<String> {
+        if let Some(custom) = self
+            .output_style_instructions
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return Some(custom.to_owned());
+        }
+        match self.output_style.trim().to_ascii_lowercase().as_str() {
+            "" | "normal" => None,
+            "concise" => Some(
+                "Keep responses concise, direct, and high-signal. Lead with the answer or concrete change; omit filler, repetition, and unnecessary preamble."
+                    .to_owned(),
+            ),
+            "explanatory" => Some(
+                "Provide clear, structured explanations that walk through mechanisms, trade-offs, and reasoning while completing the task."
+                    .to_owned(),
+            ),
+            "formal" => Some(
+                "Use precise, polished, formal technical prose suitable for architecture documents, executive summaries, or specifications."
+                    .to_owned(),
+            ),
+            "learning" => Some(
+                "Adopt a collaborative teaching style: highlight key concepts, explain why each step works, and surface mental models clearly."
+                    .to_owned(),
+            ),
+            _ => None,
+        }
+    }
 }
 
 pub struct SessionCollaborationStore {
@@ -360,11 +401,18 @@ impl SessionCollaborationStore {
         } else {
             st.agent_preset.clone()
         };
+        let output_style = if st.output_style.trim().is_empty() {
+            "normal".to_string()
+        } else {
+            st.output_style.clone()
+        };
         let active_prs: Vec<&ForgePrRecord> =
             st.forge_prs.iter().filter(|p| !p.dismissed).collect();
         json!({
             "sessionId": session_id,
             "agentPreset": preset,
+            "outputStyle": output_style,
+            "outputStyleInstructions": st.output_style_instructions,
             "todos": st.todos,
             "planMode": st.plan_mode,
             "goal": goal_val,
@@ -400,6 +448,28 @@ impl SessionCollaborationStore {
         };
         self.mutate(session_id, |st| {
             st.agent_preset = val;
+        });
+    }
+
+    pub fn set_output_style(
+        &self,
+        session_id: &str,
+        style: &str,
+        custom_instructions: Option<&str>,
+    ) {
+        let normalized = style.trim().to_ascii_lowercase();
+        let val = if normalized.is_empty() {
+            "normal".to_owned()
+        } else {
+            normalized.chars().take(64).collect()
+        };
+        let custom = custom_instructions
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.chars().take(2000).collect::<String>());
+        self.mutate(session_id, |st| {
+            st.output_style = val;
+            st.output_style_instructions = custom;
         });
     }
 

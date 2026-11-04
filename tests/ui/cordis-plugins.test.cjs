@@ -126,6 +126,9 @@ async function createCordisUiFixture() {
     },
   ];
 
+  const subagentsBySession = {};
+  const pendingBySession = {};
+  const artifactsList = [];
   const collabBySession = {
     "sess-cordis-1": {
       sessionId: "sess-cordis-1",
@@ -271,13 +274,78 @@ async function createCordisUiFixture() {
     if (member === "getAllSpaces") return [];
     if (member === "getSession") return structuredClone(sessions.find((s) => s.sessionId === args[0]));
     if (member === "getCollabState") return structuredClone(collabBySession[args[0]] || null);
-    if (member === "listSubagents" || member === "listJobs" || member === "getToolPermissions" || member === "getPendingMessages") return [];
+    if (member === "searchWorkspaceFiles") {
+      const [, query] = args;
+      const all = [
+        { name: "src", relativePath: "src", path: "/workspace/repo/src", isDir: true },
+        { name: "main.rs", relativePath: "src/main.rs", path: "/workspace/repo/src/main.rs", isDir: false },
+        { name: "README.md", relativePath: "README.md", path: "/workspace/repo/README.md", isDir: false },
+      ];
+      return all.filter((f) => !query || f.relativePath.includes(query));
+    }
+    if (member === "listDirectoryAtCwd") {
+      const [dir] = args;
+      if (dir === "/workspace/repo/src") {
+        return [{ name: "main.rs", path: "/workspace/repo/src/main.rs", isDir: false }];
+      }
+      return [
+        { name: "src", path: "/workspace/repo/src", isDir: true },
+        { name: "README.md", path: "/workspace/repo/README.md", isDir: false },
+      ];
+    }
+    if (member === "getWorkingTreeStatus") {
+      return {
+        files: [{ path: "src/main.rs", status: "modified", additions: 2, deletions: 1 }],
+        additions: 2,
+        deletions: 1,
+      };
+    }
+    if (member === "manageGoal") {
+      const [sid, action, payload] = args;
+      if (action === "edit" && collabBySession[sid]?.goal) {
+        collabBySession[sid].goal.objective = payload.objective;
+        collabBySession[sid].goal.maxGoalRounds = payload.max_goal_rounds;
+        collabBySession[sid].goal.revision += 1;
+      }
+      return { ok: true, goal: collabBySession[sid]?.goal };
+    }
+    if (member === "listSubagents") return structuredClone(subagentsBySession[args[0]] || []);
+    if (member === "setOutputStyle") {
+      const [sid, style, instr] = args;
+      if (collabBySession[sid]) {
+        collabBySession[sid].outputStyle = style;
+        collabBySession[sid].outputStyleInstructions = instr || null;
+      }
+      return structuredClone(collabBySession[sid] || null);
+    }
+    if (member === "getPendingMessages") {
+      return structuredClone(pendingBySession[args[0]] || []);
+    }
+    if (member === "reorderPendingMessage") {
+      const [sid, uuid] = args;
+      const q = pendingBySession[sid] || [];
+      const idx = q.findIndex((m) => m.messageUuid === uuid);
+      if (idx > 0) {
+        const [item] = q.splice(idx, 1);
+        q.unshift(item);
+      }
+      return { reordered: true, index: 0, messageUuid: uuid };
+    }
+    if (member === "cancelPendingMessage") {
+      const [sid, uuid] = args;
+      const q = pendingBySession[sid] || [];
+      const idx = q.findIndex((m) => m.messageUuid === uuid);
+      const cancelled = idx >= 0;
+      if (cancelled) q.splice(idx, 1);
+      return { cancelled, messageUuid: uuid };
+    }
+    if (member === "listJobs" || member === "getToolPermissions") return [];
     if (member === "start") {
       const created = {
-        sessionId: "sess-started",
+        sessionId: args[0].isArchived ? "sess-aside-1" : "sess-started",
         title: args[0].title,
-        isRunning: true,
-        isArchived: false,
+        isRunning: !args[0].isArchived,
+        isArchived: Boolean(args[0].isArchived),
         isStarred: false,
         cwd: args[0].cwd || "",
         effortLevel: args[0].effortLevel || "medium",
@@ -288,7 +356,17 @@ async function createCordisUiFixture() {
       sessions.unshift(created);
       return created;
     }
-    if (member === "sendMessageV2") return { ok: true };
+    if (member === "sendMessageV2") {
+      const target = sessions.find((x) => x.sessionId === args[0]);
+      if (target?.isArchived) {
+        target.bufferedMessages.push(
+          { type: "user", message: { content: [{ type: "text", text: args[1].text }] } },
+          { type: "assistant", message: { content: [{ type: "text", text: "Side chat answer: use WKWebView userScript." }] } },
+        );
+        target.isRunning = false;
+      }
+      return { ok: true };
+    }
     if (member === "steerAllPending") return { steered: 2 };
     if (member === "stop") {
       const s = sessions.find((x) => x.sessionId === args[0]);
@@ -322,10 +400,10 @@ async function createCordisUiFixture() {
       }
       return { ok: true, card };
     }
+    if (member === "getAllArtifacts") return structuredClone(artifactsList);
     if (
       member === "listLocalSkills" ||
       member === "getLocalMcpServers" ||
-      member === "getAllArtifacts" ||
       member === "getAllScheduledTasks"
     ) {
       return [];
@@ -333,8 +411,44 @@ async function createCordisUiFixture() {
     return { ok: true };
   };
 
-  const api = async (route) => {
+  const api = async (route, body) => {
+    calls.push({ route, body });
     if (route === "/api/quixi/providers") return structuredClone(providers);
+    if (route === "/api/quixi/workspace/read") {
+      return {
+        path: body?.path,
+        contents: body?.path?.endsWith(".md")
+          ? "# Repo Guide\n\nFast native workspace."
+          : "fn main() {\n    println!(\"target line\");\n}\n",
+      };
+    }
+    if (route === "/api/quixi/workspace/diff") {
+      return {
+        path: "/workspace/repo/src/main.rs",
+        relativePath: "src/main.rs",
+        status: "modified",
+        added: 2,
+        deleted: 1,
+        binary: false,
+        hunks: [
+          {
+            header: "@@ -1,3 +1,4 @@",
+            oldStart: 1,
+            newStart: 1,
+            lines: [
+              { kind: "ctx", oldLine: 1, newLine: 1, text: "fn main() {" },
+              { kind: "del", oldLine: 2, newLine: null, text: "    println!(\"old\");" },
+              { kind: "add", oldLine: null, newLine: 2, text: "    println!(\"new 1\");" },
+              { kind: "add", oldLine: null, newLine: 3, text: "    println!(\"new 2\");" },
+            ],
+          },
+        ],
+      };
+    }
+    if (route.startsWith("/api/quixi/artifacts/")) {
+      const id = decodeURIComponent(route.slice("/api/quixi/artifacts/".length));
+      return structuredClone(artifactsList.find((a) => a.id === id) || { error: "Not found" });
+    }
     return { ok: true };
   };
 
@@ -358,7 +472,7 @@ async function createCordisUiFixture() {
     w.eval(fs.readFileSync(file, "utf8"));
   }
   await wait();
-  return { w, calls, sessions, cordisState, close: () => dom.window.close() };
+  return { w, calls, sessions, collabBySession, subagentsBySession, pendingBySession, artifactsList, cordisState, close: () => dom.window.close() };
 }
 
 test("Sidebar Plugins page toggles Cordis fibers live and unmounts/remounts UI slots without reload", async () => {
@@ -577,6 +691,320 @@ test("ModelRetryItem and TurnErrorItem render DeepSeek Harness retry/error rows 
     assert.ok(errorRow.textContent.includes("Google AI Studio (via OpenRouter, HTTP 503)"));
     assert.ok(errorRow.textContent.includes("SERVER"));
     assert.ok(!errorRow.textContent.includes("org_hidden"), "Raw JSON user_id noise must be stripped");
+  } finally {
+    f.close();
+  }
+});
+
+test("Input triggers (/ and @), Quick Jump launcher, clickable prose file:line preview, Split/Unified diff review, Goal editor, Subagents pill, and Artifact Studio work", async () => {
+  const f = await createCordisUiFixture();
+  const { w, calls, sessions, collabBySession, subagentsBySession, artifactsList } = f;
+  try {
+    sessions[0].bufferedMessages.push({
+      type: "assistant",
+      uuid: "a-file-ref",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "Updated `src/main.rs:2` and created an interactive artifact." }],
+      },
+    });
+    collabBySession["sess-cordis-1"].goal = {
+      id: "goal-1",
+      revision: 1,
+      objective: "Ship full test coverage",
+      phase: "active",
+      activation: "armed",
+      roundsStarted: 1,
+      maxGoalRounds: 10,
+    };
+    subagentsBySession["sess-cordis-1"] = [
+      { id: "sub-1", description: "Audit IPC routes", status: "completed", model: "deepseek-reasoner", output: "All routes verified." },
+    ];
+    artifactsList.push({
+      id: "art-demo-1",
+      name: "Metrics Dashboard",
+      title: "Metrics Dashboard",
+      html: "<!doctype html><html><body><h1>Metrics</h1></body></html>",
+      revision: 2,
+      updatedAt: 1000,
+      createdBySessionId: "sess-cordis-1",
+    });
+
+    // Reload artifacts & open conversation:
+    const kernelBtn = Array.from(w.document.querySelectorAll("button")).find((b) =>
+      b.textContent.includes("Kernel Audit"),
+    );
+    kernelBtn.click();
+    await wait();
+    await wait();
+
+    // 1. Subagent lineage pill renders in session heading and opens lineage modal:
+    const subBtn = Array.from(w.document.querySelectorAll(".session-heading button")).find((b) =>
+      b.textContent.includes("Subagents · 1"),
+    );
+    assert.ok(subBtn, "Subagent lineage pill must render when child subagents exist");
+    subBtn.click();
+    await wait();
+    assert.match(w.document.querySelector("dialog[open]").textContent, /Audit IPC routes/);
+    w.document.querySelector("dialog[open]").close();
+
+    // 2. Goal strip renders Edit button and submits manageGoal("edit", ...):
+    const goalEditBtn = Array.from(w.document.querySelectorAll(".goal-bar button")).find(
+      (b) => b.textContent.trim() === "Edit",
+    );
+    assert.ok(goalEditBtn, "Goal bar must offer inline Edit action");
+    goalEditBtn.click();
+    await wait();
+    const objField = w.document.querySelector('dialog[open] textarea[name="objective"]');
+    assert.ok(objField);
+    objField.value = "Ship 100% deterministic tests";
+    objField.closest("form").dispatchEvent(new w.Event("submit", { bubbles: true, cancelable: true }));
+    await wait();
+    assert.ok(
+      calls.some((c) => c.member === "manageGoal" && c.args[1] === "edit" && c.args[2].objective === "Ship 100% deterministic tests"),
+      "Submitting goal edit must call manageGoal with edit action",
+    );
+
+    // 3. Caret `@` input-trigger supports keyboard ArrowDown, Tab directory drill-down, and Enter completion:
+    const prompt = w.document.getElementById("prompt");
+    prompt.value = "@";
+    prompt.setSelectionRange(1, 1);
+    prompt.dispatchEvent(new w.Event("input", { bubbles: true }));
+    await wait();
+    const triggers = w.document.getElementById("composer-triggers");
+    assert.equal(triggers.hidden, false, "@ trigger menu must open");
+    // First item is `@src/` (Directory): pressing Tab drills into `@src/`!
+    prompt.dispatchEvent(new w.KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true }));
+    await wait();
+    assert.equal(prompt.value, "@src/", "Tab on a directory candidate must drill into @src/");
+    assert.equal(triggers.hidden, false, "Menu remains open after directory drill-down");
+    // Pressing Enter now selects `@src/main.rs`:
+    prompt.dispatchEvent(new w.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    await wait();
+    assert.equal(prompt.value, "@src/main.rs ");
+    assert.equal(triggers.hidden, true);
+
+    // 4. Clickable prose `src/main.rs:2` inline-code link opens docked preview with highlighted line 2:
+    const fileChip = w.document.querySelector("code.prose-file-link");
+    assert.ok(fileChip, "Inline code file:line reference must be marked clickable");
+    assert.equal(fileChip.textContent, "src/main.rs:2");
+    fileChip.click();
+    await wait();
+    await wait();
+    const targetRow = w.document.querySelector(".drawer .dock-code-row.is-target-line");
+    assert.ok(targetRow, "Clicking src/main.rs:2 must highlight line 2 in docked preview");
+    assert.match(targetRow.textContent, /target line/);
+
+    // 5. Changes tab in dock opens Split / Unified Git Diff viewer:
+    const changesTab = Array.from(w.document.querySelectorAll(".drawer .dock-tab")).find(
+      (b) => b.textContent.trim() === "Changes",
+    );
+    changesTab.click();
+    await wait();
+    const changeRow = w.document.querySelector(".drawer .dock-change-row");
+    assert.ok(changeRow);
+    changeRow.click();
+    await wait();
+    const diffTable = w.document.querySelector("dialog[open] .dsh-diff-table.split");
+    assert.ok(diffTable, "Split side-by-side diff table must open by default");
+    const unifiedBtn = Array.from(w.document.querySelectorAll("dialog[open] button")).find(
+      (b) => b.textContent.trim() === "Unified",
+    );
+    unifiedBtn.click();
+    assert.ok(w.document.querySelector("dialog[open] .dsh-diff-table.unified"), "Unified diff toggle must work");
+    w.document.querySelector("dialog[open]").close();
+
+    // 6. Quick Jump launcher opens from topbar pill and filters entries:
+    const quickJump = w.document.querySelector(".quick-jump-pill");
+    assert.ok(quickJump);
+    quickJump.click();
+    await wait();
+    const launcher = w.document.querySelector("dialog.dsh-quick-launcher[open]");
+    assert.ok(launcher, "Quick Jump command launcher must open");
+    w.document.querySelector("dialog.dsh-quick-launcher[open]").close();
+
+    // 7. Artifacts page + Artifact Studio responsive viewport sizer (`Desktop` / `Tablet` / `Mobile`) + Inline chat artifact card:
+    const artNavBtn = Array.from(w.document.querySelectorAll("aside nav button")).find(
+      (b) => b.textContent.trim() === "Artifacts",
+    );
+    artNavBtn.click();
+    await wait();
+    await wait();
+    const openPreviewBtn = Array.from(w.document.querySelectorAll("button")).find(
+      (b) => b.textContent.trim() === "Open preview",
+    );
+    assert.ok(openPreviewBtn);
+    openPreviewBtn.click();
+    await wait();
+    const stage = w.document.querySelector("dialog[open] .artifact-stage");
+    const frame = stage?.querySelector("iframe.preview-frame");
+    assert.ok(frame);
+    assert.equal(frame.getAttribute("sandbox"), "allow-scripts allow-forms");
+    const mobileBtn = Array.from(w.document.querySelectorAll("dialog[open] button")).find(
+      (b) => b.textContent.trim() === "Mobile",
+    );
+    mobileBtn.click();
+    assert.equal(stage.dataset.viewport, "mobile");
+    w.document.querySelector("dialog[open]").close();
+
+    // Returning to conversation shows inline `.dsh-inline-artifact-card` ("Open Studio") in turn tail:
+    Array.from(w.document.querySelectorAll("button")).find((b) => b.textContent.includes("Kernel Audit")).click();
+    await wait();
+    assert.ok(
+      w.document.querySelector(".dsh-inline-artifact-card"),
+      "Session artifacts must render inline Open Studio card in conversation tail",
+    );
+  } finally {
+    f.close();
+  }
+});
+
+test("Back/Forward topbar history, floating Find-in-Page case toggle, Output Styles, Warm/Serif themes, Side Chat (/btw), queued reorder/edit, and Artifact Console work", async () => {
+  const f = await createCordisUiFixture();
+  try {
+    const { w, calls } = f;
+    f.pendingBySession["sess-cordis-1"] = [
+      { messageUuid: "q-1", text: "First queued step", delivery: "queue", held: false },
+      { messageUuid: "q-2", text: "Urgent second step", delivery: "queue", held: false },
+    ];
+    f.artifactsList.push({
+      id: "art-console-1",
+      name: "Dashboard Preview",
+      title: "Dashboard Preview",
+      html: "<!doctype html><h1>Dashboard</h1>",
+      revision: 1,
+      updatedAt: Date.now(),
+      createdBySessionId: "sess-cordis-1",
+    });
+    f.sessions[0].bufferedMessages = [
+      {
+        type: "assistant",
+        uuid: "a-find-1",
+        message: { content: [{ type: "text", text: "Needle alpha and needle beta." }] },
+      },
+    ];
+
+    // 1. Navigate to conversation -> Settings -> Back -> Forward via topbar history:
+    Array.from(w.document.querySelectorAll("button")).find((b) => b.textContent.includes("Kernel Audit")).click();
+    await wait();
+    await wait();
+    Array.from(w.document.querySelectorAll("aside footer button")).find((b) => b.getAttribute("aria-label") === "Settings").click();
+    await wait();
+
+    // 2. Warm Studio themes & Editorial Serif reading typography in Settings:
+    const warmPaperBtn = w.document.querySelector('button[aria-label="Use warm-light theme"]');
+    assert.ok(warmPaperBtn, "Warm Paper theme swatch must render");
+    warmPaperBtn.click();
+    assert.equal(w.document.documentElement.dataset.theme, "warm-light");
+    const fontSel = w.document.querySelector('select[aria-label="Reading typography"]');
+    assert.ok(fontSel, "Reading typography selector must render");
+    fontSel.value = "serif";
+    fontSel.dispatchEvent(new w.Event("change", { bubbles: true }));
+    assert.equal(w.document.documentElement.dataset.proseFont, "serif");
+
+    // Topbar Back & Forward buttons navigate cleanly:
+    const backBtn = w.document.querySelector('.topbar-nav button[aria-label="Back"]');
+    assert.ok(backBtn && !backBtn.disabled, "Back button must be enabled after navigation");
+    backBtn.click();
+    await wait();
+    assert.equal(w.location.pathname, "/chat/sess-cordis-1");
+    const fwdBtn = w.document.querySelector('.topbar-nav button[aria-label="Forward"]');
+    assert.ok(fwdBtn && !fwdBtn.disabled, "Forward button must be enabled after going back");
+    fwdBtn.click();
+    await wait();
+    assert.equal(w.location.pathname, "/settings");
+    w.document.querySelector('.topbar-nav button[aria-label="Back"]').click();
+    await wait();
+    await wait();
+
+    // 3. Floating Find-in-Conversation (`⌘F`) + Case-sensitivity (`Aa`) toggle:
+    w.dispatchEvent(new w.KeyboardEvent("keydown", { key: "f", ctrlKey: true, metaKey: true, bubbles: true, cancelable: true }));
+    await wait();
+    const findBar = w.document.getElementById("conversation-find");
+    assert.ok(findBar?.classList.contains("floating-find-pill"), "Mod+F must open floating find pill");
+    const findInput = findBar.querySelector("input");
+    findInput.value = "Needle";
+    findInput.dispatchEvent(new w.Event("input", { bubbles: true }));
+    assert.equal(w.document.querySelectorAll("mark[data-find]").length, 2, "Case-insensitive by default");
+    const caseBtn = findBar.querySelector('button[aria-label="Match case"]');
+    caseBtn.click();
+    assert.equal(w.document.querySelectorAll("mark[data-find]").length, 1, "Aa toggle narrows to exact case match");
+    findBar.querySelector('button[aria-label="Close find"]').click();
+
+    // 4. Response Output Styles (`✦ Style: Normal` -> `Concise` via `setOutputStyle` RPC):
+    const stylePill = w.document.querySelector(".dsh-style-pill");
+    assert.ok(stylePill, "Response Style pill must render in composer footer");
+    stylePill.click();
+    await wait();
+    const useConcise = Array.from(w.document.querySelectorAll("dialog[open] button")).find(
+      (b) => b.textContent.trim() === "Use Concise",
+    );
+    assert.ok(useConcise, "Style modal must offer Concise preset");
+    useConcise.click();
+    await wait();
+    assert.ok(calls.some((c) => c.member === "setOutputStyle" && c.args[1] === "concise"));
+    assert.match(w.document.querySelector(".dsh-style-pill").textContent, /Style: Concise/);
+
+    // 5. Queued follow-up messages: `↑ Top` reorder + `Edit` back into composer:
+    const pendingRows = w.document.querySelectorAll(".pending-message");
+    assert.equal(pendingRows.length, 2);
+    const moveTopBtn = pendingRows[1].querySelector('button[aria-label="Move to top"]');
+    assert.ok(moveTopBtn, "Second queued message must expose Move to top");
+    moveTopBtn.click();
+    await wait();
+    assert.ok(calls.some((c) => c.member === "reorderPendingMessage" && c.args[1] === "q-2"));
+    const editBtn = w.document.querySelector('.pending-message button[aria-label="Edit queued message"]');
+    editBtn.click();
+    await wait();
+    assert.equal(w.document.getElementById("prompt").value, "Urgent second step");
+    w.document.getElementById("prompt").value = "";
+
+    // 6. Side Chat (`/btw`) quick aside drawer + archived aside session + Insert into prompt:
+    const sideBtn = Array.from(w.document.querySelectorAll(".session-heading button")).find(
+      (b) => b.textContent.trim() === "Side chat",
+    );
+    assert.ok(sideBtn, "Session heading must expose Side chat button");
+    sideBtn.click();
+    await wait();
+    const sideDrawer = w.document.getElementById("dsh-side-chat");
+    assert.ok(sideDrawer, "Side Chat drawer must open");
+    const sideInput = sideDrawer.querySelector("textarea");
+    sideInput.value = "How do userScripts work?";
+    Array.from(sideDrawer.querySelectorAll("button")).find((b) => b.textContent.trim() === "Ask").click();
+    await wait();
+    await wait();
+    assert.match(sideDrawer.textContent, /Side chat answer: use WKWebView userScript/);
+    assert.ok(
+      !Array.from(w.document.querySelectorAll("#recents .session-link")).some((b) => b.textContent.includes("Aside ·")),
+      "Archived aside session must not clutter main sidebar recents",
+    );
+    Array.from(sideDrawer.querySelectorAll("button")).find((b) => b.textContent.trim() === "Insert into prompt").click();
+    assert.match(w.document.getElementById("prompt").value, /WKWebView userScript/);
+
+    // 7. Artifact Studio Console error capture + "Fix error in chat" + Light/Dark surface toggle:
+    w.document.querySelector(".dsh-inline-artifact-card button").click();
+    await wait();
+    const darkSurf = Array.from(w.document.querySelectorAll("dialog[open] .artifact-surface-switch button")).find(
+      (b) => b.textContent.trim() === "Dark",
+    );
+    assert.ok(darkSurf);
+    darkSurf.click();
+    assert.equal(w.document.querySelector("dialog[open] .artifact-stage").dataset.surface, "dark");
+    w.dispatchEvent(
+      new w.MessageEvent("message", {
+        data: { type: "quixi:artifact-console", level: "error", text: "ReferenceError: chartData is not defined" },
+      }),
+    );
+    const consoleTab = w.document.querySelector('dialog[open] button[aria-label="Artifact console"]');
+    assert.match(consoleTab.textContent, /Console \(1 err\)/);
+    consoleTab.click();
+    const fixBtn = Array.from(w.document.querySelectorAll("dialog[open] button")).find(
+      (b) => b.textContent.trim() === "Fix error in chat",
+    );
+    assert.ok(fixBtn, "Console pane must offer 1-click Fix error in chat");
+    fixBtn.click();
+    await wait();
+    assert.match(w.document.getElementById("prompt").value, /ReferenceError: chartData is not defined/);
   } finally {
     f.close();
   }

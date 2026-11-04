@@ -154,6 +154,32 @@ impl QuixiEngine {
         Ok(json!({"cancelled":removed,"messageUuid":uuid}))
     }
 
+    /// Reorder a still-pending follow-up message ("top", "up", or "down").
+    pub fn reorder_pending_message(&self, sid: &str, uuid: &str, direction: &str) -> Result<Value, String> {
+        let _submission = self.chat_submission.lock();
+        if uuid.trim().is_empty() { return Err("Choose a pending message.".into()); }
+        if !self.agent_sessions.read().contains_key(sid) && !self.code_sessions.read().contains_key(sid) {
+            return Err("This conversation no longer exists.".into());
+        }
+        let mut pending = self.pending_messages.lock();
+        let Some(queue) = pending.get_mut(sid) else {
+            return Err("This message is no longer pending.".into());
+        };
+        let index = queue.iter().position(|m| m["messageUuid"] == uuid).ok_or("This message is no longer pending.")?;
+        let target = match direction {
+            "top" => 0,
+            "up" => index.saturating_sub(1),
+            "down" => (index + 1).min(queue.len().saturating_sub(1)),
+            _ => return Err("Invalid reorder direction.".into()),
+        };
+        if target != index {
+            if let Some(item) = queue.remove(index) {
+                queue.insert(target, item);
+            }
+        }
+        Ok(json!({"reordered": true, "index": target, "messageUuid": uuid}))
+    }
+
     /// Explicitly release one message, never the other held entries.
     pub fn guide_pending_message(self: &Arc<Self>, sid: &str, uuid: &str) -> Result<Value, String> {
         let _submission = self.chat_submission.lock();
@@ -351,6 +377,10 @@ mod tests {
         assert_eq!(steering[0]["uuid"],"steering");
         assert_eq!(engine.get_pending_messages(&sid)[0]["messageUuid"],"new");
         assert_eq!(engine.get_pending_messages(&sid)[1]["messageUuid"],"second");
+        assert_eq!(engine.reorder_pending_message(&sid, "second", "top").unwrap()["index"], 0);
+        assert_eq!(engine.get_pending_messages(&sid)[0]["messageUuid"], "second");
+        assert_eq!(engine.reorder_pending_message(&sid, "new", "top").unwrap()["index"], 0);
+        assert_eq!(engine.get_pending_messages(&sid)[0]["messageUuid"], "new");
         engine.cancel_turn(&sid);
         assert_eq!(engine.get_pending_messages(&sid)[0]["held"], true);
         assert!(engine.take_steering(&sid).is_empty());

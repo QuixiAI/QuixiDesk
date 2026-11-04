@@ -2599,6 +2599,14 @@ impl QuixiEngine {
                 Err(error) => Self::json_resp(400, &json!({"error":format!("Cannot read file: {error}")})),
             };
         }
+        if clean_path == "/api/quixi/workspace/diff" && method == "POST" {
+            let cwd = body_json["cwd"].as_str().unwrap_or("");
+            let path = body_json["path"].as_str().unwrap_or("");
+            return match local_ui::workspace_file_diff(cwd, path) {
+                Ok(diff) => Self::json_resp(200, &diff),
+                Err(error) => Self::json_resp(400, &json!({"error":error})),
+            };
+        }
 
         if clean_path == "/api/quixi/storage/status" {
             return Self::json_resp(200, &self.session_storage_status());
@@ -3794,6 +3802,10 @@ impl QuixiEngine {
             if collab_snapshot.plan_mode.active {
                 permission.push_str("\n\n");
                 permission.push_str(collaboration::PLAN_MODE_GUIDANCE);
+            }
+            if let Some(style_guidance) = collab_snapshot.output_style_guidance() {
+                permission.push_str("\n\nResponse output style:\n");
+                permission.push_str(&style_guidance);
             }
             let capabilities = registry.context();
             let prompt_input = cordis_host::seams::PromptAssembleInput {
@@ -5018,6 +5030,11 @@ impl QuixiEngine {
             .unwrap_or_else(|| self.cordis.default_preset_id());
         self.collaboration
             .set_agent_preset(&session_id, &chosen_preset);
+        if let Some(style_id) = opts.get("outputStyle").and_then(Value::as_str) {
+            let style_instr = opts.get("outputStyleInstructions").and_then(Value::as_str);
+            self.collaboration
+                .set_output_style(&session_id, style_id, style_instr);
+        }
         let want_worktree = opts
             .get("createWorktree")
             .and_then(|v| v.as_bool())
@@ -5096,7 +5113,7 @@ impl QuixiEngine {
             effort_level,
             created_at: now_ms,
             last_activity_at: now_ms,
-            is_archived: false,
+            is_archived: opts.get("isArchived").and_then(Value::as_bool).unwrap_or(false),
             title,
             home_path: home,
             folder_exists,
@@ -5686,6 +5703,11 @@ impl QuixiEngine {
             .unwrap_or_else(|| self.cordis.default_preset_id());
         self.collaboration
             .set_agent_preset(&session_id, &chosen_preset);
+        if let Some(style_id) = opts.get("outputStyle").and_then(Value::as_str) {
+            let style_instr = opts.get("outputStyleInstructions").and_then(Value::as_str);
+            self.collaboration
+                .set_output_style(&session_id, style_id, style_instr);
+        }
         let want_worktree = opts
             .get("createWorktree")
             .and_then(|v| v.as_bool())

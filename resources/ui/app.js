@@ -54,6 +54,10 @@
     more: "M5 12h.01M12 12h.01M19 12h.01",
     check: "M4 12l5 5L20 6",
     back: "M15 5l-7 7 7 7",
+    forward: "M9 5l7 7-7 7",
+    up: "M12 19V5M6 11l6-6 6 6",
+    down: "M12 5v14M6 13l6 6 6-6",
+    chat: "M21 15a2 2 0 0 1-2 2H8l-5 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z",
     star: "M12 3l3 6 7 1-5 5 1 7-6-3-6 3 1-7-5-5 7-1z",
     code: "M8 6l-6 6 6 6M16 6l6 6-6 6",
     refresh: "M20 8a9 9 0 1 0 1 7M20 3v6h-6",
@@ -352,7 +356,23 @@
     state.providers = await api("/api/quixi/providers");
     if (state.providers.credentialStorageError) toast("Credentials could not be saved or unlocked: " + state.providers.credentialStorageError, true);
   }
-  function navigate(page, id = null, { replace = false } = {}) {
+  const navStack = [];
+  let navIndex = -1;
+  function navBack() {
+    if (navIndex <= 0) return false;
+    navIndex -= 1;
+    const entry = navStack[navIndex];
+    if (entry) navigate(entry.page, entry.id, { replace: true, fromNavStack: true });
+    return true;
+  }
+  function navForward() {
+    if (navIndex < 0 || navIndex >= navStack.length - 1) return false;
+    navIndex += 1;
+    const entry = navStack[navIndex];
+    if (entry) navigate(entry.page, entry.id, { replace: true, fromNavStack: true });
+    return true;
+  }
+  function navigate(page, id = null, { replace = false, fromNavStack = false } = {}) {
     saveDraft();
     capabilityUI?.stopAudio();
     page = String(page).replace(/^\//, "");
@@ -394,11 +414,26 @@
     state.attachments = state.attachmentDrafts.get(draftKey())?.slice() || [];
     const path =
       page === "chat" || page === "project" ? "/" + page + "/" + encodeURIComponent(id) : "/" + page;
+    if (!fromNavStack) {
+      const curEntry = navStack[navIndex];
+      if (!curEntry || curEntry.path !== path) {
+        if (replace && navIndex >= 0) {
+          navStack[navIndex] = { path, page, id };
+        } else {
+          navStack.splice(navIndex + 1);
+          navStack.push({ path, page, id });
+          if (navStack.length > 64) navStack.shift();
+          navIndex = navStack.length - 1;
+        }
+      }
+    }
     if (location.pathname !== path)
       history[replace ? "replaceState" : "pushState"]({}, "", path);
     render();
-    if (page === "chat") openTranscript().catch((e) => toast(e.message, true));
-    else if (page === "projects" || page === "project")
+    if (page === "chat") {
+      openTranscript().catch((e) => toast(e.message, true));
+      if (!state.artifacts.length) void loadArtifacts();
+    } else if (page === "projects" || page === "project")
       loadProjects()
         .then(() => renderPage())
         .catch((e) => toast(e.message, true));
@@ -512,12 +547,26 @@
           }[state.page] ||
           window.QuixiSlots?.entries("main.page")?.find((e) => e.key === state.page)?.label ||
           "Workspace";
-    const showBack = state.page === "chat" || state.page === "project";
+    const backBtn = ib("Back", "back", () => { if (!navBack()) history.back(); });
+    backBtn.disabled = navIndex <= 0 && !(state.page === "chat" || state.page === "project");
+    const fwdBtn = ib("Forward", "forward", () => { navForward(); });
+    fwdBtn.disabled = navIndex < 0 || navIndex >= navStack.length - 1;
+    const quickJumpBtn = button(
+      [icon("search", 13), "Quick jump", el("span", { class: "kbd" }, /Mac|iPhone|iPad/.test(navigator.platform || "") ? "⌘P" : "Ctrl+P")],
+      () => {
+        const svc = window.QuixiCordis?._services?.get("shortcuts")?.value;
+        if (svc?.openQuickLauncher) svc.openQuickLauncher();
+        else navigate("search");
+      },
+      "quiet topbar-pill quick-jump-pill",
+    );
+    quickJumpBtn.setAttribute("aria-label", "Quick jump command palette");
     const top = el(
       "header",
       { class: "topbar" },
-      showBack ? ib("Back", "back", () => history.back()) : null,
+      el("div", { class: "topbar-nav", role: "group", "aria-label": "Navigation history" }, backBtn, fwdBtn),
       el("div", { class: "crumb" }, el("strong", {}, crumb)),
+      quickJumpBtn,
       button(
         `Providers${state.providers?.configuredCount ? " · " + state.providers.configuredCount : ""}`,
         () => providerDirectory(),
@@ -631,27 +680,30 @@
     if (!target || conversationFind.session !== state.id) { closeConversationFind(); return; }
     for (const mark of target.querySelectorAll("mark[data-find]")) mark.replaceWith(document.createTextNode(mark.textContent));
     target.normalize();
-    const query = conversationFind.input.value.toLocaleLowerCase();
+    const rawQuery = conversationFind.input.value;
+    const caseSensitive = Boolean(conversationFind.caseSensitive);
+    const query = caseSensitive ? rawQuery : rawQuery.toLocaleLowerCase();
     const matches = [];
     if (query) {
       const walker = document.createTreeWalker(target, NodeFilter.SHOW_TEXT);
       const nodes = []; while (walker.nextNode()) nodes.push(walker.currentNode);
       for (const node of nodes) {
         if (node.parentElement.closest("button,textarea,input,script,style")) continue;
-        const text = node.textContent; const lower = text.toLocaleLowerCase();
-        let at = 0, pos = lower.indexOf(query); if (pos < 0) continue;
+        const text = node.textContent;
+        const hay = caseSensitive ? text : text.toLocaleLowerCase();
+        let at = 0, pos = hay.indexOf(query); if (pos < 0) continue;
         const fragment = document.createDocumentFragment();
         while (pos >= 0 && matches.length < 2000) {
           fragment.append(document.createTextNode(text.slice(at, pos)));
           const mark = el("mark", {"data-find":"true"}, text.slice(pos, pos + query.length));
-          fragment.append(mark); matches.push(mark); at = pos + query.length; pos = lower.indexOf(query, at);
+          fragment.append(mark); matches.push(mark); at = pos + query.length; pos = hay.indexOf(query, at);
         }
         fragment.append(document.createTextNode(text.slice(at))); node.replaceWith(fragment);
       }
     }
     conversationFind.matches = matches;
     conversationFind.index = matches.length ? ((conversationFind.index % matches.length) + matches.length) % matches.length : 0;
-    conversationFind.status.textContent = matches.length ? `${conversationFind.index + 1} of ${matches.length}${matches.length === 2000 ? "+" : ""}` : "No matches";
+    conversationFind.status.textContent = !query ? "Type to find" : matches.length ? `${conversationFind.index + 1} of ${matches.length}${matches.length === 2000 ? "+" : ""}` : "No matches";
     const current = matches[conversationFind.index];
     if (current) { current.classList.add("find-current"); if (scroll) { for (let p=current.parentElement; p && p!==target; p=p.parentElement) if (p.tagName==="DETAILS") p.open=true; current.scrollIntoView?.({block:"center"}); } }
   }
@@ -659,11 +711,26 @@
   function openConversationFind() {
     if (!session()) return;
     if (conversationFind && document.getElementById("conversation-find")) { conversationFind.input.focus(); conversationFind.input.select(); return; }
-    const input = el("input", {type:"search",placeholder:"Find in this conversation", "aria-label":"Find in conversation"});
-    const status = el("span", {role:"status", "aria-live":"polite"}, "No matches");
-    const bar = el("div", {id:"conversation-find",class:"conversation-find",role:"search"},input,status,
-      button("Previous match",()=>stepConversationFind(-1),"quiet"),button("Next match",()=>stepConversationFind(1),"quiet"),button("Close find",closeConversationFind,"quiet","close"));
-    conversationFind={input,status,index:0,matches:[],session:state.id};
+    const input = el("input", {type:"search",placeholder:"Find in conversation…", "aria-label":"Find in conversation"});
+    const status = el("span", {class:"find-pill-status", role:"status", "aria-live":"polite"}, "No matches");
+    const caseBtn = button("Aa", () => {
+      if (!conversationFind) return;
+      conversationFind.caseSensitive = !conversationFind.caseSensitive;
+      caseBtn.classList.toggle("active", conversationFind.caseSensitive);
+      caseBtn.setAttribute("aria-pressed", String(conversationFind.caseSensitive));
+      conversationFind.index = 0;
+      refreshConversationFind();
+      input.focus();
+    }, "quiet find-case-btn");
+    caseBtn.setAttribute("aria-label", "Match case");
+    caseBtn.setAttribute("aria-pressed", "false");
+    caseBtn.title = "Match case (Aa)";
+    const prevBtn = ib("Previous match", "up", () => stepConversationFind(-1));
+    const nextBtn = ib("Next match", "down", () => stepConversationFind(1));
+    const closeBtn = ib("Close find", "close", closeConversationFind);
+    const bar = el("div", {id:"conversation-find",class:"conversation-find floating-find-pill",role:"search"},
+      icon("search", 14), input, status, caseBtn, prevBtn, nextBtn, closeBtn);
+    conversationFind={input,status,index:0,matches:[],caseSensitive:false,session:state.id};
     input.addEventListener("input",()=>{conversationFind.index=0;refreshConversationFind();});
     input.addEventListener("keydown",e=>{if(e.key==="Enter"){e.preventDefault();stepConversationFind(e.shiftKey?-1:1);}else if(e.key==="Escape"){e.preventDefault();closeConversationFind();}});
     document.getElementById("conversation").before(bar);input.focus();
@@ -673,6 +740,30 @@
     if(media?._quixi_tool_media) {
       let label=media.text;try{label=JSON.parse(label).content?.map(p=>p.text||"").filter(Boolean).join("\n")||label;}catch{}
       return el("div",{},el("p",{},label),...(media.images||[]).map(p=>el("img",{src:p.image_url.url,alt:"Screenshot returned by tool",class:"tool-screenshot",loading:"lazy"})));
+    }
+    if (media && typeof media === "object" && Array.isArray(media.rounds) && typeof media.roundsUsed === "number") {
+      return el("div", { class: "dsh-workflow-run-card", "aria-label": "Ralph loop run" },
+        el("div", { class: "dsh-workflow-head" },
+          el("span", { class: "cordis-phase-dot " + (media.status === "complete" ? "active" : media.status === "blocked" ? "failed" : "loading") }),
+          el("strong", {}, `Ralph Fresh-Agent Loop · ${media.roundsUsed} round(s)`),
+          el("span", { class: "cordis-badge" }, String(media.status || "settled")),
+        ),
+        ...media.rounds.map((r) => el("div", { class: "dsh-workflow-member" },
+          el("span", { class: "cordis-badge" }, `Round ${r.round}`),
+          el("span", { class: "grow" }, r.summary || r.nextStep || "Completed round"),
+          el("small", { class: "hint" }, r.status || ""),
+        )),
+      );
+    }
+    if (media && typeof media === "object" && typeof media.stopReason === "string" && typeof media.agentsStarted === "number") {
+      return el("div", { class: "dsh-workflow-run-card", "aria-label": "Workflow run" },
+        el("div", { class: "dsh-workflow-head" },
+          el("span", { class: "cordis-phase-dot " + (media.stopReason === "completed" ? "active" : "failed") }),
+          el("strong", {}, `Workflow Run · ${media.agentsStarted} subagent(s)`),
+          el("span", { class: "cordis-badge" }, media.stopReason),
+        ),
+        el("pre", {}, JSON.stringify(media.value ?? media, null, 2)),
+      );
     }
     return el("pre",{},typeof content === "string" ? content : JSON.stringify(content,null,2));
   }
@@ -833,73 +924,192 @@
       saveDraft();
       return true;
     };
-    const triggersBox = el("div", { id: "composer-triggers", class: "composer-triggers", hidden: true });
+    const triggersBox = el("div", { id: "composer-triggers", class: "composer-triggers", role: "listbox", hidden: true });
     let triggerGen = 0;
+    let triggerEntries = [];
+    let triggerIdx = 0;
+    function syncTriggerSelection() {
+      const btns = triggersBox.querySelectorAll(".trigger-option");
+      btns.forEach((b, idx) => {
+        const active = idx === triggerIdx;
+        b.classList.toggle("is-active", active);
+        b.setAttribute("aria-selected", String(active));
+        if (active) b.scrollIntoView?.({ block: "nearest" });
+      });
+    }
+    function renderTriggerGroups(groups) {
+      triggerEntries = [];
+      triggerIdx = 0;
+      const frag = document.createDocumentFragment();
+      for (const [heading, rows] of groups) {
+        if (!rows.length) continue;
+        frag.append(el("div", { class: "trigger-group-heading" }, heading));
+        for (const item of rows) {
+          const idx = triggerEntries.length;
+          triggerEntries.push(item);
+          const opt = button(
+            [
+              el("span", { class: "trigger-option-main" },
+                icon(item.icon || "spark", 13),
+                el("strong", {}, item.label),
+              ),
+              el("small", { class: "trigger-option-desc" }, item.desc + (item.drill ? "  ⇥" : "")),
+            ],
+            () => item.pick(false),
+            "trigger-option" + (idx === 0 ? " is-active" : ""),
+          );
+          opt.setAttribute("role", "option");
+          opt.setAttribute("aria-selected", String(idx === 0));
+          opt.addEventListener("mouseenter", () => {
+            triggerIdx = idx;
+            syncTriggerSelection();
+          });
+          frag.append(opt);
+        }
+      }
+      if (!triggerEntries.length) {
+        triggersBox.hidden = true;
+        return;
+      }
+      triggersBox.replaceChildren(frag);
+      triggersBox.hidden = false;
+    }
     async function refreshTriggers() {
       const val = ta.value;
       const caret = ta.selectionStart ?? val.length;
       const before = val.slice(0, caret);
       const token = ++triggerGen;
-      if (/^\/[a-zA-Z0-9_-]*$/.test(before)) {
+      if (/^\/[a-zA-Z0-9_:-]*$/.test(before)) {
         const q = before.slice(1).toLowerCase();
         const cmds = [
-          ["/plan", "Toggle Plan Mode (read-only exploration + ExitPlanMode review)"],
-          ["/compact", "Condense older context into a structured checkpoint"],
-          ["/goal ", "Set an autonomous multi-round completion objective"],
-          ["/team", "Toggle shared Team Task DAG board"],
-          ["/export", "Export conversation transcript as Markdown or .zip"],
-          ["/plugins", "Open Spatiotemporal Plugins Manager"],
-          ["/preset ", "Switch Agent Preset (`standard`, `ptc`, `minimal`, `creator`)"],
-          ["/fork", "Branch into a new conversation (`Title (1)`)"],
-          ["/model", "Choose active model or provider"],
-        ].filter(([name]) => name.slice(1).trim().startsWith(q));
-        if (!cmds.length) { triggersBox.hidden = true; return; }
-        triggersBox.replaceChildren(...cmds.map(([cmd, desc]) =>
-          button([el("strong", {}, cmd.trim()), el("small", {}, desc)], () => {
-            triggersBox.hidden = true;
-            if (cmd === "/model") { ta.value = ""; saveDraft(); modelPicker(); return; }
-            ta.value = cmd;
-            ta.focus();
-            ta.setSelectionRange(ta.value.length, ta.value.length);
-            saveDraft();
-          }, "trigger-option")));
-        triggersBox.hidden = false;
+          ["/plan", "Toggle Plan Mode (read-only exploration + ExitPlanMode review)", "spark"],
+          ["/btw ", "Open Side Chat quick aside without polluting this conversation", "chat"],
+          ["/style ", "Switch response output style (`normal`, `concise`, `explanatory`, `formal`, `learning`)", "spark"],
+          ["/find", "Find text in the current conversation (⌘F)", "search"],
+          ["/goal ", "Set an autonomous multi-round completion objective", "spark"],
+          ["/compact", "Condense older context into a structured checkpoint", "code"],
+          ["/preset ", "Switch Agent Preset (`standard`, `ptc`, `minimal`, `creator`)", "tools"],
+          ["/team", "Toggle shared Team Task DAG board", "projects"],
+          ["/fork", "Branch into a new conversation (`Title (1)`)", "plus"],
+          ["/export", "Export conversation transcript as Markdown or .zip", "file"],
+          ["/model", "Choose active model or provider", "settings"],
+          ["/palette", "Open Quick Jump & Command Launcher (⌘P)", "search"],
+          ["/plugins", "Open Spatiotemporal Plugins Manager", "grid"],
+        ]
+          .filter(([name, desc]) => name.slice(1).trim().includes(q) || desc.toLowerCase().includes(q))
+          .map(([cmd, desc, ic]) => ({
+            label: cmd.trim(),
+            desc,
+            icon: ic,
+            drill: cmd.endsWith(" "),
+            pick: (viaTab) => {
+              triggersBox.hidden = true;
+              if (!viaTab && cmd === "/model") { ta.value = ""; saveDraft(); modelPicker(); return; }
+              if (!viaTab && cmd === "/find") { ta.value = ""; saveDraft(); openConversationFind(); return; }
+              if (!viaTab && cmd === "/palette") {
+                ta.value = ""; saveDraft();
+                window.QuixiCordis?._services?.get("shortcuts")?.value?.openQuickLauncher?.();
+                return;
+              }
+              if (!viaTab && cmd === "/plugins") { ta.value = ""; saveDraft(); navigate("plugins"); return; }
+              ta.value = cmd;
+              ta.focus();
+              ta.setSelectionRange(ta.value.length, ta.value.length);
+              saveDraft();
+            },
+          }));
+        const skillRows = (toolsData?.skills || [])
+          .filter((sk) => !q || String(sk.name || sk.id || "").toLowerCase().includes(q) || String(sk.description || "").toLowerCase().includes(q))
+          .slice(0, 6)
+          .map((sk) => {
+            const sname = sk.name || sk.id;
+            return {
+              label: `/skill:${sname}`,
+              desc: sk.description || "Load workspace skill instructions",
+              icon: "tools",
+              drill: false,
+              pick: () => {
+                triggersBox.hidden = true;
+                ta.value = `Use the "${sname}" skill to help me with: `;
+                ta.focus();
+                ta.setSelectionRange(ta.value.length, ta.value.length);
+                saveDraft();
+              },
+            };
+          });
+        renderTriggerGroups([
+          ["Commands", cmds],
+          ["Skills", skillRows],
+        ]);
         return;
       }
       const atMatch = before.match(/(?:^|\s)@([^\s@]*)$/);
       if (atMatch) {
         const query = atMatch[1];
-        const items = [];
+        const fileRows = [];
+        const convRows = [];
         const folder = s?.cwd || currentFolder();
+        const startPos = before.lastIndexOf("@");
         if (folder && !query.startsWith("session:")) {
           const files = (await rpc(s ? service(s) : "LocalAgentModeSessions", "searchWorkspaceFiles", [folder, query])) || [];
           if (token !== triggerGen) return;
-          for (const f of files.slice(0, 6)) {
+          for (const f of files.slice(0, 8)) {
             const rel = f.relativePath || f.name;
-            items.push(["@" + rel, f.isDir ? "Directory" : "Workspace file"]);
+            const isDir = Boolean(f.isDir || f.isDirectory);
+            const ref = "@" + rel + (isDir && !rel.endsWith("/") ? "/" : "");
+            fileRows.push({
+              label: ref,
+              desc: isDir ? "Directory · Tab to browse inside" : "Workspace file",
+              icon: isDir ? "folder" : "file",
+              drill: isDir,
+              pick: (viaTab) => {
+                if (isDir && viaTab) {
+                  ta.value = val.slice(0, startPos) + ref + val.slice(caret);
+                  const nextCaret = startPos + ref.length;
+                  ta.focus();
+                  ta.setSelectionRange(nextCaret, nextCaret);
+                  saveDraft();
+                  void refreshTriggers();
+                  return;
+                }
+                ta.value = val.slice(0, startPos) + ref + " " + val.slice(caret);
+                triggersBox.hidden = true;
+                ta.focus();
+                const nextCaret = startPos + ref.length + 1;
+                ta.setSelectionRange(nextCaret, nextCaret);
+                saveDraft();
+              },
+            });
           }
         }
         const sq = query.replace(/^session:/, "").toLowerCase();
         for (const other of state.sessions.filter(x => !x.isArchived && x.sessionId !== s?.sessionId)) {
           if (!sq || (other.title || "").toLowerCase().includes(sq) || other.sessionId.toLowerCase().includes(sq)) {
-            items.push(["@session:" + other.sessionId, "Reference conversation · " + (other.title || "Untitled")]);
-            if (items.length >= 9) break;
+            const ref = "@session:" + other.sessionId;
+            convRows.push({
+              label: other.title ? `@${other.title}` : ref,
+              desc: `Conversation recall (${other.sessionId.slice(0, 8)})`,
+              icon: "file",
+              drill: false,
+              pick: () => {
+                ta.value = val.slice(0, startPos) + ref + " " + val.slice(caret);
+                triggersBox.hidden = true;
+                ta.focus();
+                const nextCaret = startPos + ref.length + 1;
+                ta.setSelectionRange(nextCaret, nextCaret);
+                saveDraft();
+              },
+            });
+            if (convRows.length >= 5) break;
           }
         }
-        if (!items.length) { triggersBox.hidden = true; return; }
-        triggersBox.replaceChildren(...items.map(([ref, desc]) =>
-          button([el("strong", {}, ref), el("small", {}, desc)], () => {
-            const startPos = before.lastIndexOf("@");
-            ta.value = val.slice(0, startPos) + ref + " " + val.slice(caret);
-            triggersBox.hidden = true;
-            ta.focus();
-            const nextCaret = startPos + ref.length + 1;
-            ta.setSelectionRange(nextCaret, nextCaret);
-            saveDraft();
-          }, "trigger-option")));
-        triggersBox.hidden = false;
+        renderTriggerGroups([
+          [query.includes("/") ? `Workspace · ${query.slice(0, query.lastIndexOf("/") + 1)}` : "Workspace Files", fileRows],
+          ["Cross-Session Recall", convRows],
+        ]);
         return;
       }
+      triggerEntries = [];
       triggersBox.hidden = true;
     }
 
@@ -929,6 +1139,29 @@
         saveDraft(); renderChips();
       },
       onKeydown: async (e) => {
+        if (!triggersBox.hidden && triggerEntries.length) {
+          if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+            e.preventDefault();
+            triggerIdx = (triggerIdx + (e.key === "ArrowDown" ? 1 : -1) + triggerEntries.length) % triggerEntries.length;
+            syncTriggerSelection();
+            return;
+          }
+          if (e.key === "Tab" && !e.shiftKey) {
+            e.preventDefault();
+            triggerEntries[triggerIdx]?.pick(true);
+            return;
+          }
+          if (e.key === "Enter" && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.isComposing) {
+            e.preventDefault();
+            triggerEntries[triggerIdx]?.pick(false);
+            return;
+          }
+          if (e.key === "Escape") {
+            e.preventDefault();
+            triggersBox.hidden = true;
+            return;
+          }
+        }
         if (e.key === "Escape" && !triggersBox.hidden) {
           e.preventDefault();
           triggersBox.hidden = true;
@@ -1063,6 +1296,14 @@
           "div",
           { class: "composer-tools" },
           ib("Attach images or text files", "plus", () => fileInput.click()),
+          button("@", () => {
+            const pos = ta.selectionStart ?? ta.value.length;
+            const prefix = pos > 0 && !/\s/.test(ta.value[pos - 1]) ? " @" : "@";
+            ta.setRangeText(prefix, pos, ta.selectionEnd ?? pos, "end");
+            ta.focus();
+            saveDraft();
+            void refreshTriggers();
+          }, "icon quiet mention-trigger-btn"),
           capabilityUI.dictationControl(ta),
           ib("Add MCP context", "tools", () => mcpContextPicker()),
           button(
@@ -1226,6 +1467,54 @@
         navigate("plugins");
         return;
       }
+      if (cmd === "/palette") {
+        input.value = "";
+        saveDraft();
+        window.QuixiCordis?._services?.get("shortcuts")?.value?.openQuickLauncher?.();
+        return;
+      }
+      if (cmd === "/find") {
+        input.value = "";
+        saveDraft();
+        if (!cur) { toast("Open a conversation first to search within it.", true); return; }
+        openConversationFind();
+        return;
+      }
+      if (cmd === "/btw") {
+        const asidePrompt = argText.trim();
+        input.value = "";
+        saveDraft();
+        const sideSvc = window.QuixiCordis?._services?.get("sideChat")?.value;
+        if (sideSvc?.openSideChat) {
+          await sideSvc.openSideChat(asidePrompt);
+        } else {
+          toast("Side Chat plugin is currently disabled.", true);
+        }
+        return;
+      }
+      if (cmd === "/style") {
+        const styleArg = (argText || "").trim().toLowerCase();
+        input.value = "";
+        saveDraft();
+        const styleSvc = window.QuixiCordis?._services?.get("sideChat")?.value;
+        if (!styleArg && styleSvc?.openStylePicker) {
+          styleSvc.openStylePicker();
+          return;
+        }
+        const chosen = styleArg || "normal";
+        if (cur) {
+          const updated = await rpc(service(cur), "setOutputStyle", [cur.sessionId, chosen, null]);
+          if (updated && !updated.error) state.collab.set(cur.sessionId, updated);
+          renderPage();
+          toast(`Response style set to "${chosen}".`);
+        } else {
+          state.draftOutputStyle = chosen;
+          state.draftOutputStyleInstructions = null;
+          renderPage();
+          toast(`Staged "${chosen}" response style.`);
+        }
+        return;
+      }
       if (cmd === "/fork") {
         input.value = "";
         saveDraft();
@@ -1345,6 +1634,7 @@
           cwd: currentFolder() || "",
           ...(state.draftEffort ? { effortLevel: state.draftEffort } : {}),
           ...(state.draftPreset ? { agentPreset: state.draftPreset } : {}),
+          ...(state.draftOutputStyle ? { outputStyle: state.draftOutputStyle, ...(state.draftOutputStyleInstructions ? { outputStyleInstructions: state.draftOutputStyleInstructions } : {}) } : {}),
           ...(state.draftWorktree ? { createWorktree: true } : {}),
         };
         state.draftWorktree = false;
@@ -1405,11 +1695,12 @@
     updateSendButton();
   }
   function pendingMessageRows(s) {
-    return (state.pendingMessages.get(s?.sessionId) || []).map(m => {
-      const act = async (method, control) => {
+    const queue = state.pendingMessages.get(s?.sessionId) || [];
+    return queue.map((m, idx) => {
+      const act = async (method, extraArgs, control) => {
         control.disabled = true;
         try {
-          const result = await rpc(service(s), method, [s.sessionId, m.messageUuid]);
+          const result = await rpc(service(s), method, [s.sessionId, m.messageUuid, ...extraArgs]);
           if (result?.error) throw new Error(result.error);
           if (result?.cancelled === false) toast("This message has already been delivered.");
           await refreshSession(s.sessionId);
@@ -1417,13 +1708,37 @@
         } catch (error) { toast(error.message, true); }
         finally { control.disabled = false; }
       };
-      const remove = button("Remove", () => act("cancelPendingMessage", remove), "quiet");
-      const guide = button(running(s) ? "Guide task" : "Send now", () => act("guidePendingMessage", guide), "quiet");
+      const moveTop = idx > 0 ? button("↑ Top", () => act("reorderPendingMessage", ["top"], moveTop), "quiet") : null;
+      if (moveTop) moveTop.setAttribute("aria-label", "Move to top");
+      const editBtn = m.text ? button("Edit", async () => {
+        editBtn.disabled = true;
+        try {
+          const res = await rpc(service(s), "cancelPendingMessage", [s.sessionId, m.messageUuid]);
+          if (res?.error) throw new Error(res.error);
+          await refreshSession(s.sessionId);
+          const input = document.getElementById("prompt");
+          if (input && res?.cancelled !== false) {
+            input.value = input.value.trim() ? `${input.value.trim()}\n${m.text}` : m.text;
+            saveDraft();
+            input.focus();
+            input.setSelectionRange(input.value.length, input.value.length);
+          }
+          if (session()?.sessionId === s.sessionId) { renderTranscript(); updateSendButton(); }
+        } catch (error) { toast(error.message, true); }
+        finally { editBtn.disabled = false; }
+      }, "quiet") : null;
+      if (editBtn) editBtn.setAttribute("aria-label", "Edit queued message");
+      const remove = button("Remove", () => act("cancelPendingMessage", [], remove), "quiet");
+      const guide = button(running(s) ? "Guide task" : "Send now", () => act("guidePendingMessage", [], guide), "quiet");
       guide.title = running(s) ? "Apply at the next safe boundary; running tools finish first." : "Send this held message; other held messages stay on hold.";
+      const baseLabel = m.held ? "On hold" : m.delivery === "steer" ? "Guidance pending" : "Up next";
+      const labelText = queue.length > 1 ? `${baseLabel} #${idx + 1}` : baseLabel;
       return el("div", {class:"pending-message"},
         el("div", {class:"pending-message-content"},
-          el("span", {class:"pending-message-label"}, m.held ? "On hold" : m.delivery === "steer" ? "Guidance pending" : "Up next"),
+          el("span", {class:"pending-message-label"}, labelText),
           el("span", {class:"pending-message-text"}, m.text || "Attachments")),
+        moveTop,
+        editBtn,
         ...(m.delivery !== "steer" || m.held || !running(s) ? [guide] : []), remove);
     });
   }
@@ -1691,16 +2006,30 @@
           outPre.textContent = r?.text || "(no output yet)";
         }
       }, "quiet");
-      const killBtn = ["running", "stopping"].includes(j.status)
-        ? button("Stop job", async () => {
-            const r = await rpc(service(s), "killJob", [s.sessionId, j.id, "Stopped by user"]);
-            if (r?.error) throw new Error(r.error);
-            toast("Requested job stop.");
-            d.close();
-            await refreshSession(s.sessionId);
-            renderPage();
-          }, "quiet danger")
-        : null;
+      let armedUntil = 0;
+      let armTimer = null;
+      let killBtn = null;
+      if (["running", "stopping"].includes(j.status)) {
+        killBtn = button("Stop job", async () => {
+          const now = Date.now();
+          if (now > armedUntil) {
+            armedUntil = now + 3000;
+            killBtn.textContent = "Confirm stop";
+            clearTimeout(armTimer);
+            armTimer = setTimeout(() => {
+              if (killBtn.isConnected) killBtn.textContent = "Stop job";
+            }, 3050);
+            return;
+          }
+          clearTimeout(armTimer);
+          const r = await rpc(service(s), "killJob", [s.sessionId, j.id, "Stopped by user"]);
+          if (r?.error) throw new Error(r.error);
+          toast("Stopped background job.");
+          d.close();
+          await refreshSession(s.sessionId);
+          renderPage();
+        }, "quiet danger");
+      }
       body.append(
         el("div", { class: "job-card" },
           el("div", { class: "row" },
@@ -1753,6 +2082,22 @@
           el("span", { class: "goal-text" }, goal.objective),
           goal.blockedMessage ? el("small", { class: "error-text" }, " · " + goal.blockedMessage) : null,
         ),
+        goal.phase !== "complete" ? button("Edit", () => {
+          formDialog("Edit session goal", [
+            { name: "objective", label: "Completion objective", value: goal.objective || "", required: true, multiline: true },
+            { name: "maxRounds", label: "Max continuation rounds", value: String(goal.maxGoalRounds || 25), required: true },
+          ], async (vals) => {
+            const r = await rpc(service(s), "manageGoal", [s.sessionId, "edit", {
+              revision: goal.revision,
+              objective: vals.objective.trim(),
+              max_goal_rounds: Math.max(1, Math.min(256, Number(vals.maxRounds) || 25)),
+            }]);
+            if (r?.error) throw new Error(r.error);
+            await refreshSession(s.sessionId);
+            renderPage();
+            toast("Updated session goal.");
+          });
+        }, "quiet") : null,
         goal.phase === "active" && goal.activation === "armed"
           ? button("Pause", () => act("pause"), "quiet")
           : goal.phase !== "complete"
@@ -1854,6 +2199,107 @@
     prompt.focus();
     prompt.setSelectionRange(prompt.value.length, prompt.value.length);
   }
+  async function openWorkspaceDiffModal(cwd, relPath) {
+    if (!cwd || !relPath) return;
+    const diff = await api("/api/quixi/workspace/diff", { cwd, path: relPath });
+    if (diff?.error) throw new Error(diff.error);
+    let mode = "split";
+    const diffHost = el("div", { class: "dsh-diff-body" });
+    const unifiedBtn = button("Unified", () => { mode = "unified"; drawDiff(); }, "quiet");
+    const splitBtn = button("Split", () => { mode = "split"; drawDiff(); }, "quiet active");
+    function drawDiff() {
+      unifiedBtn.classList.toggle("active", mode === "unified");
+      splitBtn.classList.toggle("active", mode === "split");
+      if (diff.binary) {
+        diffHost.replaceChildren(el("p", { class: "hint" }, "Binary file changed — text comparison unavailable."));
+        return;
+      }
+      if (diff.oversized) {
+        diffHost.replaceChildren(el("p", { class: "hint" }, "File exceeds 512 KB diff preview budget."));
+        return;
+      }
+      if (!diff.hunks?.length) {
+        diffHost.replaceChildren(el("p", { class: "hint" }, "No uncommitted or HEAD line differences for this file."));
+        return;
+      }
+      diffHost.replaceChildren(...diff.hunks.map((h) => {
+        if (mode === "unified") {
+          return el("div", { class: "dsh-hunk-block" },
+            el("div", { class: "dsh-hunk-header" }, h.header),
+            el("table", { class: "dsh-diff-table unified" },
+              el("tbody", {}, ...(h.lines || []).map((ln) =>
+                el("tr", { class: "diff-row-" + ln.kind },
+                  el("td", { class: "diff-ln" }, ln.oldLine ?? ""),
+                  el("td", { class: "diff-ln" }, ln.newLine ?? ""),
+                  el("td", { class: "diff-sign" }, ln.kind === "add" ? "+" : ln.kind === "del" ? "-" : " "),
+                  el("td", { class: "diff-code" }, ln.text || " "),
+                ),
+              )),
+            ),
+          );
+        }
+        // Pair deletions & additions within consecutive change runs for side-by-side (`ui-deliverables` `changes-review`):
+        const rows = [];
+        const lines = h.lines || [];
+        for (let i = 0; i < lines.length; ) {
+          if (lines[i].kind === "ctx") {
+            const ln = lines[i++];
+            rows.push([ln, ln]);
+            continue;
+          }
+          const dels = [], adds = [];
+          while (i < lines.length && lines[i].kind === "del") dels.push(lines[i++]);
+          while (i < lines.length && lines[i].kind === "add") adds.push(lines[i++]);
+          const maxLen = Math.max(dels.length, adds.length);
+          for (let k = 0; k < maxLen; k++) rows.push([dels[k] || null, adds[k] || null]);
+        }
+        return el("div", { class: "dsh-hunk-block" },
+          el("div", { class: "dsh-hunk-header" }, h.header),
+          el("table", { class: "dsh-diff-table split" },
+            el("tbody", {}, ...rows.map(([left, right]) =>
+              el("tr", {},
+                el("td", { class: "diff-ln " + (left ? "diff-row-" + left.kind : "diff-empty") }, left?.oldLine ?? ""),
+                el("td", { class: "diff-code " + (left ? "diff-row-" + left.kind : "diff-empty") }, left ? (left.text || " ") : ""),
+                el("td", { class: "diff-ln " + (right ? "diff-row-" + right.kind : "diff-empty") }, right?.newLine ?? ""),
+                el("td", { class: "diff-code " + (right ? "diff-row-" + right.kind : "diff-empty") }, right ? (right.text || " ") : ""),
+              ),
+            )),
+          ),
+        );
+      }));
+    }
+    drawDiff();
+    const d = dialog(diff.relativePath || relPath, [
+      el("div", { class: "row dsh-diff-toolbar" },
+        el("div", { class: "cordis-segmented" }, splitBtn, unifiedBtn),
+        el("span", { class: "diff-stat-add" }, `+${diff.added || 0}`),
+        el("span", { class: "diff-stat-del" }, `-${diff.deleted || 0}`),
+        el("span", { class: "grow" }),
+        diff.path ? button("Preview file", () => {
+          d.close();
+          void openWorkspaceFileInDock(diff.path, null);
+        }, "quiet") : null,
+      ),
+      diffHost,
+    ], { wide: true });
+  }
+  async function openWorkspaceFileInDock(targetPath, lineNum = null) {
+    const s = session();
+    const folder = s?.cwd || currentFolder();
+    if (!targetPath) return;
+    let absPath = targetPath;
+    if (!targetPath.startsWith("/") && !/^[A-Za-z]:[\\/]/.test(targetPath)) {
+      if (!folder) { toast("Choose a workspace folder to preview relative file paths.", true); return; }
+      absPath = folder.replace(/\/+$/, "") + "/" + targetPath.replace(/^\/+/, "");
+    }
+    if (s && state.page === "chat") {
+      await contextDrawer("files", { file: absPath, line: lineNum ? Number(lineNum) : null });
+      return;
+    }
+    const r = await api("/api/quixi/workspace/read", { path: absPath });
+    if (r?.error) throw new Error(r.error);
+    dialog(absPath.split(/[\\/]/).pop() || absPath, el("pre", { class: "code-preview" }, r.contents || ""), { wide: true });
+  }
   function deliverablesCard(rec, s) {
     const changes = rec.workspaceChanges;
     const presented = rec.presentedFiles || [];
@@ -1872,6 +2318,10 @@
             el("summary", {},
               el("span", { class: "changed-file-path" }, f.display || f.path),
               el("small", { class: "changed-file-status" }, f.binary ? "binary" : f.oversized ? "oversized" : `${f.status} · +${f.added} -${f.deleted}`),
+              folder && !f.binary ? button("Diff", (ev) => {
+                ev.stopPropagation();
+                return openWorkspaceDiffModal(folder, f.path);
+              }, "quiet") : null,
               folder ? button("Reveal", (ev) => {
                 ev.stopPropagation();
                 return rpc(service(s), "openWorkspacePath", [folder, f.path, "", true]);
@@ -1884,7 +2334,7 @@
                     (h.lines || []).join("\n"),
                   )),
                 )
-              : el("p", { class: "hint" }, f.binary ? "Binary file changed." : "No inline diff hunks."),
+              : el("p", { class: "hint" }, f.binary ? "Binary file changed." : "Click Diff to inspect full side-by-side changes."),
           )),
         ),
       ) : null,
@@ -1895,6 +2345,7 @@
             el("strong", {}, p.path),
             p.description ? el("small", {}, " — " + p.description) : null,
           ),
+          folder ? button("Preview", () => openWorkspaceFileInDock(p.path, null), "quiet") : null,
           folder ? button("Open", () => rpc(service(s), "openWorkspacePath", [folder, p.path, "", false]), "quiet") : null,
         )),
       ) : null,
@@ -1988,7 +2439,33 @@
     for (const match of matches) {
       out.append(document.createTextNode(text.slice(last, match.index)));
       const token = match[0];
-      if (token.startsWith("`")) out.append(el("code", {}, token.slice(1, -1)));
+      if (token.startsWith("`")) {
+        const inner = token.slice(1, -1);
+        const fileMatch =
+          state.page === "chat" &&
+          (session()?.cwd || currentFolder()) &&
+          !inner.includes("..") &&
+          inner.includes("/") &&
+          /^([a-zA-Z0-9_./-]+\.[a-zA-Z0-9]{1,10})(?::(\d+))?$/.exec(inner);
+        if (fileMatch) {
+          const [, fpath, ln] = fileMatch;
+          const codeEl = el(
+            "code",
+            {
+              class: "prose-file-link",
+              title: `Preview ${fpath}${ln ? " at line " + ln : ""} in workspace dock`,
+              onClick: (ev) => {
+                ev.stopPropagation();
+                openWorkspaceFileInDock(fpath, ln ? Number(ln) : null).catch((err) => toast(err.message, true));
+              },
+            },
+            inner,
+          );
+          out.append(codeEl);
+        } else {
+          out.append(el("code", {}, inner));
+        }
+      }
       else if (token.startsWith("**"))
         out.append(el("strong", {}, token.slice(2, -2)));
       else if (token.startsWith("*"))
@@ -3505,6 +3982,7 @@
     try {
       state.artifacts = (await rpc("CoworkArtifacts", "getAllArtifacts")) || [];
       if (state.page === "artifacts") renderPage();
+      else if (state.page === "chat" && state.artifacts.some((a) => a.createdBySessionId === state.id)) renderTranscript();
     } catch (e) {
       toast(e.message, true);
     }
@@ -4185,8 +4663,11 @@
           ...[
             ["light", "Light"],
             ["dark", "Dark"],
+            ["warm-light", "Warm Paper"],
+            ["warm-dark", "Warm Dark"],
             ["system", "System"],
           ].map(([value, label]) => {
+            const curTheme = localStorage.getItem("quixi.theme") || "dark";
             const choice = button(
               [
                 el(
@@ -4199,28 +4680,37 @@
                   "span",
                   { class: "theme-label" },
                   label,
-                  (localStorage.getItem("quixi.theme") || "dark") === value
-                    ? icon("check", 14)
-                    : null,
+                  curTheme === value ? icon("check", 14) : null,
                 ),
               ],
               () => {
+                state.theme = value;
                 localStorage.setItem("quixi.theme", value);
                 applyTheme();
                 renderPage();
               },
-              "theme-option" +
-                ((localStorage.getItem("quixi.theme") || "dark") === value
-                  ? " selected"
-                  : ""),
+              "theme-option" + (curTheme === value ? " selected" : ""),
             );
             choice.setAttribute("aria-label", "Use " + value + " theme");
-            choice.setAttribute(
-              "aria-pressed",
-              String((localStorage.getItem("quixi.theme") || "dark") === value),
-            );
+            choice.setAttribute("aria-pressed", String(curTheme === value));
             return choice;
           }),
+        ),
+        field(
+          "Reading typography",
+          select(
+            [
+              ["sans", "Clean Sans (system UI)"],
+              ["serif", "Editorial Serif (long-form prose & headings)"],
+            ],
+            localStorage.getItem("quixi.proseFont") || "sans",
+            (v) => {
+              localStorage.setItem("quixi.proseFont", v);
+              applyTheme();
+            },
+            { "aria-label": "Reading typography" },
+          ),
+          "Editorial Serif pairs geometric UI controls with warm book-grade serif prose in replies.",
         ),
         el("h2", { style: "margin-top:30px" }, "New tasks"),
         field(
@@ -4396,12 +4886,15 @@
   }
   function applyTheme() {
     const choice = localStorage.getItem("quixi.theme") || "dark";
+    state.theme = choice;
     document.documentElement.dataset.theme =
       choice === "system"
         ? matchMedia("(prefers-color-scheme:dark)").matches
           ? "dark"
           : "light"
         : choice;
+    const proseFont = localStorage.getItem("quixi.proseFont") || "sans";
+    document.documentElement.dataset.proseFont = proseFont;
   }
   async function providerDirectory() {
     await loadProviders();
@@ -5024,13 +5517,21 @@
     if (data.type === "quixi-browser-navigate" && typeof data.url === "string")
       browserAction("navigate", { url: data.url });
   });
-  async function contextDrawer(initialTab) {
+  async function contextDrawer(initialTab, options = null) {
     const host = document.getElementById("page-host");
-    host.querySelector(".drawer")?.remove();
+    const existing = host?.querySelector(".drawer");
+    if (existing && !initialTab && !options) {
+      existing.remove();
+      return;
+    }
+    existing?.remove();
     const s = session();
-    if (!s) return;
+    if (!s || !host) return;
     if (initialTab) state.dockTab = initialTab;
     const folder = s.cwd || currentFolder();
+    let browseDir = state.dockBrowsePath && folder && state.dockBrowsePath.startsWith(folder) ? state.dockBrowsePath : folder;
+    let previewTarget = options?.file ? { path: options.file, line: options.line || null, mode: "code" } : null;
+    let fileFilter = "";
     const tabContent = el("div", { class: "dock-body" });
     const tabsBar = el("div", { class: "dock-tabs", role: "tablist" });
     let termTimer = null;
@@ -5048,11 +5549,24 @@
       tabContent,
     );
 
+    const mentionPathInPrompt = (absOrRel) => {
+      const prompt = document.getElementById("prompt");
+      if (!prompt) return;
+      const rel = folder && absOrRel.startsWith(folder + "/") ? absOrRel.slice(folder.length + 1) : absOrRel;
+      const token = `@${rel} `;
+      const pos = prompt.selectionStart ?? prompt.value.length;
+      const prefix = pos > 0 && !/\s/.test(prompt.value[pos - 1]) ? " " + token : token;
+      prompt.setRangeText(prefix, pos, prompt.selectionEnd ?? pos, "end");
+      saveDraft();
+      prompt.focus();
+      toast(`Inserted @${rel}`);
+    };
+
     async function renderDockTab() {
       stopTermPoll();
       tabsBar.replaceChildren(
         ...[["files", "Files"], ["changes", "Changes"], ["terminal", "Terminal"], ["tasks", "Tasks"]].map(([id, label]) =>
-          button(label, () => { state.dockTab = id; void renderDockTab(); }, "quiet dock-tab" + (state.dockTab === id ? " active" : "")),
+          button(label, () => { state.dockTab = id; previewTarget = null; void renderDockTab(); }, "quiet dock-tab" + (state.dockTab === id ? " active" : "")),
         ),
       );
       if (state.dockTab === "changes") {
@@ -5062,10 +5576,15 @@
           el("p", { class: "path" }, folder || "No folder selected"),
           wt?.files?.length
             ? el("div", {},
-                el("p", { class: "hint" }, `Working tree: ${wt.files.length} changed (+${wt.additions || 0} -${wt.deletions || 0})`),
-                ...wt.files.map(f => el("div", { class: "dock-change-row" },
-                  el("span", { class: "grow" }, f.path),
-                  el("small", {}, `${f.status} · +${f.additions || 0} -${f.deletions || 0}`),
+                el("p", { class: "hint" }, `Working tree: ${wt.files.length} changed (+${wt.additions || 0} -${wt.deletions || 0}) — click any file to inspect diff`),
+                ...wt.files.map(f => button(
+                  [
+                    icon("code", 13),
+                    el("span", { class: "grow" }, f.path),
+                    el("small", { class: "diff-stat-pill" }, `${f.status} · +${f.additions || 0} -${f.deletions || 0}`),
+                  ],
+                  () => openWorkspaceDiffModal(folder, f.path),
+                  "dock-change-row file-button",
                 )),
               )
             : el("p", { class: "muted" }, "Working tree is clean."),
@@ -5156,43 +5675,133 @@
         return;
       }
 
-      // Default tab: Files & context
-      const files = await rpc("LocalSessions", "listDirectoryAtCwd", [folder]);
+      // In-dock Document Preview (`dsh-client-ui-sidebar-documentpreview`):
+      if (previewTarget) {
+        const r = await api("/api/quixi/workspace/read", { path: previewTarget.path });
+        if (r?.error) {
+          tabContent.replaceChildren(
+            button("← Files", () => { previewTarget = null; void renderDockTab(); }, "quiet"),
+            el("p", { class: "error-text" }, r.error),
+          );
+          return;
+        }
+        const isMd = /\.(md|markdown)$/i.test(previewTarget.path);
+        if (!previewTarget.mode) previewTarget.mode = isMd ? "rendered" : "code";
+        const fname = previewTarget.path.split(/[\\/]/).pop() || previewTarget.path;
+        const headerRow = el("div", { class: "row dock-preview-toolbar" },
+          button("← Files", () => { previewTarget = null; void renderDockTab(); }, "quiet"),
+          el("strong", { class: "grow dock-preview-title", title: previewTarget.path }, fname),
+          isMd ? el("div", { class: "cordis-segmented" },
+            button("Rendered", () => { previewTarget.mode = "rendered"; void renderDockTab(); }, "quiet" + (previewTarget.mode === "rendered" ? " active" : "")),
+            button("Code", () => { previewTarget.mode = "code"; void renderDockTab(); }, "quiet" + (previewTarget.mode === "code" ? " active" : "")),
+          ) : null,
+          button("@", () => mentionPathInPrompt(previewTarget.path), "quiet", null),
+          button("Copy", async () => { await copy(r.contents || ""); toast("File contents copied."); }, "quiet"),
+        );
+        let bodyNode;
+        if (isMd && previewTarget.mode === "rendered") {
+          bodyNode = el("div", { class: "dock-markdown-preview" }, plainBody(r.contents || ""));
+        } else {
+          const lines = (r.contents || "").split("\n");
+          let targetRowEl = null;
+          const pre = el("div", { class: "code-preview dock-code-lines" },
+            ...lines.map((lnText, i) => {
+              const lnNo = i + 1;
+              const isTarget = previewTarget.line === lnNo;
+              const row = el("div", { class: "dock-code-row" + (isTarget ? " is-target-line" : "") },
+                el("span", { class: "dock-ln" }, String(lnNo)),
+                el("span", { class: "dock-ln-text" }, lnText || " "),
+              );
+              if (isTarget) targetRowEl = row;
+              return row;
+            }),
+          );
+          bodyNode = pre;
+          if (targetRowEl) requestAnimationFrame(() => targetRowEl.scrollIntoView?.({ block: "center" }));
+        }
+        tabContent.replaceChildren(headerRow, el("p", { class: "path" }, previewTarget.path), bodyNode);
+        return;
+      }
+
+      // Default tab: Breadcrumb Workspace File Tree (`dsh-client-ui-sidebar-files`)
+      if (!folder) {
+        tabContent.replaceChildren(el("p", { class: "muted" }, "Choose a workspace folder to browse files."));
+        return;
+      }
+      const activeDir = browseDir || folder;
+      const files = await rpc("LocalSessions", "listDirectoryAtCwd", [activeDir]);
       const fragment = document.createDocumentFragment();
-      fragment.append(el("p", { class: "path" }, folder));
+      // Build clickable path breadcrumbs relative to workspace root:
+      const rootName = folder.split(/[\\/]/).filter(Boolean).pop() || "workspace";
+      const relSub = activeDir.startsWith(folder) ? activeDir.slice(folder.length).replace(/^\/+/, "") : "";
+      const relParts = relSub ? relSub.split("/").filter(Boolean) : [];
+      const crumbsBar = el("div", { class: "dock-breadcrumbs" },
+        button(rootName, () => { browseDir = folder; state.dockBrowsePath = folder; void renderDockTab(); }, "quiet dock-crumb" + (!relParts.length ? " active" : "")),
+      );
+      let accPath = folder;
+      relParts.forEach((seg, idx) => {
+        accPath += "/" + seg;
+        const targetDir = accPath;
+        crumbsBar.append(
+          el("span", { class: "dock-crumb-sep" }, "/"),
+          button(seg, () => { browseDir = targetDir; state.dockBrowsePath = targetDir; void renderDockTab(); }, "quiet dock-crumb" + (idx === relParts.length - 1 ? " active" : "")),
+        );
+      });
+      fragment.append(crumbsBar);
+
       if (project()?.instructions) {
         fragment.append(el("details", {}, el("summary", {}, "Project instructions"), el("pre", {}, project().instructions)));
       }
-      for (const f of files || []) {
-        fragment.append(
-          button(
-            [icon(f.isDir || f.isDirectory ? "folder" : "file", 14), f.name],
-            async () => {
-              if (f.isDir || f.isDirectory) {
-                const items = await rpc("LocalSessions", "listDirectoryAtCwd", [f.path]);
-                dialog(f.name, (items || []).map((x) => el("p", { class: "path" }, x.path)));
-                return;
-              }
-              const r = await api("/api/quixi/workspace/read", { path: f.path });
-              dialog(
-                f.name,
-                el(
-                  "pre",
-                  { class: "code-preview" },
-                  ...(r.contents || "")
-                    .split("\n")
-                    .map((line) => el("span", { class: "code-line" }, line || " ")),
-                ),
-                { wide: true },
-              );
-            },
-            "file-button",
-          ),
+      const filterInput = el("input", {
+        type: "search",
+        placeholder: "Filter files in folder…",
+        "aria-label": "Filter files in folder",
+        value: fileFilter,
+      });
+      const listBox = el("div", { class: "dock-file-list" });
+      const drawFileRows = () => {
+        const q = fileFilter.trim().toLowerCase();
+        const sorted = [...(files || [])]
+          .filter((f) => !q || String(f.name || "").toLowerCase().includes(q))
+          .sort((a, b) => {
+            const ad = Boolean(a.isDir || a.isDirectory);
+            const bd = Boolean(b.isDir || b.isDirectory);
+            if (ad !== bd) return ad ? -1 : 1;
+            return String(a.name || "").localeCompare(String(b.name || ""));
+          });
+        listBox.replaceChildren(
+          ...sorted.map((f) => {
+            const isDir = Boolean(f.isDir || f.isDirectory);
+            return el("div", { class: "dock-file-entry" },
+              button(
+                [icon(isDir ? "folder" : "file", 14), el("span", { class: "grow" }, f.name)],
+                async () => {
+                  if (isDir) {
+                    browseDir = f.path;
+                    state.dockBrowsePath = f.path;
+                    fileFilter = "";
+                    await renderDockTab();
+                    return;
+                  }
+                  previewTarget = { path: f.path, line: null, mode: /\.(md|markdown)$/i.test(f.path) ? "rendered" : "code" };
+                  await renderDockTab();
+                },
+                "file-button",
+              ),
+              button("@", () => mentionPathInPrompt(f.path), "icon quiet dock-mention-btn"),
+            );
+          }),
         );
-      }
-      if (!files?.length) {
-        fragment.append(el("p", { class: "muted" }, "This folder has no visible entries."));
-      }
+        if (!sorted.length) {
+          listBox.append(el("p", { class: "muted" }, q ? "No matching entries in this folder." : "This folder has no visible entries."));
+        }
+      };
+      filterInput.addEventListener("input", () => {
+        fileFilter = filterInput.value;
+        drawFileRows();
+      });
+      drawFileRows();
+      fragment.append(filterInput, listBox);
       tabContent.replaceChildren(fragment);
     }
 
@@ -5428,7 +6037,7 @@
     d.addEventListener("close",()=>{observer?.disconnect();window.removeEventListener("resize",place);},{once:true});
   }
   const workflowContext={deleteSession,deleteProject,state,el,button,ib,icon,select,field,dialog,formDialog,confirmDialog,toast,api,rpc,copy,navigate,header,empty,date,currentFolder,loadSchedules,loadProjects,loadSessions,loadArtifacts,render,renderPage,saveDraft,renderChips,sessionMenu,projectEditor,manageProjectFolders,scheduleEditor,artifactThumbnail};
-  const cordisAppBridge={...workflowContext,session,service,plainBody,refreshSession,renderTranscript,forkConversationBranch,downloadSessionZip,onSlotsChanged:()=>{if(document.getElementById("page-host"))render();}};
+  const cordisAppBridge={...workflowContext,session,service,plainBody,refreshSession,renderTranscript,forkConversationBranch,downloadSessionZip,openArtifact:(id)=>openArtifact(id),openWorkspaceFileInDock,contextDrawer,applyTheme,navBack,navForward,openConversationFind,queueFiles:(files)=>{const key=draftKey();const items=window.QuixiChat.queueFiles(files,()=>{if(draftKey()===key)renderChips();});state.attachments.push(...items);saveDraft();renderChips();},onSlotsChanged:()=>{if(document.getElementById("page-host"))render();}};
   window.QuixiCordis?.attachAppBridge(cordisAppBridge);
   const workspaceUI=window.QuixiWorkspace.create(workflowContext);
   const capabilityUI=window.QuixiCapabilityWorkflows.create({...workflowContext,plainBody,openExternal,getToolsData:()=>toolsData,reloadTools:()=>loadTools(),updateMcpConnections,advancedMcpEditor:()=>mcpEditor(),

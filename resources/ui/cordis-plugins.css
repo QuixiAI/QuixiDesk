@@ -544,7 +544,7 @@ input[type="checkbox"].cordis-switch:disabled {
   display: none;
 }
 
-@container (max-width: 720px) {
+@container (max-width: 780px) {
   .composer-tools {
     flex-wrap: wrap;
     row-gap: 6px;
@@ -944,4 +944,601 @@ input[type="checkbox"].cordis-switch:disabled {
   margin: 3px 0 0;
   font-size: 12.5px;
   opacity: 0.85;
+}
+
+/* =========================================================================
+ * Input-Trigger Menu, Spotlight Quick Launcher, Docked Diff/File Preview,
+ * Artifact Studio & Workflow Run Cards (DSH + Desktop Inspired)
+ * ========================================================================= */
+.quick-jump-pill {
+  gap: 6px;
+  color: var(--muted);
+}
+.quick-jump-pill .kbd {
+  margin-left: 2px;
+}
+
+.composer-triggers {
+  padding: 5px;
+  border-radius: var(--dsw-radius-lg, 16px);
+  background: var(--panel);
+  border: var(--dsh-hairline-width) solid var(--cordis-surface-stroke);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.28);
+  max-height: 260px;
+}
+
+.trigger-group-heading {
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--muted);
+  padding: 6px 10px 3px;
+  user-select: none;
+}
+
+.trigger-option,
+.dsh-palette-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  text-align: left;
+  padding: 7px 10px;
+  border-radius: var(--dsw-radius-md, 10px);
+  background: transparent;
+  border: 1px solid transparent;
+  font-size: 12.5px;
+}
+
+.trigger-option.is-active,
+.dsh-palette-item.is-active {
+  background: rgba(76, 139, 245, 0.16);
+  border-color: rgba(76, 139, 245, 0.35);
+}
+
+.trigger-option-main {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.trigger-option-desc,
+.dsh-palette-sub {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.mention-trigger-btn {
+  font-weight: 650;
+  font-size: 13px !important;
+  color: var(--muted);
+}
+
+.dsh-quick-launcher {
+  max-width: 640px;
+}
+
+.dsh-palette-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 8px;
+  max-height: 52vh;
+  overflow-y: auto;
+}
+
+/* Full-window File Drag-and-Drop Overlay */
+.dsh-drop-overlay {
+  position: fixed;
+  inset: 12px;
+  z-index: 2147483645;
+  border-radius: var(--dsw-radius-panel, 24px);
+  background: rgba(15, 17, 22, 0.72);
+  border: 2px dashed var(--cordis-accent);
+  backdrop-filter: blur(8px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.dsh-drop-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 22px 32px;
+  border-radius: var(--dsw-radius-xl, 20px);
+  background: var(--panel);
+  border: var(--dsh-hairline-width) solid var(--cordis-surface-stroke);
+  text-align: center;
+}
+
+.dsh-drop-card span {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* Clickable Inline-Code File Mentions (`ui-deliverables`) */
+code.prose-file-link {
+  color: var(--cordis-accent);
+  font-weight: 500;
+  cursor: pointer;
+  text-decoration: none;
+}
+
+@media (hover: hover) {
+  code.prose-file-link:hover {
+    text-decoration: underline dotted;
+    text-underline-offset: 3px;
+  }
+}
+
+/* Docked Breadcrumb File Tree & In-Dock Document Preview */
+.dock-breadcrumbs {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px;
+  padding: 2px 0 4px;
+}
+
+.dock-crumb {
+  font-size: 11.5px;
+  min-height: 22px;
+  padding: 2px 6px;
+  border-radius: 6px;
+}
+
+.dock-crumb.active {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.dock-crumb-sep {
+  color: var(--muted);
+  font-size: 11px;
+  opacity: 0.6;
+}
+
+.dock-file-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.dock-file-entry {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.dock-file-entry .file-button {
+  flex: 1;
+  min-width: 0;
+  margin-bottom: 0;
+}
+
+.dock-mention-btn {
+  opacity: 0;
+  width: 26px;
+  min-width: 26px;
+  height: 26px;
+  min-height: 26px;
+  font-size: 11.5px;
+  transition: opacity 120ms ease;
+}
+
+.dock-file-entry:hover .dock-mention-btn,
+.dock-file-entry:focus-within .dock-mention-btn {
+  opacity: 0.85;
+}
+
+.dock-preview-toolbar {
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.dock-preview-title {
+  font-size: 12.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dock-code-lines {
+  padding: 8px 0;
+  max-height: 62vh;
+  overflow: auto;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: var(--dsh-code-font-size, 12px);
+}
+
+.dock-code-row {
+  display: flex;
+  padding: 1px 10px;
+  line-height: 1.5;
+  white-space: pre;
+}
+
+.dock-code-row.is-target-line {
+  background: rgba(242, 176, 66, 0.18);
+  border-left: 2px solid var(--cordis-warn);
+}
+
+.dock-ln {
+  width: 38px;
+  flex-shrink: 0;
+  color: var(--muted);
+  opacity: 0.65;
+  text-align: right;
+  padding-right: 10px;
+  user-select: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.dock-markdown-preview {
+  padding: 12px 14px;
+  border-radius: var(--dsw-radius-md, 12px);
+  background: var(--cordis-surface-card);
+  border: var(--dsh-hairline-width) solid var(--cordis-surface-stroke);
+  max-height: 62vh;
+  overflow-y: auto;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+/* Unified & Side-by-Side (`Split`) Diff Review (`ui-deliverables`) */
+.dsh-diff-toolbar {
+  margin-bottom: 8px;
+}
+
+.dsh-diff-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 64vh;
+  overflow: auto;
+}
+
+.dsh-hunk-block {
+  border-radius: var(--dsw-radius-md, 12px);
+  border: var(--dsh-hairline-width) solid var(--cordis-surface-stroke);
+  overflow-x: auto;
+  background: var(--cordis-surface-card);
+}
+
+.dsh-hunk-header {
+  padding: 5px 10px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 11.5px;
+  color: var(--muted);
+  background: rgba(127, 134, 150, 0.08);
+  border-bottom: var(--dsh-hairline-width) solid var(--cordis-surface-stroke);
+}
+
+.dsh-diff-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: var(--dsh-code-font-size, 12px);
+  line-height: 1.45;
+}
+
+.dsh-diff-table.split {
+  table-layout: fixed;
+}
+
+.dsh-diff-table td {
+  padding: 1px 8px;
+  vertical-align: top;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.dsh-diff-table td.diff-ln {
+  width: 42px;
+  text-align: right;
+  color: var(--muted);
+  opacity: 0.7;
+  user-select: none;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.dsh-diff-table td.diff-sign {
+  width: 18px;
+  text-align: center;
+  user-select: none;
+}
+
+.diff-row-add,
+tr.diff-row-add td {
+  background: rgba(56, 201, 124, 0.12);
+}
+
+.diff-row-del,
+tr.diff-row-del td {
+  background: rgba(240, 106, 106, 0.12);
+}
+
+td.diff-empty {
+  background: rgba(127, 134, 150, 0.04);
+}
+
+/* Interactive Artifact Studio & Inline Turn-Tail Artifact Cards */
+.artifact-studio-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.artifact-stage {
+  display: flex;
+  justify-content: center;
+  background: var(--cordis-surface-card);
+  border-radius: var(--dsw-radius-md, 12px);
+  padding: 4px;
+}
+
+.artifact-stage .preview-frame {
+  width: 100%;
+  transition: max-width 180ms ease;
+}
+
+.artifact-stage[data-viewport="tablet"] .preview-frame {
+  max-width: 768px;
+}
+
+.artifact-stage[data-viewport="mobile"] .preview-frame {
+  max-width: 390px;
+}
+
+.dsh-inline-artifact-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 10px 0;
+  padding: 11px 14px;
+  border-radius: var(--dsw-radius-lg, 16px);
+  background: var(--cordis-surface-card);
+  border: var(--dsh-hairline-width) solid var(--cordis-surface-stroke);
+}
+
+/* Workflow & Ralph Run Phase/Round Tree (`ui-workflow-run`) */
+.dsh-workflow-run-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border-radius: var(--dsw-radius-md, 12px);
+  background: var(--cordis-surface-card);
+  border: var(--dsh-hairline-width) solid var(--cordis-surface-stroke);
+}
+
+.dsh-workflow-head,
+.dsh-workflow-member {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+}
+
+.cordis-stat-trigger {
+  cursor: pointer;
+  color: var(--muted);
+}
+
+.cordis-stat-trigger:hover {
+  color: var(--text);
+}
+
+/* =========================================================================
+ * Desktop Navigation History, Floating Find Pill, Side Chat & Studio Console
+ * ========================================================================= */
+:root[data-theme="warm-light"] {
+  --cordis-surface-card: rgba(38, 34, 29, 0.035);
+  --cordis-surface-hover: rgba(38, 34, 29, 0.065);
+  --cordis-surface-stroke: rgba(38, 34, 29, 0.11);
+}
+
+.topbar-nav {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.topbar-nav button.icon {
+  width: 28px;
+  height: 28px;
+  min-width: 28px;
+  min-height: 28px;
+  padding: 5px;
+  border-radius: 7px;
+}
+
+.topbar-nav button.icon:disabled {
+  opacity: 0.28;
+}
+
+.conversation-find.floating-find-pill {
+  position: sticky;
+  top: 8px;
+  z-index: 30;
+  align-self: flex-end;
+  margin: 8px 20px 0 auto;
+  width: fit-content;
+  max-width: min(520px, calc(100% - 32px));
+  padding: 5px 8px 5px 11px;
+  border-radius: var(--dsw-radius-lg, 14px);
+  border: 1px solid var(--line-strong);
+  background: color-mix(in srgb, var(--panel) 94%, transparent);
+  backdrop-filter: blur(14px);
+  box-shadow: var(--shadow);
+  gap: 5px;
+  flex-wrap: nowrap;
+}
+
+.conversation-find.floating-find-pill input {
+  width: 210px;
+  min-width: 120px;
+  max-width: 240px;
+  min-height: 28px;
+  padding: 4px 8px;
+  border: none;
+  background: transparent;
+  font-size: 13px;
+}
+
+.conversation-find.floating-find-pill input:focus-visible {
+  outline: none;
+}
+
+.conversation-find.floating-find-pill .find-pill-status {
+  font-size: 11.5px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  margin: 0 4px;
+}
+
+.conversation-find.floating-find-pill .find-case-btn {
+  min-height: 26px;
+  height: 26px;
+  padding: 2px 7px;
+  font-size: 11.5px;
+  font-weight: 600;
+  border-radius: 6px;
+}
+
+.conversation-find.floating-find-pill .find-case-btn.active {
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+  color: var(--accent);
+}
+
+.conversation-find.floating-find-pill button.icon {
+  width: 26px;
+  height: 26px;
+  min-width: 26px;
+  min-height: 26px;
+  padding: 4px;
+}
+
+/* Side Chat Quick Aside (`/btw`) Drawer */
+.dsh-side-chat {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.dsh-side-chat-log {
+  flex: 1;
+  min-height: 180px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 4px 2px;
+}
+
+.dsh-side-msg {
+  padding: 10px 12px;
+  border-radius: var(--dsw-radius-md, 12px);
+  border: var(--dsh-hairline-width) solid var(--cordis-surface-stroke);
+  background: var(--cordis-surface-card);
+  font-size: 13px;
+}
+
+.dsh-side-msg.is-user {
+  background: color-mix(in srgb, var(--accent) 11%, var(--cordis-surface-card));
+}
+
+.dsh-side-role {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  margin-bottom: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.dsh-side-chat-composer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: var(--dsh-hairline-width) solid var(--cordis-surface-stroke);
+}
+
+.dsh-side-chat-composer .cordis-row-actions {
+  justify-content: flex-end;
+}
+
+.dsh-style-pill.is-custom-style {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 38%, transparent);
+}
+
+.style-option-card.is-selected {
+  border-color: var(--accent);
+}
+
+/* Artifact Studio Console & Preview Surface Theme */
+.artifact-stage[data-surface="light"] {
+  background: #ffffff;
+  color: #0f172a;
+}
+
+.artifact-stage[data-surface="dark"] {
+  background: #0f1116;
+  color: #f1f4f9;
+}
+
+.artifact-console-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 220px;
+  max-height: 56vh;
+  overflow-y: auto;
+  padding: 10px 12px;
+  border-radius: var(--dsw-radius-md, 12px);
+  background: var(--cordis-surface-card);
+  border: var(--dsh-hairline-width) solid var(--cordis-surface-stroke);
+}
+
+.artifact-console-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.artifact-console-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: rgba(127, 134, 150, 0.06);
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 12px;
+}
+
+.artifact-console-row.is-error {
+  background: rgba(240, 106, 106, 0.14);
+  color: var(--danger);
+}
+
+.artifact-console-row.is-warn {
+  background: rgba(242, 176, 66, 0.14);
+}
+
+button.has-error {
+  color: var(--danger);
 }
