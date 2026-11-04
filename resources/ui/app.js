@@ -371,9 +371,13 @@
       "artifacts",
       "schedules",
       "tools",
+      "plugins",
       "settings",
     ];
-    if (!pages.includes(page)) page = "new";
+    const hasCustomPage = Boolean(
+      window.QuixiSlots?.entries("main.page")?.some((e) => e.key === page),
+    );
+    if (!pages.includes(page) && !hasCustomPage) page = "new";
     if (page !== "tools") clearTimeout(toolsPollTimer);
     state.page = page;
     state.id = id;
@@ -462,6 +466,11 @@
             state.page === page ? "active" : "",
           ),
         ),
+        ...(window.QuixiSlots?.renderList("sidebar.nav", {
+          navigationButton,
+          state,
+          navigate,
+        }) || []),
       ),
       el("div", { class: "recent", id: "recents" }),
       el(
@@ -494,8 +503,11 @@
             artifacts: "Private artifacts",
             schedules: "Schedules",
             tools: "Tools & skills",
+            plugins: "Plugins",
             settings: "Settings",
-          }[state.page];
+          }[state.page] ||
+          window.QuixiSlots?.entries("main.page")?.find((e) => e.key === state.page)?.label ||
+          "Workspace";
     const top = el(
       "header",
       { class: "topbar" },
@@ -593,7 +605,12 @@
       tools: capabilityUI.renderTools,
       settings: settingsPage,
     };
-    handlers[state.page]?.(host);
+    if (handlers[state.page]) {
+      handlers[state.page](host);
+    } else if (window.QuixiSlots) {
+      const customNode = window.QuixiSlots.renderKeyed("main.page", state.page, cordisAppBridge);
+      if (customNode) host.replaceChildren(customNode);
+    }
     if (state.browser) renderBrowser(host);
   }
   let conversationFind = null;
@@ -672,6 +689,11 @@
           project() ? button(project().name, () => navigate("project", project().id), "quiet project-chip", "projects") : null,
           s.forkedFrom ? button("Original conversation",()=>navigate("chat",s.forkedFrom.sessionId),"quiet") : null,
           el("span", { id: "session-collab-pills", class: "row" }, contextMeterPill(s), jobsBadge(s)),
+          el(
+            "span",
+            { id: "session-heading-extras-host", class: "row" },
+            ...(window.QuixiSlots?.renderList("session.heading.extras", cordisAppBridge) || []),
+          ),
           currentFolder() ? button("Open in…", () => openInDialog(s), "quiet", "folder") : null,
           button("Find in conversation", () => openConversationFind(), "quiet", "search"),
           button("Files & context", () => contextDrawer(), "quiet"),
@@ -744,6 +766,21 @@
           ),
         ),
       );
+    const viewSpec = s
+      ? (window.QuixiSlots?.renderList("conversation.views", cordisAppBridge) || [])[0]
+      : null;
+    if (viewSpec?.bar) main.append(viewSpec.bar);
+    if (viewSpec && viewSpec.activeView && viewSpec.activeView !== "chat") {
+      const altBody = viewSpec.renderAlternate?.();
+      if (altBody) main.append(altBody);
+      main.append(composer());
+      host.replaceChildren(main);
+      renderChips();
+      return;
+    }
+    if (viewSpec?.workDetailsMode) {
+      conversation.dataset.workDetails = viewSpec.workDetailsMode;
+    }
     main.append(conversation, composer());
     if (!s) main.append(conversation.querySelector(".suggestions"));
     host.replaceChildren(main);
@@ -799,7 +836,10 @@
           ["/compact", "Condense older context into a structured checkpoint"],
           ["/goal ", "Set an autonomous multi-round completion objective"],
           ["/team", "Toggle shared Team Task DAG board"],
-          ["/export", "Export conversation transcript as Markdown"],
+          ["/export", "Export conversation transcript as Markdown or .zip"],
+          ["/plugins", "Open Spatiotemporal Plugins Manager"],
+          ["/preset ", "Switch Agent Preset (`standard`, `ptc`, `minimal`, `creator`)"],
+          ["/fork", "Branch into a new conversation (`Title (1)`)"],
           ["/model", "Choose active model or provider"],
         ].filter(([name]) => name.slice(1).trim().startsWith(q));
         if (!cmds.length) { triggersBox.hidden = true; return; }
@@ -877,10 +917,38 @@
         if (text) ta.setRangeText(text, ta.selectionStart, ta.selectionEnd, "end");
         saveDraft(); renderChips();
       },
-      onKeydown: (e) => {
+      onKeydown: async (e) => {
         if (e.key === "Escape" && !triggersBox.hidden) {
           e.preventDefault();
           triggersBox.hidden = true;
+          return;
+        }
+        // `Esc Esc` within 500ms stops an active turn while keeping queued messages intact (`dsh` rule):
+        if (e.key === "Escape" && running(session())) {
+          const now = Date.now();
+          if (now - (state._lastEscAt || 0) <= 500) {
+            e.preventDefault();
+            state._lastEscAt = 0;
+            stopTask();
+            return;
+          }
+          state._lastEscAt = now;
+        }
+        // `Cmd/Ctrl+Enter` while busy: steer immediately (or steer ALL queued messages when draft is empty!):
+        if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && !e.isComposing) {
+          e.preventDefault();
+          triggersBox.hidden = true;
+          const cur = session();
+          if (cur && running(cur) && !ta.value.trim() && !state.attachments.length) {
+            const res = await rpc(service(cur), "steerAllPending", [cur.sessionId]);
+            if (res?.steered > 0) {
+              await refreshSession(cur.sessionId);
+              updateSendButton();
+              toast(`Steered ${res.steered} queued message(s) into the active turn.`);
+            }
+            return;
+          }
+          sendPrompt(cur && running(cur) ? "steer" : "queue");
           return;
         }
         if (recallPrompt(e)) return;
@@ -998,6 +1066,7 @@
           ),
           mode,
           planToggle,
+          ...(window.QuixiSlots?.renderList("composer.controls", cordisAppBridge) || []),
           el("span", { class: "spacer" }),
           el("span", { class: "model-control" }, chooseModel),
           stop,
@@ -1006,8 +1075,13 @@
         ),
       ),
       el("div", {id:"pending-messages", "aria-label":"Pending messages"}, ...pendingMessageRows(s)),
+      el(
+        "div",
+        { id: "composer-footer-host" },
+        ...(window.QuixiSlots?.renderList("composer.footer", cordisAppBridge) || []),
+      ),
       el("p", { class: "composer-note", id:"composer-note" },
-        running(s) ? "Enter to queue · Shift+Enter for a new line" : "Enter to send · Shift+Enter for a new line"),
+        running(s) ? "Enter to queue · Cmd/Ctrl+Enter to steer · Esc Esc to stop" : "Enter to send · Shift+Enter for a new line"),
     );
   }
   function renderChips() {
@@ -1131,6 +1205,35 @@
         await exportConversationDialog(cur);
         return;
       }
+      if (cmd === "/plugins") {
+        input.value = "";
+        saveDraft();
+        navigate("plugins");
+        return;
+      }
+      if (cmd === "/fork") {
+        input.value = "";
+        saveDraft();
+        if (!cur) { toast("Open a conversation first to branch it.", true); return; }
+        await forkConversationBranch(cur);
+        return;
+      }
+      if (cmd === "/preset") {
+        const nextPreset = (argText || "standard").trim().toLowerCase();
+        input.value = "";
+        saveDraft();
+        if (cur) {
+          const updated = await rpc(service(cur), "setAgentPreset", [cur.sessionId, nextPreset]);
+          if (updated && !updated.error) state.collab.set(cur.sessionId, updated);
+          renderPage();
+          toast(`Session preset set to "${nextPreset}".`);
+        } else {
+          state.draftPreset = nextPreset;
+          renderPage();
+          toast(`Staged "${nextPreset}" preset for this new task.`);
+        }
+        return;
+      }
       if (cmd === "/compact") {
         if (!cur) { toast("Open a conversation first to compact its context.", true); return; }
         input.value = "";
@@ -1225,7 +1328,11 @@
           spaceId: state.project,
           userSelectedFolders: currentFolder() ? [currentFolder()] : [],
           cwd: currentFolder() || "",
+          ...(state.draftEffort ? { effortLevel: state.draftEffort } : {}),
+          ...(state.draftPreset ? { agentPreset: state.draftPreset } : {}),
+          ...(state.draftWorktree ? { createWorktree: true } : {}),
         };
+        state.draftWorktree = false;
         s = await rpc("LocalAgentModeSessions", "start", [opts]);
         if(!s?.sessionId)throw new Error(s?.error||"Conversation could not be created.");
         s._kind = "task";
@@ -1325,6 +1432,14 @@
     const pillsHost = document.getElementById("session-collab-pills");
     if (pillsHost && curSession) {
       pillsHost.replaceChildren(...[contextMeterPill(curSession), jobsBadge(curSession)].filter(Boolean));
+    }
+    const extrasHost = document.getElementById("session-heading-extras-host");
+    if (extrasHost && curSession && window.QuixiSlots) {
+      extrasHost.replaceChildren(...window.QuixiSlots.renderList("session.heading.extras", cordisAppBridge));
+    }
+    const footerHost = document.getElementById("composer-footer-host");
+    if (footerHost && window.QuixiSlots) {
+      footerHost.replaceChildren(...window.QuixiSlots.renderList("composer.footer", cordisAppBridge));
     }
     const barsHost = document.getElementById("collab-bars-host");
     if (barsHost) {
@@ -1654,6 +1769,14 @@
   }
   const secretMaskPattern = /\b(sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9-]{16,}|AIza[0-9A-Za-z_-]{30,})\b/g;
   function maskSecretsForDisplay(text) {
+    if (window.QuixiCordis) {
+      const res = window.QuixiCordis.waterfall(
+        "ui/mask-secrets",
+        { raw: text, masked: text, hadSecrets: false },
+        (v) => v,
+      );
+      return { masked: res.masked ?? text, hadSecrets: Boolean(res.hadSecrets) };
+    }
     if (!secretMaskPattern.test(text)) return { masked: text, hadSecrets: false };
     secretMaskPattern.lastIndex = 0;
     const masked = text.replace(secretMaskPattern, (m) => m.slice(0, 5) + "••••••••" + m.slice(-3));
@@ -2460,6 +2583,7 @@
             role === "assistant" && texts ? button("Quote", () => quoteIntoComposer(texts), "quiet") : null,
             revealBtn,
             role === "assistant" ? capabilityUI.readAloudControl(texts) : null,
+            role === "assistant" && id ? button("Branch", () => forkConversationBranch(s, id), "quiet") : null,
             role === "user" && id ? button("Edit",()=>editMessage(s,message),"quiet") : null,
             id ? button("Retry",()=>forkMessage(s,message),"quiet") : null,
           ),
@@ -2564,6 +2688,9 @@
       );
       result.push(card);
     }
+    for (const tailNode of window.QuixiSlots?.renderList("chat.turn-tail", cordisAppBridge) || []) {
+      result.push(tailNode);
+    }
     if (turnAnchors.length >= 2) {
       result.unshift(el("nav", { class: "turn-outline-rail", "aria-label": "Turn outline" },
         ...turnAnchors.map(t => button(`T${t.index}`, () => {
@@ -2630,14 +2757,49 @@
         toast("Project deleted. Conversations and files kept.");
       });
   }
+  async function downloadSessionZip(s) {
+    const res = await rpc(service(s), "exportSessionZip", [s.sessionId]);
+    if (res?.error) {
+      toast(res.error, true);
+      return;
+    }
+    if (res?.base64) {
+      const bin = atob(res.base64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      const blob = new Blob([bytes], { type: "application/zip" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = res.filename || `quixi-session-${s.sessionId}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 2000);
+      toast(`Downloaded ${a.download}.`);
+    }
+  }
+  async function forkConversationBranch(s, uptoUuid = null) {
+    const res = await rpc(service(s), "forkSessionBranch", [s.sessionId, uptoUuid || ""]);
+    if (res?.error) {
+      toast(res.error, true);
+      return;
+    }
+    await loadSessions();
+    if (res?.sessionId) {
+      navigate("chat", res.sessionId);
+      toast(`Branched into "${res.title || "new conversation"}".`);
+    }
+  }
   async function exportConversationDialog(s) {
     const exported = await rpc(service(s), "exportSessionMarkdown", [s.sessionId]);
     if (exported?.error) throw new Error(exported.error);
     const md = exported?.markdown || "";
     const d = dialog("Export conversation", [
-      el("p", { class: "hint" }, "Portable Markdown transcript for sharing or archiving."),
+      el("p", { class: "hint" }, "Portable Markdown transcript or complete .zip session bundle (`session.v1.jsonl` + `collaboration.json` + `session.md`)."),
       el("pre", { class: "code-preview" }, md),
       el("div", { class: "dialog-actions" },
+        button("Download .zip bundle", () => downloadSessionZip(s), "quiet"),
         button("Copy Markdown", async () => {
           await copy(md);
           toast("Markdown copied to clipboard.");
@@ -2653,6 +2815,11 @@
       el(
         "div",
         { class: "field-stack" },
+        ...(window.QuixiSlots?.renderList("session.menu.actions", {
+          app: cordisAppBridge,
+          sessionRecord: s,
+          closeMenu: () => d.close(),
+        }) || []),
         button("Export Markdown", async () => {
           d.close();
           await exportConversationDialog(s);
@@ -3613,6 +3780,9 @@
         ),
       );
       capabilityUI.renderDesktopStatus(content);
+      for (const sec of window.QuixiSlots?.renderList("settings.sections", cordisAppBridge) || []) {
+        content.append(sec);
+      }
     } else if (state.settingsTab === "providers") {
       const subagentOptions = [["", "Same as active chat model"]];
       for (const p of (state.providers?.providers || []).filter((p) => p.configured)) {
@@ -4574,6 +4744,10 @@
   }
   addEventListener("quixi:event", ({ detail: { channel, payload } }) => {
     if (channel === "quixi:open-tools") { navigate("tools"); return; }
+    if (channel === "cordis:changed" || channel.includes("CordisPlugins_$_onChanged")) {
+      window.QuixiCordis?.syncFromHostSnapshot(payload);
+      return;
+    }
     if (channel === "quixi:mcp-interaction") { pollMcpInteractions(); return; }
     if (channel === "quixi:mcp-updated") {
       if (state.page === "tools") loadTools({ poll: true });
@@ -4660,7 +4834,16 @@
         ? "windows"
         : "linux";
     try {
-      await Promise.all([loadSessions(), loadProjects(), loadProviders()]);
+      await Promise.all([
+        loadSessions(),
+        loadProjects(),
+        loadProviders(),
+        Promise.resolve(rpc("CordisPlugins", "snapshot", []))
+          .then((snap) => {
+            if (snap && !snap.error) window.QuixiCordis?.syncFromHostSnapshot(snap);
+          })
+          .catch(() => {}),
+      ]);
       state.folder = ""; // A new conversation has no implicit access to the source checkout.
       const path = decodeURIComponent(location.pathname.slice(1));
       navigate(path || "new", null, { replace: true });
@@ -4721,6 +4904,8 @@
     d.addEventListener("close",()=>{observer?.disconnect();window.removeEventListener("resize",place);},{once:true});
   }
   const workflowContext={deleteSession,deleteProject,state,el,button,ib,icon,select,field,dialog,formDialog,confirmDialog,toast,api,rpc,copy,navigate,header,empty,date,currentFolder,loadSchedules,loadProjects,loadSessions,loadArtifacts,render,renderPage,saveDraft,renderChips,sessionMenu,projectEditor,manageProjectFolders,scheduleEditor,artifactThumbnail};
+  const cordisAppBridge={...workflowContext,session,service,plainBody,refreshSession,renderTranscript,forkConversationBranch,downloadSessionZip,onSlotsChanged:()=>{if(document.getElementById("page-host"))render();}};
+  window.QuixiCordis?.attachAppBridge(cordisAppBridge);
   const workspaceUI=window.QuixiWorkspace.create(workflowContext);
   const capabilityUI=window.QuixiCapabilityWorkflows.create({...workflowContext,plainBody,openExternal,getToolsData:()=>toolsData,reloadTools:()=>loadTools(),updateMcpConnections,advancedMcpEditor:()=>mcpEditor(),
     startSkill:async(skill,files)=>{saveDraft();navigate("new");state.attachments.push(...files.map(f=>({name:f.name||f.path||"SKILL.md",text:f.content||f.contents||""})));const input=document.getElementById("prompt");input.value=`Use the attached ${skill.name||skill.id} instructions to help me with: `+(input.value.trim()?"\n\n"+input.value:"");saveDraft();renderChips();input.focus();}});

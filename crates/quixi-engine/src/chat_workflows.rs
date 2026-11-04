@@ -183,6 +183,22 @@ impl QuixiEngine {
         Ok(json!({"dispatched":true,"queued":false,"messageUuid":uuid}))
     }
 
+    /// Promotes every queued FIFO message in `sid` into `steer` delivery (`Cmd/Ctrl+Enter` when draft is empty).
+    pub fn steer_all_pending_messages(self: &Arc<Self>, sid: &str) -> Result<Value, String> {
+        let _submission = self.chat_submission.lock();
+        let mut pending = self.pending_messages.lock();
+        let Some(queue) = pending.get_mut(sid) else {
+            return Ok(json!({ "steered": 0 }));
+        };
+        let mut count = 0usize;
+        for msg in queue.iter_mut() {
+            msg["delivery"] = json!("steer");
+            msg["held"] = json!(false);
+            count += 1;
+        }
+        Ok(json!({ "steered": count }))
+    }
+
     pub(crate) fn take_steering(&self, sid: &str) -> Vec<Value> {
         let mut pending = self.pending_messages.lock();
         let Some(queue) = pending.get_mut(sid) else {return Vec::new();};

@@ -13,6 +13,30 @@ use uuid::Uuid;
 
 const EXACT_SCHEMAS_JSON: &str = include_str!("../ipc-exact-schemas.json");
 
+fn encode_base64_bytes(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity((input.len() + 2) / 3 * 4);
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(TABLE[((n >> 18) & 0x3f) as usize] as char);
+        out.push(TABLE[((n >> 12) & 0x3f) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(TABLE[((n >> 6) & 0x3f) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(TABLE[(n & 0x3f) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
 pub struct EipcRouter {
     pub engine: Arc<QuixiEngine>,
     pub exact_methods: HashMap<String, Value>,
@@ -681,6 +705,219 @@ impl EipcRouter {
             ("LocalAgentModeSessions" | "LocalSessions", "exportSessionMarkdown") => {
                 let sid = args.first().and_then(Value::as_str).unwrap_or("");
                 self.engine.export_session_markdown(sid)
+            }
+            ("LocalAgentModeSessions" | "LocalSessions", "exportSessionZip") => {
+                use quixi_engine::cordis_host;
+                let _ = cordis_host::TOOL_PLUGIN_MANAGER;
+                let sid = args.first().and_then(Value::as_str).unwrap_or("");
+                match self.engine.export_session_zip(sid) {
+                    Ok((filename, bytes)) => {
+                        let b64 = encode_base64_bytes(&bytes);
+                        json!({ "filename": filename, "base64": b64, "byteLength": bytes.len() })
+                    }
+                    Err(e) => json!({ "error": e }),
+                }
+            }
+            ("LocalAgentModeSessions" | "LocalSessions", "setAgentPreset") => {
+                let sid = args.first().and_then(Value::as_str).unwrap_or("");
+                let preset = args.get(1).and_then(Value::as_str).unwrap_or("standard");
+                self.engine.collaboration.set_agent_preset(sid, preset);
+                self.engine.emit_session_collab_updated(sid);
+                self.engine.collaboration.client_view(sid)
+            }
+            ("LocalAgentModeSessions" | "LocalSessions", "forkSessionBranch") => {
+                let sid = args.first().and_then(Value::as_str).unwrap_or("");
+                let upto = args.get(1).and_then(Value::as_str).filter(|s| !s.is_empty());
+                match self.engine.fork_session_branch(sid, upto) {
+                    Ok(v) => v,
+                    Err(e) => json!({ "error": e }),
+                }
+            }
+            ("LocalAgentModeSessions" | "LocalSessions", "resolveActionCard") => {
+                let sid = args.first().and_then(Value::as_str).unwrap_or("");
+                let card_id = args.get(1).and_then(Value::as_str).unwrap_or("");
+                let decision = args.get(2).and_then(Value::as_str).unwrap_or("accept");
+                let placement = args.get(3).and_then(Value::as_str).map(str::to_owned);
+                match self.engine.resolve_action_card(sid, card_id, decision, placement) {
+                    Ok(v) => v,
+                    Err(e) => json!({ "error": e }),
+                }
+            }
+            ("LocalAgentModeSessions" | "LocalSessions", "steerAllPending") => {
+                let sid = args.first().and_then(Value::as_str).unwrap_or("");
+                match self.engine.steer_all_pending_messages(sid) {
+                    Ok(v) => v,
+                    Err(e) => json!({ "error": e }),
+                }
+            }
+            // --- Cordis Spatiotemporal Plugin Manager & Introspection ---
+            ("CordisPlugins", "snapshot") => self.engine.cordis.plugin_manager_snapshot(),
+            ("CordisPlugins", "readBundleDetail") => {
+                let bid = args.first().and_then(Value::as_str).unwrap_or("");
+                self.engine.cordis.read_bundle_detail(bid)
+            }
+            ("CordisPlugins", "setBundleEnabled") => {
+                let bid = args.first().and_then(Value::as_str).unwrap_or("");
+                let enabled = args.get(1).and_then(Value::as_bool).unwrap_or(true);
+                match self
+                    .engine
+                    .cordis
+                    .profile_store
+                    .set_bundle_enabled(bid, enabled)
+                    .and_then(|_| self.engine.cordis.reconcile_live())
+                {
+                    Ok(snap) => {
+                        self.engine.emit_cordis_changed();
+                        snap
+                    }
+                    Err(e) => json!({ "error": e }),
+                }
+            }
+            ("CordisPlugins", "setPluginEnabled") => {
+                let rid = args.first().and_then(Value::as_str).unwrap_or("");
+                let enabled = args.get(1).and_then(Value::as_bool).unwrap_or(true);
+                match self
+                    .engine
+                    .cordis
+                    .profile_store
+                    .set_row_enabled(rid, enabled)
+                    .and_then(|_| self.engine.cordis.reconcile_live())
+                {
+                    Ok(snap) => {
+                        self.engine.emit_cordis_changed();
+                        snap
+                    }
+                    Err(e) => json!({ "error": e }),
+                }
+            }
+            ("CordisPlugins", "setPluginConfig") => {
+                let rid = args.first().and_then(Value::as_str).unwrap_or("");
+                let cfg = args.get(1).cloned().unwrap_or_else(|| json!({}));
+                match self
+                    .engine
+                    .cordis
+                    .profile_store
+                    .set_row_config(rid, cfg)
+                    .and_then(|_| self.engine.cordis.reconcile_live())
+                {
+                    Ok(snap) => {
+                        self.engine.emit_cordis_changed();
+                        snap
+                    }
+                    Err(e) => json!({ "error": e }),
+                }
+            }
+            ("CordisPlugins", "installUserBundle") => {
+                let payload = args.first().cloned().unwrap_or_else(|| json!({}));
+                let manifest_val = payload.get("manifest").cloned().unwrap_or(payload.clone());
+                match serde_json::from_value::<quixi_cordis::BundleManifest>(manifest_val) {
+                    Ok(manifest) => {
+                        let client_js = payload.get("clientJs").and_then(Value::as_str);
+                        let readme_md = payload.get("readmeMd").and_then(Value::as_str);
+                        match self
+                            .engine
+                            .cordis
+                            .profile_store
+                            .install_user_bundle(manifest, client_js, readme_md)
+                            .and_then(|_| self.engine.cordis.reconcile_live())
+                        {
+                            Ok(snap) => {
+                                self.engine.emit_cordis_changed();
+                                snap
+                            }
+                            Err(e) => json!({ "error": e }),
+                        }
+                    }
+                    Err(e) => json!({ "error": format!("Invalid bundle manifest: {e}") }),
+                }
+            }
+            ("CordisPlugins", "removeUserBundle") => {
+                let bid = args.first().and_then(Value::as_str).unwrap_or("");
+                match self
+                    .engine
+                    .cordis
+                    .profile_store
+                    .remove_user_bundle(bid)
+                    .and_then(|_| self.engine.cordis.reconcile_live())
+                {
+                    Ok(snap) => {
+                        self.engine.emit_cordis_changed();
+                        snap
+                    }
+                    Err(e) => json!({ "error": e }),
+                }
+            }
+            ("CordisPlugins", "listPresets") => self.engine.cordis.list_presets(),
+            ("CordisPlugins", "readPresetYaml") => {
+                let pid = args.first().and_then(Value::as_str).unwrap_or("standard");
+                match self.engine.cordis.read_preset_yaml(pid) {
+                    Ok(v) => v,
+                    Err(e) => json!({ "error": e }),
+                }
+            }
+            ("CordisPlugins", "setDefaultPreset") => {
+                let pid = args.first().and_then(Value::as_str).unwrap_or("standard");
+                match self.engine.cordis.set_default_preset(pid) {
+                    Ok(v) => {
+                        self.engine.emit_cordis_changed();
+                        v
+                    }
+                    Err(e) => json!({ "error": e }),
+                }
+            }
+            ("CordisPlugins", "reportClientManifest") => {
+                let manifest = args.first().cloned().unwrap_or_else(|| json!({}));
+                self.engine.cordis.runtime.set_client_manifest(manifest);
+                json!({ "ok": true })
+            }
+            ("CordisPlugins", "inspectList") => {
+                let platform = args.first().and_then(Value::as_str);
+                self.engine.cordis.cordis_inspect_list(platform)
+            }
+            ("CordisPlugins", "inspectQuery") => {
+                let q = args.first().and_then(Value::as_str).unwrap_or("");
+                self.engine.cordis.cordis_inspect_query(q)
+            }
+            // --- GitHub Forge PRs & Diff ---
+            ("Forge", "refreshSession") => {
+                let sid = args.first().and_then(Value::as_str).unwrap_or("");
+                self.engine.refresh_session_forge(sid)
+            }
+            ("Forge", "prDiff") => {
+                let cwd = args.first().and_then(Value::as_str).unwrap_or("");
+                let pr_num = args.get(1).and_then(Value::as_u64).unwrap_or(0);
+                match self
+                    .engine
+                    .cordis
+                    .runtime
+                    .root_context()
+                    .try_get(quixi_engine::cordis_host::capabilities::FORGE_SERVICE)
+                {
+                    Some(forge) => match forge.pr_diff(Path::new(cwd), pr_num) {
+                        Ok(diff) => json!({ "diff": diff }),
+                        Err(e) => json!({ "error": e }),
+                    },
+                    None => json!({ "error": "GitHub Forge plugin is disabled." }),
+                }
+            }
+            ("Forge", "mergePr") => {
+                let cwd = args.first().and_then(Value::as_str).unwrap_or("");
+                let pr_num = args.get(1).and_then(Value::as_u64).unwrap_or(0);
+                let method = args.get(2).and_then(Value::as_str).unwrap_or("squash");
+                let head_sha = args.get(3).and_then(Value::as_str);
+                match self
+                    .engine
+                    .cordis
+                    .runtime
+                    .root_context()
+                    .try_get(quixi_engine::cordis_host::capabilities::FORGE_SERVICE)
+                {
+                    Some(forge) => match forge.merge_pr(Path::new(cwd), pr_num, method, head_sha) {
+                        Ok(res) => res,
+                        Err(e) => json!({ "error": e }),
+                    },
+                    None => json!({ "error": "GitHub Forge plugin is disabled." }),
+                }
             }
             ("LocalAgentModeSessions" | "LocalSessions", "readShellPty") => {
                 let key = args.first().and_then(Value::as_str).unwrap_or("default");

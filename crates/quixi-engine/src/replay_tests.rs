@@ -630,3 +630,191 @@ fn postmortem_regressions_64kb_agents_md_posix_bash_heredoc_and_cumulative_telem
     assert_eq!(tel.usage.input_tokens, 1100);
     assert_eq!(tel.usage.output_tokens, 80);
 }
+
+#[test]
+fn ptc_preset_executes_run_code_and_records_subcalls_and_step_telemetry() {
+    let (engine, eng_dir) = fixture_engine();
+    let work = eng_dir.path().join("ptc_ws");
+    fs::create_dir_all(&work).unwrap();
+    fs::write(work.join("one.txt"), "FIRST_TOKEN").unwrap();
+    fs::write(work.join("two.txt"), "SECOND_TOKEN").unwrap();
+
+    let sid = engine.start_agent_session(&json!({
+        "cwd": work.to_string_lossy(),
+        "userSelectedFolders": [work.to_string_lossy()],
+        "permissionMode": "auto",
+        "model": "ptc-model",
+        "effortLevel": "high",
+        "agentPreset": "ptc"
+    }));
+    assert_eq!(engine.agent_sessions.read()[&sid].effort_level, "high");
+    assert_eq!(engine.collaboration.agent_preset(&sid), "ptc");
+
+    let run_code_args = json!({
+        "description": "Read both workspace files in parallel",
+        "code": "const [a, b] = await Promise.all([tools.Read({ file_path: 'one.txt' }), tools.Read({ file_path: 'two.txt' })]); return `${a.trim()}|${b.trim()}`;"
+    })
+    .to_string();
+
+    let server = spawn_replay_server(
+        &engine,
+        "custom",
+        "ptc-model",
+        vec![
+            ReplayStep::ok(vec![json!({
+                "choices": [{
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": "ptc-call-1",
+                            "type": "function",
+                            "function": { "name": "RunCode", "arguments": run_code_args }
+                        }]
+                    },
+                    "finish_reason": "tool_calls"
+                }],
+                "usage": { "prompt_tokens": 320, "completion_tokens": 45 }
+            })]),
+            ReplayStep::ok(vec![json!({
+                "choices": [{"delta": {"content": "Combined tokens verified."}, "finish_reason": "stop"}],
+                "usage": { "prompt_tokens": 410, "completion_tokens": 12 }
+            })]),
+        ],
+    );
+
+    let (reply, _) = engine.generate_reply_with_tools_streaming(
+        "Combine one.txt and two.txt using RunCode",
+        work.to_str().unwrap(),
+        &[],
+        Some("ptc-model"),
+        "auto",
+        &sid,
+        &AtomicBool::new(false),
+        |_| {},
+        |_| {},
+    );
+    let captured_reqs = server.join().unwrap();
+    assert_eq!(reply, "Combined tokens verified.");
+
+    // Verify PTC preset sent ONLY `RunCode` as the model-visible tool schema + TypeScript SDK in system prompt:
+    let req0_tools = captured_reqs[0]["tools"].as_array().unwrap();
+    assert_eq!(req0_tools.len(), 1);
+    assert_eq!(req0_tools[0]["function"]["name"], "RunCode");
+    assert!(captured_reqs[0]["messages"][0]["content"]
+        .as_str()
+        .unwrap()
+        .contains("declare const tools:"));
+
+    // Verify second request saw the combined output of both parallel `tools.Read` subcalls:
+    let tool_msg = captured_reqs[1]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["role"] == "tool")
+        .unwrap();
+    let content_str = tool_msg["content"].as_str().unwrap();
+    assert!(content_str.contains("FIRST_TOKEN"), "{content_str}");
+    assert!(content_str.contains("SECOND_TOKEN"), "{content_str}");
+
+    // Verify step telemetry captured both steps and nested PTC subcalls:
+    let st = engine.collaboration.get(&sid);
+    assert_eq!(st.step_telemetry.len(), 2);
+    assert_eq!(st.step_telemetry[0].ptc_subcalls.len(), 2);
+}
+
+#[test]
+fn creator_mode_cordis_inspect_action_cards_undo_restore_and_fork_numbering_work() {
+    let (engine, eng_dir) = fixture_engine();
+    let work = eng_dir.path().join("creator_ws");
+    fs::create_dir_all(&work).unwrap();
+
+    let sid = engine.start_agent_session(&json!({
+        "title": "Cordis Architecture",
+        "cwd": work.to_string_lossy(),
+        "userSelectedFolders": [work.to_string_lossy()],
+        "permissionMode": "auto",
+        "model": "creator-model",
+        "agentPreset": "creator"
+    }));
+
+    let propose_args = json!({
+        "action": "create_personalized_page",
+        "title": "Build Monitor Panel",
+        "brief": "Tracks workspace build health in the right sidebar.",
+        "details": "## Build Monitor\nLive build status.",
+        "placement": "sidebar-right"
+    })
+    .to_string();
+
+    let server = spawn_replay_server(
+        &engine,
+        "custom",
+        "creator-model",
+        vec![
+            ReplayStep::ok(vec![json!({
+                "choices": [{
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "ins-1",
+                                "type": "function",
+                                "function": { "name": "CordisInspectQuery", "arguments": "{\"query\":\"web\"}" }
+                            },
+                            {
+                                "index": 1,
+                                "id": "prop-1",
+                                "type": "function",
+                                "function": { "name": "ProposeAction", "arguments": propose_args }
+                            }
+                        ]
+                    },
+                    "finish_reason": "tool_calls"
+                }]
+            })]),
+            ReplayStep::ok(vec![json!({
+                "choices": [{"delta": {"content": "Proposed your Build Monitor panel."}, "finish_reason": "stop"}]
+            })]),
+        ],
+    );
+
+    let (reply, _) = engine.generate_reply_with_tools_streaming(
+        "Inspect web plugins and propose a Build Monitor panel",
+        work.to_str().unwrap(),
+        &[],
+        Some("creator-model"),
+        "auto",
+        &sid,
+        &AtomicBool::new(false),
+        |_| {},
+        |_| {},
+    );
+    server.join().unwrap();
+    assert_eq!(reply, "Proposed your Build Monitor panel.");
+
+    // Action Card lifecycle: pending -> accept (hot-mounts bundle!) -> undo -> restore!
+    let cards = engine.collaboration.get(&sid).action_cards;
+    assert_eq!(cards.len(), 1);
+    let cid = cards[0].id.clone();
+    let accepted = engine
+        .resolve_action_card(&sid, &cid, "accept", Some("sidebar-right".into()))
+        .unwrap();
+    let bid = accepted["bundleId"].as_str().unwrap().to_owned();
+    assert!(engine.cordis.is_row_active(&format!("{bid}-ui")));
+
+    engine.resolve_action_card(&sid, &cid, "undo", None).unwrap();
+    assert!(!engine.cordis.is_row_active(&format!("{bid}-ui")));
+
+    engine.resolve_action_card(&sid, &cid, "restore", None).unwrap();
+    assert!(engine.cordis.is_row_active(&format!("{bid}-ui")));
+
+    // Fork numbering (`"Cordis Architecture (1)"` -> `"Cordis Architecture (2)"`) & ZIP export:
+    let f1 = engine.fork_session_branch(&sid, None).unwrap();
+    assert_eq!(f1["title"], "Cordis Architecture (1)");
+    let f2 = engine.fork_session_branch(&sid, None).unwrap();
+    assert_eq!(f2["title"], "Cordis Architecture (2)");
+
+    let (zip_name, zip_bytes) = engine.export_session_zip(&sid).unwrap();
+    assert!(zip_name.ends_with(".zip"));
+    assert_eq!(&zip_bytes[0..4], b"PK\x03\x04");
+}

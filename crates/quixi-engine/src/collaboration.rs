@@ -136,7 +136,82 @@ pub struct ContextMeterState {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct StepTelemetryRecord {
+    pub turn_index: usize,
+    pub step_index: usize,
+    pub model: String,
+    pub ttft_ms: u64,
+    pub model_ms: u64,
+    pub tool_ms: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
+    pub reasoning_tokens: u64,
+    pub context_tokens: u64,
+    #[serde(default)]
+    pub tool_names: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ptc_subcalls: Vec<Value>,
+    pub recorded_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActionCardRecord {
+    pub id: String,
+    pub action: String, // "create_personalized_page" | "enable_official_plugin"
+    pub title: String,
+    pub brief: String,
+    pub details: String,
+    pub status: String, // "pending" | "accepted" | "dismissed" | "replaced" | "undone"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_bundle_id: Option<String>,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForgePrRecord {
+    pub number: u64,
+    pub title: String,
+    pub url: String,
+    pub state: String, // "OPEN" | "MERGED" | "CLOSED"
+    pub is_draft: bool,
+    pub mergeable: String,
+    pub head_ref: String,
+    pub base_ref: String,
+    pub review_decision: String,
+    pub checks_passed: u32,
+    pub checks_failed: u32,
+    pub checks_pending: u32,
+    pub binding_source: String, // "created" | "referenced" | "discovered"
+    #[serde(default)]
+    pub dismissed: bool,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeRecord {
+    pub name: String,
+    pub path: String,
+    pub branch: String,
+    pub origin_cwd: String,
+    pub created_at: i64,
+}
+
+fn default_agent_preset() -> String {
+    "standard".to_string()
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionCollabState {
+    #[serde(default = "default_agent_preset")]
+    pub agent_preset: String,
     #[serde(default)]
     pub todos: Vec<TodoItem>,
     #[serde(default)]
@@ -147,6 +222,14 @@ pub struct SessionCollabState {
     pub questions: Vec<ContinuedQuestion>,
     #[serde(default)]
     pub deliverables: Vec<TurnDeliverableRecord>,
+    #[serde(default)]
+    pub step_telemetry: Vec<StepTelemetryRecord>,
+    #[serde(default)]
+    pub action_cards: Vec<ActionCardRecord>,
+    #[serde(default)]
+    pub forge_prs: Vec<ForgePrRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<WorktreeRecord>,
     #[serde(default)]
     pub team: TeamBoardState,
     #[serde(default)]
@@ -266,19 +349,139 @@ impl SessionCollaborationStore {
             obj.insert("activation".into(), json!(if armed { "armed" } else { "disarmed" }));
         }
         let enriched_tasks = enrich_team_tasks(&st.team.tasks);
+        let preset = if st.agent_preset.trim().is_empty() {
+            "standard".to_string()
+        } else {
+            st.agent_preset.clone()
+        };
+        let active_prs: Vec<&ForgePrRecord> =
+            st.forge_prs.iter().filter(|p| !p.dismissed).collect();
         json!({
             "sessionId": session_id,
+            "agentPreset": preset,
             "todos": st.todos,
             "planMode": st.plan_mode,
             "goal": goal_val,
             "questions": st.questions,
             "deliverables": st.deliverables,
+            "stepTelemetry": st.step_telemetry,
+            "actionCards": st.action_cards,
+            "forgePrs": active_prs,
+            "worktree": st.worktree,
             "team": {
                 "enabled": st.team.enabled,
                 "tasks": enriched_tasks,
             },
             "contextMeter": st.context_meter,
         })
+    }
+
+    pub fn agent_preset(&self, session_id: &str) -> String {
+        let p = self.get(session_id).agent_preset;
+        if p.trim().is_empty() {
+            "standard".into()
+        } else {
+            p
+        }
+    }
+
+    pub fn set_agent_preset(&self, session_id: &str, preset: &str) {
+        let normalized = preset.trim().to_ascii_lowercase();
+        let val = if normalized.is_empty() {
+            "standard".to_owned()
+        } else {
+            normalized
+        };
+        self.mutate(session_id, |st| {
+            st.agent_preset = val;
+        });
+    }
+
+    pub fn record_step_telemetry(&self, session_id: &str, rec: StepTelemetryRecord) {
+        self.mutate(session_id, |st| {
+            st.step_telemetry.push(rec);
+            if st.step_telemetry.len() > 512 {
+                let drain = st.step_telemetry.len() - 512;
+                st.step_telemetry.drain(0..drain);
+            }
+        });
+    }
+
+    pub fn propose_action_card(
+        &self,
+        session_id: &str,
+        action: &str,
+        title: &str,
+        brief: &str,
+        details: &str,
+        placement: Option<String>,
+        target_bundle_id: Option<String>,
+    ) -> ActionCardRecord {
+        let now = chrono::Utc::now().timestamp_millis();
+        let card = ActionCardRecord {
+            id: format!("card-{}", &Uuid::new_v4().to_string().replace('-', "")[..12]),
+            action: action.to_owned(),
+            title: title.chars().take(120).collect(),
+            brief: brief.chars().take(320).collect(),
+            details: details.chars().take(4_000).collect(),
+            status: "pending".into(),
+            placement,
+            target_bundle_id,
+            created_at: now,
+        };
+        let cloned = card.clone();
+        self.mutate(session_id, |st| {
+            // Newer pending cards supersede unstarted earlier cards (`dsh-action-cards` rule).
+            for prev in &mut st.action_cards {
+                if prev.status == "pending" {
+                    prev.status = "replaced".into();
+                }
+            }
+            st.action_cards.push(card);
+        });
+        cloned
+    }
+
+    pub fn update_action_card_status(
+        &self,
+        session_id: &str,
+        card_id: &str,
+        status: &str,
+        placement: Option<String>,
+        target_bundle_id: Option<String>,
+    ) -> Option<ActionCardRecord> {
+        let mut updated = None;
+        self.mutate(session_id, |st| {
+            if let Some(card) = st.action_cards.iter_mut().find(|c| c.id == card_id) {
+                card.status = status.to_owned();
+                if let Some(p) = placement {
+                    card.placement = Some(p);
+                }
+                if let Some(b) = target_bundle_id {
+                    card.target_bundle_id = Some(b);
+                }
+                updated = Some(card.clone());
+            }
+        });
+        updated
+    }
+
+    pub fn upsert_forge_pr(&self, session_id: &str, pr: ForgePrRecord) {
+        self.mutate(session_id, |st| {
+            if let Some(existing) = st.forge_prs.iter_mut().find(|p| p.number == pr.number && p.url == pr.url) {
+                let dismissed = existing.dismissed;
+                *existing = pr;
+                existing.dismissed = dismissed;
+            } else {
+                st.forge_prs.push(pr);
+            }
+        });
+    }
+
+    pub fn set_worktree(&self, session_id: &str, wt: Option<WorktreeRecord>) {
+        self.mutate(session_id, |st| {
+            st.worktree = wt;
+        });
     }
 
     pub fn write_todos(&self, session_id: &str, input: &Value) -> Result<Value, String> {

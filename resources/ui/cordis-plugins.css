@@ -1,0 +1,343 @@
+/* Copyright (c) 2026 QuixiAI. MIT license.
+ * Spatiotemporal UI Plugins & Design Token Ladder (`cordis-plugins.css`).
+ */
+:root {
+  --dsw-radius-xs: 4px;
+  --dsw-radius-sm: 8px;
+  --dsw-radius-md: 12px;
+  --dsw-radius-lg: 16px;
+  --dsw-radius-xl: 20px;
+  --dsw-radius-panel: 28px;
+  --dsh-hairline-width: 0.5px;
+  --dsh-content-font-size: 14px;
+  --dsh-code-font-size: 12px;
+  --dsh-terminal-font-size: 13px;
+  --cordis-surface-card: rgba(127, 134, 150, 0.07);
+  --cordis-surface-stroke: rgba(127, 134, 150, 0.22);
+  --cordis-accent: #4176e6;
+  --cordis-ok: #199a5e;
+  --cordis-warn: #d88918;
+  --cordis-err: #d94848;
+}
+
+@media (-webkit-max-device-pixel-ratio: 1.5), (max-resolution: 144dpi) {
+  :root {
+    --dsh-hairline-width: 1px;
+  }
+}
+
+html[data-theme="dark"] {
+  --cordis-surface-card: rgba(255, 255, 255, 0.045);
+  --cordis-surface-stroke: rgba(255, 255, 255, 0.12);
+  --cordis-accent: #7aaaff;
+  --cordis-ok: #38c97c;
+  --cordis-warn: #f2b042;
+  --cordis-err: #f06a6a;
+}
+
+@supports (corner-shape: superellipse(1.5)) {
+  .cordis-bundle-card,
+  .cordis-action-card,
+  .cordis-stat-card,
+  .composer,
+  dialog {
+    corner-shape: superellipse(1.5);
+  }
+  .cordis-phase-dot,
+  .cordis-pill,
+  .cordis-switch-slider {
+    corner-shape: round;
+  }
+}
+
+.conversation .message {
+  font-size: var(--dsh-content-font-size, 14px);
+}
+.conversation pre,
+.conversation code,
+.code-preview {
+  font-size: var(--dsh-code-font-size, 12px);
+}
+
+/* Plugins Manager Page */
+.cordis-plugins-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.cordis-segmented {
+  display: inline-flex;
+  padding: 3px;
+  border-radius: var(--dsw-radius-md);
+  background: var(--cordis-surface-card);
+  border: var(--dsh-hairline-width) solid var(--cordis-surface-stroke);
+  gap: 2px;
+}
+
+.cordis-segmented button {
+  border-radius: var(--dsw-radius-sm);
+  padding: 5px 12px;
+  font-size: 12.5px;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.cordis-segmented button.active {
+  background: rgba(65, 118, 230, 0.16);
+  color: var(--cordis-accent);
+  font-weight: 600;
+}
+
+.cordis-bundle-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.cordis-bundle-card {
+  border-radius: var(--dsw-radius-xl);
+  background: var(--cordis-surface-card);
+  border: var(--dsh-hairline-width) solid var(--cordis-surface-stroke);
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.cordis-bundle-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.cordis-bundle-title-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.cordis-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 999px;
+  background: rgba(127, 134, 150, 0.14);
+}
+
+.cordis-badge.official {
+  background: rgba(65, 118, 230, 0.15);
+  color: var(--cordis-accent);
+}
+
+.cordis-badge.experimental {
+  background: rgba(216, 137, 24, 0.16);
+  color: var(--cordis-warn);
+}
+
+.cordis-phase-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
+  background: #8a909e;
+}
+.cordis-phase-dot.active { background: var(--cordis-ok); }
+.cordis-phase-dot.loading,
+.cordis-phase-dot.unloading { background: var(--cordis-accent); }
+.cordis-phase-dot.failed { background: var(--cordis-err); }
+
+.cordis-rows-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-top: var(--dsh-hairline-width) solid var(--cordis-surface-stroke);
+  padding-top: 10px;
+}
+
+.cordis-row-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 8px;
+  border-radius: var(--dsw-radius-sm);
+}
+
+@media (hover: hover) {
+  .cordis-row-item:hover {
+    background: rgba(127, 134, 150, 0.08);
+  }
+}
+
+.cordis-row-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.cordis-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+/* Conversation View Tabs & Work Details */
+.cordis-view-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 4px 16px 8px;
+  border-bottom: var(--dsh-hairline-width) solid var(--cordis-surface-stroke);
+}
+
+/* Work details folding modes */
+.conversation[data-work-details="compact"] details.activity > summary small,
+.conversation[data-work-details="compact"] details.thinking {
+  display: none;
+}
+.conversation[data-work-details="verbose"] details.activity > summary {
+  font-weight: 600;
+}
+
+/* Trajectory & Statistics Views */
+.cordis-alt-view {
+  padding: 18px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  overflow-y: auto;
+}
+
+.cordis-timeline-bar {
+  display: flex;
+  height: 16px;
+  border-radius: var(--dsw-radius-sm);
+  overflow: hidden;
+  background: var(--cordis-surface-card);
+  border: var(--dsh-hairline-width) solid var(--cordis-surface-stroke);
+}
+
+.cordis-span-ttft { background: rgba(242, 176, 66, 0.72); }
+.cordis-span-model { background: rgba(65, 118, 230, 0.78); }
+.cordis-span-tool { background: rgba(56, 201, 124, 0.75); }
+
+.cordis-stats-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.cordis-stats-table th,
+.cordis-stats-table td {
+  text-align: left;
+  padding: 7px 10px;
+  border-bottom: var(--dsh-hairline-width) solid var(--cordis-surface-stroke);
+}
+
+.cordis-stats-table tfoot td {
+  font-weight: 600;
+  background: var(--cordis-surface-card);
+}
+
+/* Turn-Tail Action Cards */
+.cordis-action-card {
+  margin: 10px 0;
+  padding: 14px 16px;
+  border-radius: var(--dsw-radius-lg);
+  background: var(--cordis-surface-card);
+  border: var(--dsh-hairline-width) solid var(--cordis-surface-stroke);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.cordis-action-card-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Composer Effort, Preset & Context Ring Footer */
+.cordis-composer-select {
+  font-size: 12px;
+  padding: 4px 8px;
+  border-radius: var(--dsw-radius-sm);
+  background: var(--cordis-surface-card);
+  border: var(--dsh-hairline-width) solid var(--cordis-surface-stroke);
+  color: inherit;
+}
+
+.cordis-composer-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 11.5px;
+  opacity: 0.85;
+  padding: 2px 6px 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.cordis-context-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--cordis-surface-card);
+  border: var(--dsh-hairline-width) solid var(--cordis-surface-stroke);
+}
+
+.cordis-pr-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: rgba(65, 118, 230, 0.13);
+  color: var(--cordis-accent);
+  border: 0;
+  cursor: pointer;
+}
+
+.cordis-shortcuts-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 380px;
+  overflow-y: auto;
+}
+
+.cordis-shortcut-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  border-radius: var(--dsw-radius-sm);
+  background: var(--cordis-surface-card);
+}
+
+.cordis-keycap {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 11.5px;
+  padding: 2px 7px;
+  border-radius: var(--dsw-radius-xs);
+  border: var(--dsh-hairline-width) solid var(--cordis-surface-stroke);
+  background: rgba(127, 134, 150, 0.12);
+}
