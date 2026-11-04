@@ -368,25 +368,48 @@ impl QuixiEngine {
                 // Use the selected model's context window and compact older evidence.
                 // Full activity remains stored in the child record for parent recovery.
                 self.compact_context_for_provider(&mut messages, &model, provider.as_deref(), prompt, cancelled)?;
-                let turn = self
-                    .provider_manager
-                    .complete_turn_with_tools_for_provider(
-                        &messages,
-                        &tools,
-                        Some(&model),
-                        provider.as_deref(),
-                        &mut |_| {},
-                    )
-                    .ok_or("The selected provider did not return a tool-capable response.")?;
-                if cancelled.load(Ordering::SeqCst) {
-                    return Err("Stopped with parent task.".into());
-                }
-                if let Some(error) = turn.stream_error {
-                    return Err(error);
-                }
-                if turn.text.starts_with("Provider error:") {
-                    return Err(turn.text);
-                }
+                let mut child_retries = 0u32;
+                let turn = loop {
+                    let cand = self
+                        .provider_manager
+                        .complete_turn_with_tools_for_provider(
+                            &messages,
+                            &tools,
+                            Some(&model),
+                            provider.as_deref(),
+                            &mut |_| {},
+                        )
+                        .ok_or("The selected provider did not return a tool-capable response.")?;
+                    if cancelled.load(Ordering::SeqCst) {
+                        return Err("Stopped with parent task.".into());
+                    }
+                    if let Some(ref raw_err) = cand.stream_error {
+                        let failure = crate::cordis_host::llm_retry::normalize_llm_failure(
+                            raw_err,
+                            &cand.provider_name,
+                            &cand.model_id,
+                            cand.retry_after_ms,
+                        );
+                        if let Some(sched) = self
+                            .cordis
+                            .runtime
+                            .root_context()
+                            .try_get(crate::cordis_host::llm_retry::LLM_RETRY_SERVICE)
+                            .and_then(|svc| svc.decide_retry(&failure, child_retries))
+                        {
+                            child_retries = sched.retry;
+                            if !crate::cordis_host::llm_retry::LlmRetryService::cancellable_sleep(
+                                sched.delay_ms,
+                                cancelled,
+                            ) {
+                                return Err("Stopped with parent task.".into());
+                            }
+                            continue;
+                        }
+                        return Err(failure.message);
+                    }
+                    break cand;
+                };
                 record["rounds"] = json!(round + 1);
                 let calls: Vec<_> = turn
                     .tool_calls

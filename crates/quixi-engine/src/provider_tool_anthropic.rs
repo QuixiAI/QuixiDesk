@@ -428,6 +428,7 @@ fn anthropic_stream_turn<R: std::io::BufRead, F: FnMut(StreamChunk)>(
                 provider_name: provider.into(),
                 model_id: model.into(),
                 stream_error: None,
+                retry_after_ms: None,
                 usage,
             },
             Err(e) => {
@@ -449,6 +450,7 @@ fn anthropic_stream_turn<R: std::io::BufRead, F: FnMut(StreamChunk)>(
                     tool_calls: Vec::new(), response_items: Vec::new(),
                     provider_name: provider.into(), model_id: model.into(),
                     stream_error: Some(error),
+                    retry_after_ms: None,
                     usage: None,
                 }
             }

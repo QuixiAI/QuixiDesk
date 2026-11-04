@@ -2473,6 +2473,173 @@
       return session()?.cwd || currentFolder() || ".";
     }
   }
+  const retryDeadlines = new Map();
+  let retryCountdownTimer = null;
+
+  function parseCleanProviderFailure(rawText, explicitCode = null, explicitStatus = null) {
+    const raw = String(rawText || "").trim().replace(/^Provider (?:error|turn failed):\s*/i, "");
+    const statusMatch = raw.match(/\bHTTP\s+(\d{3})\b/i);
+    let status = explicitStatus || (statusMatch ? Number(statusMatch[1]) : null);
+    let upstream = null;
+    let extracted = null;
+
+    const braceIdx = raw.indexOf("{");
+    if (braceIdx >= 0) {
+      const jsonPart = raw.slice(braceIdx);
+      try {
+        const endIdx = jsonPart.lastIndexOf("}");
+        const parsed = JSON.parse(endIdx > 0 ? jsonPart.slice(0, endIdx + 1) : jsonPart);
+        const errObj = parsed?.error || parsed;
+        if (!status && typeof errObj?.code === "number") status = errObj.code;
+        if (errObj?.metadata?.provider_name) upstream = String(errObj.metadata.provider_name).trim();
+        if (typeof errObj?.metadata?.raw === "string") {
+          try {
+            const inner = JSON.parse(errObj.metadata.raw);
+            const innerMsg = inner?.error?.message || inner?.message;
+            if (innerMsg) extracted = String(innerMsg).trim();
+          } catch {
+            if (!errObj.metadata.raw.trim().startsWith("{")) extracted = errObj.metadata.raw.trim();
+          }
+        }
+        if (!extracted && errObj?.message && errObj.message !== "Provider returned error") {
+          extracted = String(errObj.message).trim();
+        }
+      } catch {
+        const provMatch = jsonPart.match(/"provider_name"\s*:\s*"([^"]+)"/);
+        if (provMatch) upstream = provMatch[1].trim();
+        const escapedMsg = jsonPart.match(/\\"message\\":\s*\\"([^\\"]+)\\"/);
+        const plainMsg = jsonPart.match(/"message"\s*:\s*"([^"]+)"/);
+        if (escapedMsg) extracted = escapedMsg[1].trim();
+        else if (plainMsg && plainMsg[1] !== "Provider returned error") extracted = plainMsg[1].trim();
+      }
+    }
+
+    const headerPrefix = braceIdx > 0 ? raw.slice(0, braceIdx).replace(/:\s*$/, "").trim() : "";
+    const outerProviderMatch = headerPrefix.match(/^([A-Za-z0-9_.-]+)\s+returned\s+HTTP/i);
+    const outerProvider = outerProviderMatch ? outerProviderMatch[1] : "";
+    const lower = `${raw} ${extracted || ""}`.toLowerCase();
+
+    const code =
+      explicitCode ||
+      (status === 402 || /insufficient[\s_-]*(quota|balance|credits)|out of credits/.test(lower)
+        ? "QUOTA"
+        : status === 401 || status === 403 || /invalid api key|unauthorized/.test(lower)
+          ? "AUTH"
+          : status === 429 || /rate[\s_-]*limit|too many requests/.test(lower)
+            ? "RATE_LIMIT"
+            : [500, 502, 503, 504, 520, 522, 524, 529].includes(status) ||
+                /high demand|overloaded|unavailable|server_error/.test(lower)
+              ? "SERVER"
+              : status === 408 || /timed out|timeout/.test(lower)
+                ? "TIMEOUT"
+                : /unreachable|connection reset|connection refused/.test(lower)
+                  ? "TRANSPORT"
+                  : "ERROR");
+
+    const title =
+      code === "AUTH"
+        ? "API key or authentication rejected"
+        : code === "QUOTA"
+          ? "Request quota exhausted"
+          : code === "RATE_LIMIT"
+            ? "Rate limit exceeded"
+            : code === "SERVER"
+              ? "Upstream model temporarily unavailable"
+              : "Model request failed";
+
+    let message = extracted || headerPrefix || raw;
+    if (extracted && (upstream || outerProvider)) {
+      const via =
+        upstream && outerProvider && upstream.toLowerCase() !== outerProvider.toLowerCase()
+          ? `${upstream} (via ${outerProvider}${status ? `, HTTP ${status}` : ""})`
+          : `${upstream || outerProvider}${status ? ` (HTTP ${status})` : ""}`;
+      if (!extracted.includes(upstream || outerProvider)) {
+        message = `${via}: ${extracted}`;
+      }
+    }
+    return { code, title, message };
+  }
+
+  function renderTurnErrorNode(failureInfo, s, retryUserMsg) {
+    const { code, title, message } = failureInfo;
+    return el(
+      "div",
+      { class: "dsh-turn-error-row", role: "status" },
+      el("span", { class: "dsh-turn-error-dot", "aria-hidden": "true" }),
+      el(
+        "div",
+        { class: "dsh-turn-error-copy" },
+        el("span", { class: "dsh-turn-error-title" }, title),
+        el("span", { class: "dsh-turn-error-message" }, message),
+      ),
+      el(
+        "div",
+        { class: "dsh-turn-error-actions" },
+        code ? el("code", { class: "dsh-turn-error-code" }, code) : null,
+        retryUserMsg && !running(s)
+          ? button("Retry", () => forkMessage(s, retryUserMsg), "quiet")
+          : null,
+      ),
+    );
+  }
+
+  function renderModelRetryNode(chain, isSessionRunning, opened) {
+    const current = chain.attempts[chain.attempts.length - 1];
+    const active = isSessionRunning && current.retryState === "scheduled";
+    const key = "retry-" + chain.retryId;
+    const attemptKey = `${chain.retryId}:${current.retry}`;
+    if (!retryDeadlines.has(attemptKey)) {
+      retryDeadlines.set(attemptKey, Date.now() + (Number(current.delayMs) || 1000));
+    }
+    const deadline = retryDeadlines.get(attemptKey);
+    const scheduledSecs = Math.max(1, Math.ceil((Number(current.delayMs) || 1000) / 1000));
+    const remSecs = Math.max(1, Math.ceil((deadline - Date.now()) / 1000));
+    const secs = active ? remSecs : scheduledSecs;
+    const maxLabel = current.mode === "always" ? "∞" : String(current.maxRetries ?? 10);
+    const stateLabel = active
+      ? "Waiting to retry model request"
+      : current.retryState === "cancelled"
+        ? "Model request retry cancelled"
+        : "Retried model request";
+    const summaryText =
+      current.retryState === "cancelled"
+        ? `${stateLabel} (${current.retry}/${maxLabel})`
+        : `${stateLabel} (${current.retry}/${maxLabel}) · ${secs}s`;
+
+    const failMsg = current.failure?.message || "Transient provider failure";
+    return el(
+      "details",
+      {
+        class: "dsh-retry-row",
+        "data-disclosure": key,
+        ...(active ? { "data-active": "true" } : {}),
+        open: opened.has(key),
+      },
+      el(
+        "summary",
+        {},
+        el("span", { class: "cordis-phase-dot " + (active ? "loading" : "active") }),
+        el("span", { role: "status", "data-retry-countdown": active ? "true" : "false" }, summaryText),
+      ),
+      el(
+        "div",
+        { class: "dsh-retry-details" },
+        el(
+          "div",
+          {},
+          el("span", { class: "dsh-retry-detail-label" }, "Retry delay:"),
+          `${Math.round(Number(current.delayMs) || 0)}ms`,
+        ),
+        el(
+          "div",
+          {},
+          el("span", { class: "dsh-retry-detail-label" }, "Failure reason:"),
+          failMsg,
+        ),
+      ),
+    );
+  }
+
   function renderTranscript() {
     const target = document.getElementById("conversation");
     const s = session();
@@ -2499,10 +2666,52 @@
       if (d.assistantUuid) deliverablesByAssistant.set(d.assistantUuid, d);
     }
     let group = null,
-      turnKey = "initial";
+      turnKey = "initial",
+      lastUserMessage = null;
+    const retryChains = new Map();
+    for (const m of messages) {
+      if (m.type === "llm_retry" && m.retryId) {
+        let ch = retryChains.get(m.retryId);
+        if (!ch) {
+          ch = { retryId: m.retryId, attempts: [], rendered: false };
+          retryChains.set(m.retryId, ch);
+        }
+        ch.attempts.push({ ...m, retryState: m.retryState || "scheduled" });
+      } else if (m.type === "llm_retry_started" && m.retryId) {
+        const ch = retryChains.get(m.retryId);
+        const att = ch?.attempts.find((a) => a.retry === m.retry);
+        if (att) att.retryState = "started";
+      } else if (m.type === "llm_retry_cancelled" && m.retryId) {
+        const ch = retryChains.get(m.retryId);
+        const att = ch?.attempts.find((a) => a.retry === m.retry);
+        if (att) att.retryState = "cancelled";
+      }
+    }
+
     for (const [messageIndex, message] of messages.entries()) {
       if (message.type === "result" || message.type === "stream_event")
         continue;
+      if (message.type === "llm_retry_started" || message.type === "llm_retry_cancelled")
+        continue;
+      if (message.type === "llm_retry" && message.retryId) {
+        const chain = retryChains.get(message.retryId);
+        if (chain && !chain.rendered) {
+          chain.rendered = true;
+          group = null;
+          result.push(renderModelRetryNode(chain, running(s), opened));
+        }
+        continue;
+      }
+      if (message.type === "turn_error") {
+        group = null;
+        const parsedErr = parseCleanProviderFailure(
+          message.message || "",
+          message.code || null,
+          message.status || null,
+        );
+        result.push(renderTurnErrorNode(parsedErr, s, lastUserMessage));
+        continue;
+      }
       if (message.type === "compaction_checkpoint") {
         result.push(el("details", { class: "compaction-banner" },
           el("summary", {}, icon("spark", 13), `Context checkpoint · Condensed ${message.shadowedMessages || "earlier"} messages`),
@@ -2529,6 +2738,19 @@
       if ((texts || window.QuixiChat.transcriptAttachments(message).length) && role === "user") {
         group = null;
         turnKey = id || "message-" + messageIndex;
+        if (id) lastUserMessage = message;
+      }
+      // Upgrade any legacy saved `"Provider error: ..."` / `"Provider turn failed: ..."` assistant
+      // message into DeepSeek Harness's clean `TurnErrorItem` card instead of raw JSON prose!
+      if (
+        role === "assistant" &&
+        !tools.length &&
+        /^Provider (?:error|turn failed):/i.test(texts.trim())
+      ) {
+        group = null;
+        const parsedLegacy = parseCleanProviderFailure(texts);
+        result.push(renderTurnErrorNode(parsedLegacy, s, lastUserMessage));
+        continue;
       }
       const attachedFiles=window.QuixiChat.transcriptAttachments(message);
       if (savedThinking && role === "assistant") {
@@ -2723,6 +2945,18 @@
         ),
       );
     target.replaceChildren(...result);
+    clearInterval(retryCountdownTimer);
+    retryCountdownTimer = null;
+    if (running(s) && target.querySelector('[data-retry-countdown="true"]')) {
+      retryCountdownTimer = setInterval(() => {
+        if (!document.querySelector('[data-retry-countdown="true"]') || !running(session())) {
+          clearInterval(retryCountdownTimer);
+          retryCountdownTimer = null;
+          return;
+        }
+        renderTranscript();
+      }, 250);
+    }
     refreshConversationFind(false);
     if (nearBottom) target.scrollTop = target.scrollHeight;
     else target.scrollTop = oldScroll;

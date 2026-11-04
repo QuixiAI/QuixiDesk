@@ -3023,6 +3023,7 @@ pub struct ProviderToolTurn {
     pub provider_name: String,
     pub model_id: String,
     pub stream_error: Option<String>,
+    pub retry_after_ms: Option<u64>,
     pub usage: Option<ProviderTokenUsage>,
 }
 
@@ -3330,60 +3331,57 @@ impl ProviderManager {
             }
         }
 
-        let mut attempt = 0usize;
-        let resp = loop {
-            let mut req = http
-                .post(&url)
-                .header("User-Agent", concat!("quixi-desk/", env!("CARGO_PKG_VERSION")))
-                .header("content-type", "application/json")
-                .header("accept", "text/event-stream");
-            if !credential.is_empty() {
-                req = req.header("Authorization", format!("Bearer {}", credential));
-            }
-            if provider_id == "openrouter" {
-                req = req
-                    .header("HTTP-Referer", "https://quixidesk.local")
-                    .header("X-Title", "QuixiDesk");
-            }
-            match req.json(&payload).send() {
-                Ok(resp) => {
-                    let code = resp.status().as_u16();
-                    if (code == 429 || code == 529) && attempt < 2 {
-                        let wait_ms = resp
-                            .headers()
-                            .get("retry-after")
-                            .and_then(|v| v.to_str().ok())
-                            .and_then(|s| s.trim().parse::<u64>().ok())
-                            .map(|secs| (secs * 1000).min(5_000))
-                            .unwrap_or(400 * (attempt as u64 + 1));
-                        attempt += 1;
-                        std::thread::sleep(std::time::Duration::from_millis(wait_ms));
-                        continue;
-                    }
-                    break resp;
-                }
-                Err(err) => {
-                    return Some(tool_failure(
-                        format!("{provider_name} unreachable: {err}"),
-                        &provider_name,
-                        &model_id,
-                    ))
-                }
+        let mut req = http
+            .post(&url)
+            .header("User-Agent", concat!("quixi-desk/", env!("CARGO_PKG_VERSION")))
+            .header("content-type", "application/json")
+            .header("accept", "text/event-stream");
+        if !credential.is_empty() {
+            req = req.header("Authorization", format!("Bearer {}", credential));
+        }
+        if provider_id == "openrouter" {
+            req = req
+                .header("HTTP-Referer", "https://quixidesk.local")
+                .header("X-Title", "QuixiDesk");
+        }
+        let resp = match req.json(&payload).send() {
+            Ok(resp) => resp,
+            Err(err) => {
+                return Some(tool_failure(
+                    format!("{provider_name} unreachable: {err}"),
+                    &provider_name,
+                    &model_id,
+                ))
             }
         };
 
         if !resp.status().is_success() {
             let status = resp.status();
+            let retry_after_ms = resp
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.trim().parse::<u64>().ok())
+                .map(|secs| secs.saturating_mul(1000));
             let body = resp.text().unwrap_or_default();
-            return Some(tool_failure(format!("{provider_name} returned HTTP {} for model `{model_id}`: {}", status.as_u16(), body.chars().take(400).collect::<String>()), &provider_name, &model_id));
+            let mut turn_fail = tool_failure(
+                format!(
+                    "{provider_name} returned HTTP {} for model `{model_id}`: {}",
+                    status.as_u16(),
+                    body.chars().take(2048).collect::<String>()
+                ),
+                &provider_name,
+                &model_id,
+            );
+            turn_fail.retry_after_ms = retry_after_ms;
+            return Some(turn_fail);
         }
 
         let (text, thinking, reasoning_details, tool_calls, usage) = match parse_tool_stream(BufReader::new(resp), &mut on_chunk) {
             Ok(turn) => turn,
             Err(error) => {
-                let fallback_text = format!("Provider turn failed: {error}");
                 return Some(ProviderToolTurn {
-                    text: if text_or_empty(&fallback_text) { fallback_text } else { String::new() },
+                    text: String::new(),
                     thinking: String::new(),
                     reasoning_details: None,
                     tool_calls: Vec::new(),
@@ -3391,6 +3389,7 @@ impl ProviderManager {
                     provider_name,
                     model_id,
                     stream_error: Some(error),
+                    retry_after_ms: None,
                     usage: None,
                 });
             }
@@ -3411,13 +3410,10 @@ impl ProviderManager {
             provider_name,
             model_id,
             stream_error: None,
+            retry_after_ms: None,
             usage,
         })
     }
-}
-
-fn text_or_empty(s: &str) -> bool {
-    !s.is_empty()
 }
 
 fn parse_tool_stream<R: std::io::BufRead, F: FnMut(StreamChunk)>(reader: R, mut on_chunk: F)

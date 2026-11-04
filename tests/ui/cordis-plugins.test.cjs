@@ -519,3 +519,65 @@ test("Composer Effort & Agent Preset controls, Action Cards, Forge PR pill, Esc-
     f.close();
   }
 });
+
+test("ModelRetryItem and TurnErrorItem render DeepSeek Harness retry/error rows and upgrade legacy 503 JSON prose", async () => {
+  const f = await createCordisUiFixture();
+  const { w, sessions } = f;
+  try {
+    sessions[0].bufferedMessages.push(
+      {
+        type: "llm_retry",
+        uuid: "r-1",
+        retryId: "chain-503",
+        retry: 1,
+        maxRetries: 10,
+        mode: "normal",
+        delayMs: 1000,
+        retryState: "scheduled",
+        failure: {
+          code: "SERVER",
+          status: 503,
+          message: "Google AI Studio (via OpenRouter, HTTP 503): This model is currently experiencing high demand.",
+        },
+      },
+      {
+        type: "llm_retry_started",
+        uuid: "r-1-start",
+        retryId: "chain-503",
+        retry: 1,
+      },
+      {
+        type: "assistant",
+        uuid: "legacy-err-1",
+        message: {
+          role: "assistant",
+          content: [
+            {
+              type: "text",
+              text: 'Provider error: OpenRouter returned HTTP 503 for model `google/gemini-4-carbon-eap`: {"error":{"message":"Provider returned error","code":503,"metadata":{"raw":"{\\n \\"error\\": {\\n \\"code\\": 503,\\n \\"message\\": \\"This model is currently experiencing high demand. Spikes in demand are usually temporary.\\"\\n }\\n}","provider_name":"Google AI Studio"}},"user_id":"org_hidden"}',
+            },
+          ],
+        },
+      },
+    );
+
+    const kernelBtn = Array.from(w.document.querySelectorAll("button")).find((b) =>
+      b.textContent.includes("Kernel Audit"),
+    );
+    kernelBtn.click();
+    await wait();
+
+    const retryRow = w.document.querySelector(".dsh-retry-row");
+    assert.ok(retryRow, "ModelRetryItem disclosure row must render");
+    assert.ok(retryRow.textContent.includes("Retried model request (1/10)"));
+
+    const errorRow = w.document.querySelector(".dsh-turn-error-row");
+    assert.ok(errorRow, "TurnErrorItem card must replace legacy Provider error prose");
+    assert.ok(errorRow.textContent.includes("Upstream model temporarily unavailable"));
+    assert.ok(errorRow.textContent.includes("Google AI Studio (via OpenRouter, HTTP 503)"));
+    assert.ok(errorRow.textContent.includes("SERVER"));
+    assert.ok(!errorRow.textContent.includes("org_hidden"), "Raw JSON user_id noise must be stripped");
+  } finally {
+    f.close();
+  }
+});

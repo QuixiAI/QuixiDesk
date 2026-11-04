@@ -4,6 +4,7 @@
 //! Official Bundles, Experimental Bundles, and User/Creator Bundles in `$DATA_DIR/plugins/`.
 
 pub mod capabilities;
+pub mod llm_retry;
 pub mod seams;
 pub mod sqlite_fts;
 
@@ -1429,6 +1430,50 @@ impl Plugin for SpillPolicyPlugin {
     }
 }
 
+struct LlmRetryPlugin;
+impl Plugin for LlmRetryPlugin {
+    fn name(&self) -> &'static str {
+        "dsh-llm-retry"
+    }
+    fn provide(&self) -> &'static [&'static str] {
+        &["llmRetry"]
+    }
+    fn apply(&self, ctx: &Context, cfg: &Value) -> Result<(), CordisError> {
+        let retry_cfg = llm_retry::LlmRetryConfig {
+            mode: cfg
+                .get("mode")
+                .and_then(Value::as_str)
+                .filter(|m| matches!(*m, "normal" | "always"))
+                .unwrap_or("normal")
+                .to_owned(),
+            max_retries: cfg
+                .get("maxRetries")
+                .and_then(Value::as_u64)
+                .unwrap_or(10)
+                .min(100) as u32,
+            initial_delay_ms: cfg
+                .get("initialDelayMs")
+                .and_then(Value::as_u64)
+                .unwrap_or(1_000)
+                .clamp(10, 60_000),
+            max_delay_ms: cfg
+                .get("maxDelayMs")
+                .and_then(Value::as_u64)
+                .unwrap_or(15_000)
+                .clamp(50, 300_000),
+            jitter_ratio: cfg
+                .get("jitterRatio")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.15)
+                .clamp(0.0, 1.0),
+        };
+        ctx.provide(
+            llm_retry::LLM_RETRY_SERVICE,
+            Arc::new(llm_retry::LlmRetryService::new(retry_cfg)),
+        )
+    }
+}
+
 struct CreatorToolsPlugin;
 impl Plugin for CreatorToolsPlugin {
     fn name(&self) -> &'static str {
@@ -1766,6 +1811,7 @@ fn register_builtin_factories(runtime: &Arc<CordisRuntime>, data_dir: &Path) {
     runtime.register_factory(Arc::new(RepeatToolReminderPlugin));
     runtime.register_factory(Arc::new(ToolTimeoutPolicyPlugin));
     runtime.register_factory(Arc::new(SpillPolicyPlugin));
+    runtime.register_factory(Arc::new(LlmRetryPlugin));
     runtime.register_factory(Arc::new(CreatorToolsPlugin));
     runtime.register_factory(Arc::new(ActionCardsPlugin));
     runtime.register_factory(Arc::new(ForgePlugin));
@@ -1926,8 +1972,8 @@ pub fn builtin_bundles() -> Vec<BundleManifest> {
         BundleManifest {
             id: "quixi-loop-hygiene".into(),
             version: env!("CARGO_PKG_VERSION").into(),
-            title: "Loop Guards, Timeouts & Spill Hygiene".into(),
-            description: "Waterfall middlewares around tool execution: repeat-call streak reminders, cooperative per-tool timeouts, and disk spill truncation.".into(),
+            title: "Loop Guards, Model Retries & Spill Hygiene".into(),
+            description: "Exponential-backoff `llm-retry` (10 retries on HTTP 503/429/timeout/transport), repeat-call streak reminders, cooperative per-tool timeouts, and disk spill truncation.".into(),
             category: "Safety & Hygiene".into(),
             official: true,
             experimental: false,
@@ -1935,10 +1981,34 @@ pub fn builtin_bundles() -> Vec<BundleManifest> {
             default_enabled: true,
             locked: false,
             source: Some("built-in".into()),
-            readme_markdown: Some("# Loop Guards, Timeouts & Spill Hygiene\n\nInstalls `tools/execute` and `tools/post-execute` Cordis waterfalls that bound large outputs, enforce per-tool deadlines, and break identical-call loops.".into()),
+            readme_markdown: Some("# Loop Guards, Model Retries & Spill Hygiene\n\nProvides `dsh-llm-retry` (10 exponential-backoff retries with jitter and `Retry-After` support for transient provider HTTP 5xx / 429 / transport errors) alongside `tools/execute` and `tools/post-execute` Cordis waterfalls.".into()),
             client_script: None,
             declarative: Value::Null,
             rows: vec![
+                PluginRowSpec {
+                    id: "llm-retry".into(),
+                    plugin: "dsh-llm-retry".into(),
+                    title: "Model Request Retry Policy (llm-retry)".into(),
+                    description: "Retries transient HTTP 5xx, 429 rate-limit, timeout, transport, and empty-response failures up to 10 times with exponential backoff and live countdown.".into(),
+                    disabled: false,
+                    locked: false,
+                    isolate: BTreeMap::new(),
+                    config: json!({
+                        "mode": "normal",
+                        "maxRetries": 10,
+                        "initialDelayMs": 1000,
+                        "maxDelayMs": 15000,
+                        "jitterRatio": 0.15
+                    }),
+                    config_schema: Some(json!({
+                        "fields": [
+                            { "key": "mode", "label": "Retry mode (`normal` or `always`)", "type": "string" },
+                            { "key": "maxRetries", "label": "Max retries per step (default 10)", "type": "number", "min": 0, "max": 100 },
+                            { "key": "initialDelayMs", "label": "Initial backoff delay (ms)", "type": "number", "min": 100, "max": 30000 },
+                            { "key": "maxDelayMs", "label": "Maximum backoff delay (ms)", "type": "number", "min": 500, "max": 120000 }
+                        ]
+                    })),
+                },
                 PluginRowSpec {
                     id: "repeat-tool-reminder".into(),
                     plugin: "dsh-repeat-tool-reminder".into(),

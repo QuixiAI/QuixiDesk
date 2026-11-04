@@ -52,6 +52,7 @@ pub(crate) struct TurnRunTelemetry {
     pub rounds_used: usize,
     pub hit_max_rounds: bool,
     pub compactions_count: u32,
+    pub terminal_failure: Option<cordis_host::llm_retry::LlmFailure>,
 }
 
 pub type EventCallback = Arc<dyn Fn(&str, Value) + Send + Sync>;
@@ -3518,6 +3519,7 @@ impl QuixiEngine {
         let mut rounds_used = 0usize;
         let mut hit_max_rounds = false;
         let mut compactions_count = 0u32;
+        let mut terminal_failure: Option<cordis_host::llm_retry::LlmFailure> = None;
         let mut ever_mutated_in_turn = false;
         let mut non_mutating_rounds = 0usize;
         let mut creator_skills_loaded = false;
@@ -3690,65 +3692,203 @@ impl QuixiEngine {
                     return (error,final_model);
                 }
             }
-            let mut streamed_text = false;
-            let model_started = std::time::Instant::now();
-            let mut first_token_ms: Option<u64> = None;
-            let turn = match self.provider_manager.complete_turn_with_tools_for_provider_and_effort(
-                &messages,
-                &tools,
-                Some(&resolved_model),
-                None,
-                session_effort.as_deref(),
-                &mut |chunk| {
-                    if !cancelled.load(Ordering::SeqCst) {
-                        if first_token_ms.is_none() {
-                            first_token_ms = Some(model_started.elapsed().as_millis() as u64);
-                        }
-                        if let StreamChunk::Text(text) = &chunk {
-                            if !text.is_empty() {
-                                streamed_text = true;
-                                self.record_partial_reply(session_id, cancelled, text);
+            let mut step_retries: u32 = 0;
+            let mut retry_chain_id: Option<String> = None;
+            let mut terminal_step_failure: Option<cordis_host::llm_retry::LlmFailure> = None;
+
+            let (turn, streamed_text, model_elapsed_ms, step_ttft_ms) = loop {
+                let mut attempt_streamed = false;
+                let attempt_started = std::time::Instant::now();
+                let mut attempt_ttft: Option<u64> = None;
+
+                let maybe_turn = self
+                    .provider_manager
+                    .complete_turn_with_tools_for_provider_and_effort(
+                        &messages,
+                        &tools,
+                        Some(&resolved_model),
+                        None,
+                        session_effort.as_deref(),
+                        &mut |chunk| {
+                            if !cancelled.load(Ordering::SeqCst) {
+                                if attempt_ttft.is_none() {
+                                    attempt_ttft =
+                                        Some(attempt_started.elapsed().as_millis() as u64);
+                                }
+                                if let StreamChunk::Text(text) = &chunk {
+                                    if !text.is_empty() {
+                                        attempt_streamed = true;
+                                        self.record_partial_reply(session_id, cancelled, text);
+                                    }
+                                }
+                                on_chunk(chunk);
                             }
-                        }
-                        on_chunk(chunk);
-                    }
-                },
-            ) {
-                Some(turn) => turn,
-                None => {
+                        },
+                    );
+
+                let Some(cand_turn) = maybe_turn else {
                     self.active_turn_changes.lock().remove(session_id);
                     // Provider cannot do tool calling — use the classic path exactly once.
-                    if transcript.iter().any(|message|message.pointer("/message/content").and_then(Value::as_array).is_some_and(|blocks|blocks.iter().any(|block|block.get("attachment").is_some()))) {
-                        let error="This provider connection cannot accept attachments through the supported chat protocol. Your files and message are saved; choose another provider and retry.".to_string();
+                    if transcript.iter().any(|message| {
+                        message
+                            .pointer("/message/content")
+                            .and_then(Value::as_array)
+                            .is_some_and(|blocks| blocks.iter().any(|block| block.get("attachment").is_some()))
+                    }) {
+                        let error = "This provider connection cannot accept attachments through the supported chat protocol. Your files and message are saved; choose another provider and retry.".to_string();
                         on_chunk(StreamChunk::Text(error.clone()));
-                        return (error,final_model);
+                        return (error, final_model);
                     }
                     if used_tools {
-                        break;
+                        return (final_text, final_model);
                     }
                     let text_context = prompt_context::PromptContext {
-                        cwd, project: &project_instructions, workspace: &workspace_instructions,
-                        permission: &permission, capabilities: "", artifact: "", skills: "", tools_enabled: false,
+                        cwd,
+                        project: &project_instructions,
+                        workspace: &workspace_instructions,
+                        permission: &permission,
+                        capabilities: "",
+                        artifact: "",
+                        skills: "",
+                        tools_enabled: false,
                     };
-                    self.prompt_contexts.write().insert(session_id.to_owned(), text_context.diagnostics(
-                        round, &mode, vec![], "text-only request has no Artifact tool",
-                    ));
+                    self.prompt_contexts.write().insert(
+                        session_id.to_owned(),
+                        text_context.diagnostics(
+                            round,
+                            &mode,
+                            vec![],
+                            "text-only request has no Artifact tool",
+                        ),
+                    );
                     let (reply, model) = self.generate_reply_with_context(
                         prompt,
                         cwd,
                         history,
                         model_override,
                         &text_context.render(),
-                        &mut |chunk| { if !cancelled.load(Ordering::SeqCst) {if let StreamChunk::Text(text)=&chunk {self.record_partial_reply(session_id,cancelled,text);} on_chunk(chunk); } },
+                        &mut |chunk| {
+                            if !cancelled.load(Ordering::SeqCst) {
+                                if let StreamChunk::Text(text) = &chunk {
+                                    self.record_partial_reply(session_id, cancelled, text);
+                                }
+                                on_chunk(chunk);
+                            }
+                        },
                     );
                     return (reply, model);
-                }
-            };
+                };
 
-            if cancelled.load(Ordering::SeqCst) {
-                self.active_turn_changes.lock().remove(session_id);
-                return (String::new(), final_model);
-            }
+                if cancelled.load(Ordering::SeqCst) {
+                    self.active_turn_changes.lock().remove(session_id);
+                    return (String::new(), final_model);
+                }
+
+                let elapsed = attempt_started.elapsed().as_millis() as u64;
+                let ttft = attempt_ttft.unwrap_or(elapsed);
+
+                // Check if this attempt failed (or returned an empty degenerate completion) BEFORE
+                // streaming visible text, and let `dsh-llm-retry` schedule exponential backoff!
+                let is_empty_completion = cand_turn.stream_error.is_none()
+                    && !attempt_streamed
+                    && cand_turn.text.trim().is_empty()
+                    && cand_turn.thinking.trim().is_empty()
+                    && cand_turn.tool_calls.is_empty();
+
+                if !attempt_streamed && (cand_turn.stream_error.is_some() || is_empty_completion) {
+                    let raw_err = cand_turn
+                        .stream_error
+                        .as_deref()
+                        .unwrap_or("EMPTY_RESPONSE");
+                    let lower = raw_err.to_lowercase();
+                    let handled_by_outer_recovery = (overflow_retries == 0
+                        && (lower.contains("context_length_exceeded")
+                            || lower.contains("maximum context length")
+                            || lower.contains("prompt is too long")
+                            || lower.contains("too many tokens")
+                            || lower.contains("context window")))
+                        || (!defer_direct_mcp
+                            && !registry.schemas.is_empty()
+                            && (raw_err.contains("HTTP 400") || raw_err.contains("HTTP 422"))
+                            && ["tool", "schema", "parameter"]
+                                .iter()
+                                .any(|w| lower.contains(w)))
+                        || ((raw_err.contains("Invalid tool arguments")
+                            || raw_err.contains("Incomplete tool call")
+                            || raw_err.contains("finish_reason=Some(\"length\")"))
+                            && stream_retries < 2);
+
+                    if !handled_by_outer_recovery {
+                        let failure = cordis_host::llm_retry::normalize_llm_failure(
+                            raw_err,
+                            &cand_turn.provider_name,
+                            &cand_turn.model_id,
+                            cand_turn.retry_after_ms,
+                        );
+                        let retry_decision = self
+                            .cordis
+                            .runtime
+                            .root_context()
+                            .try_get(cordis_host::llm_retry::LLM_RETRY_SERVICE)
+                            .and_then(|svc| svc.decide_retry(&failure, step_retries));
+
+                        if let Some(sched) = retry_decision {
+                            step_retries = sched.retry;
+                            let rid = retry_chain_id
+                                .get_or_insert_with(|| format!("retry_{}", Uuid::new_v4()))
+                                .clone();
+                            if !session_id.trim().is_empty() {
+                                on_message(json!({
+                                    "type": "llm_retry",
+                                    "uuid": Uuid::new_v4().to_string(),
+                                    "retryId": rid,
+                                    "session_id": session_id,
+                                    "turn": turn_number,
+                                    "step": round,
+                                    "retry": sched.retry,
+                                    "maxRetries": sched.max_retries,
+                                    "mode": sched.mode,
+                                    "delayMs": sched.delay_ms,
+                                    "retryState": "scheduled",
+                                    "timestamp": Utc::now().to_rfc3339(),
+                                    "failure": failure,
+                                }));
+                            }
+                            if !cordis_host::llm_retry::LlmRetryService::cancellable_sleep(
+                                sched.delay_ms,
+                                cancelled,
+                            ) {
+                                if !session_id.trim().is_empty() {
+                                    on_message(json!({
+                                        "type": "llm_retry_cancelled",
+                                        "uuid": Uuid::new_v4().to_string(),
+                                        "retryId": rid,
+                                        "session_id": session_id,
+                                        "retry": sched.retry,
+                                        "timestamp": Utc::now().to_rfc3339(),
+                                    }));
+                                }
+                                self.active_turn_changes.lock().remove(session_id);
+                                return (String::new(), final_model);
+                            }
+                            if !session_id.trim().is_empty() {
+                                on_message(json!({
+                                    "type": "llm_retry_started",
+                                    "uuid": Uuid::new_v4().to_string(),
+                                    "retryId": rid,
+                                    "session_id": session_id,
+                                    "retry": sched.retry,
+                                    "timestamp": Utc::now().to_rfc3339(),
+                                }));
+                            }
+                            continue;
+                        }
+                        terminal_step_failure = Some(failure);
+                    }
+                }
+
+                break (cand_turn, attempt_streamed, elapsed, ttft);
+            };
             tracing::info!(
                 round,
                 tool_calls = turn.tool_calls.len(),
@@ -3783,9 +3923,6 @@ impl QuixiEngine {
                     self.emit_session_collab_updated(session_id);
                 }
             }
-
-            let model_elapsed_ms = model_started.elapsed().as_millis() as u64;
-            let step_ttft_ms = first_token_ms.unwrap_or(model_elapsed_ms);
 
             if let Some(ref err) = turn.stream_error {
                 let lower = err.to_lowercase();
@@ -3840,6 +3977,36 @@ impl QuixiEngine {
                     }));
                     continue;
                 }
+            }
+            if let Some(failure) = terminal_step_failure.or_else(|| {
+                turn.stream_error.as_ref().and_then(|err| {
+                    (!streamed_text && turn.text.trim().is_empty()).then(|| {
+                        cordis_host::llm_retry::normalize_llm_failure(
+                            err,
+                            &turn.provider_name,
+                            &turn.model_id,
+                            turn.retry_after_ms,
+                        )
+                    })
+                })
+            }) {
+                if !session_id.trim().is_empty() {
+                    on_message(json!({
+                        "type": "turn_error",
+                        "uuid": Uuid::new_v4().to_string(),
+                        "session_id": session_id,
+                        "turn": turn_number,
+                        "step": round,
+                        "code": failure.code,
+                        "status": failure.status,
+                        "provider": failure.provider,
+                        "model": failure.model,
+                        "message": failure.message,
+                        "timestamp": Utc::now().to_rfc3339(),
+                    }));
+                }
+                terminal_failure = Some(failure);
+                break;
             }
             stream_retries = 0;
 
@@ -4540,7 +4707,7 @@ impl QuixiEngine {
             }
         }
 
-        if final_text.trim().is_empty() {
+        if final_text.trim().is_empty() && terminal_failure.is_none() {
             final_text = "See the tool results above for what completed and any errors.".to_string();
         }
         if !session_id.trim().is_empty() {
@@ -4581,6 +4748,7 @@ impl QuixiEngine {
                     rounds_used,
                     hit_max_rounds,
                     compactions_count,
+                    terminal_failure,
                 },
             );
         }
@@ -5121,10 +5289,12 @@ impl QuixiEngine {
                     "usage": usage_json.clone()
                 }
             });
+            let has_terminal_failure = telemetry.terminal_failure.is_some();
+            let emit_final_assistant = !has_terminal_failure || !reply.trim().is_empty();
             let result_msg = json!({
                 "type": "result",
-                "subtype": if telemetry.hit_max_rounds { "max_rounds" } else { "success" },
-                "is_error": false,
+                "subtype": if has_terminal_failure { "error" } else if telemetry.hit_max_rounds { "max_rounds" } else { "success" },
+                "is_error": has_terminal_failure,
                 "duration_ms": duration_ms,
                 "duration_api_ms": duration_ms,
                 "num_turns": 1,
@@ -5143,7 +5313,7 @@ impl QuixiEngine {
                 let ws_changes = tracker.finish();
                 eng.collaboration.record_turn_deliverables(
                     &sid,
-                    Some(assistant_msg_uuid.clone()),
+                    emit_final_assistant.then(|| assistant_msg_uuid.clone()),
                     presented,
                     ws_changes,
                 );
@@ -5155,24 +5325,28 @@ impl QuixiEngine {
                 sess.is_running = false;
                 sess.model = final_model;
                 sess.last_activity_at = Utc::now().timestamp_millis() as u64;
-                sess.buffered_messages.push(assistant_msg.clone());
+                if emit_final_assistant {
+                    sess.buffered_messages.push(assistant_msg.clone());
+                }
                 sess.buffered_messages.push(result_msg.clone());
                 eng.persist_agent_session(sess);
             }
             drop(_submission);
             eng.clear_partial_reply(&sid,&cancelled);
 
-            eng.emit_eipc(
-                "quixi.web",
-                "LocalAgentModeSessions",
-                "onEvent",
-                json!({
-                    "type": "message",
-                    "sessionId": sid,
-                    "message": assistant_msg,
-                    "userMessageUuid": user_msg_uuid
-                }),
-            );
+            if emit_final_assistant {
+                eng.emit_eipc(
+                    "quixi.web",
+                    "LocalAgentModeSessions",
+                    "onEvent",
+                    json!({
+                        "type": "message",
+                        "sessionId": sid,
+                        "message": assistant_msg,
+                        "userMessageUuid": user_msg_uuid
+                    }),
+                );
+            }
             eng.emit_eipc(
                 "quixi.web",
                 "LocalAgentModeSessions",
@@ -5697,10 +5871,12 @@ impl QuixiEngine {
                     "usage": usage_json.clone()
                 }
             });
+            let has_terminal_failure = telemetry.terminal_failure.is_some();
+            let emit_final_assistant = !has_terminal_failure || !reply.trim().is_empty();
             let result_msg = json!({
                 "type": "result",
-                "subtype": if telemetry.hit_max_rounds { "max_rounds" } else { "success" },
-                "is_error": false,
+                "subtype": if has_terminal_failure { "error" } else if telemetry.hit_max_rounds { "max_rounds" } else { "success" },
+                "is_error": has_terminal_failure,
                 "duration_ms": duration_ms,
                 "duration_api_ms": duration_ms,
                 "num_turns": 1,
@@ -5719,7 +5895,7 @@ impl QuixiEngine {
                 let ws_changes = tracker.finish();
                 eng.collaboration.record_turn_deliverables(
                     &sid,
-                    Some(assistant_msg_uuid),
+                    emit_final_assistant.then_some(assistant_msg_uuid),
                     presented,
                     ws_changes,
                 );
@@ -5729,7 +5905,13 @@ impl QuixiEngine {
             let mut updated_sess = None;
             if let Some(sess) = eng.code_sessions.write().get_mut(&sid) {
                 if cancelled.load(Ordering::SeqCst) { return; }
-                eng.code_transcripts.write().entry(sid.clone()).or_default().extend([assistant_msg.clone(), result_msg.clone()]);
+                let mut tr_lock = eng.code_transcripts.write();
+                let list = tr_lock.entry(sid.clone()).or_default();
+                if emit_final_assistant {
+                    list.push(assistant_msg.clone());
+                }
+                list.push(result_msg.clone());
+                drop(tr_lock);
                 sess.turn_running = false;
                 sess.model = final_model;
                 sess.last_activity_at = Utc::now().timestamp_millis() as u64;
@@ -5740,16 +5922,18 @@ impl QuixiEngine {
 
             eng.clear_partial_reply(&sid,&cancelled);
             eng.emit_session_collab_updated(&sid);
-            eng.emit_eipc(
-                "quixi.web",
-                "LocalSessions",
-                "onEvent",
-                json!({
-                    "type": "message",
-                    "sessionId": sid,
-                    "message": assistant_msg
-                }),
-            );
+            if emit_final_assistant {
+                eng.emit_eipc(
+                    "quixi.web",
+                    "LocalSessions",
+                    "onEvent",
+                    json!({
+                        "type": "message",
+                        "sessionId": sid,
+                        "message": assistant_msg
+                    }),
+                );
+            }
             eng.emit_eipc(
                 "quixi.web",
                 "LocalSessions",
