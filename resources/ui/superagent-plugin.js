@@ -67,7 +67,7 @@
           const label = badgeCount > 0 ? `Superagent (${badgeCount})` : "Superagent";
           return navigationButton(
             label,
-            "spark",
+            "bot",
             () => navigate("superagent"),
             state.page === "superagent" ? "active" : "",
           );
@@ -301,7 +301,7 @@
                     activeTab = id;
                     draw(snap);
                   },
-                  activeTab === id ? "primary" : "quiet",
+                  activeTab === id ? "active" : "quiet",
                 ),
               ),
             );
@@ -358,7 +358,7 @@
                             renderStageBadge(el, t.stage),
                             el("div", { class: "grow" },
                               el("strong", {}, t.title),
-                              el("p", { class: "hint" }, t.question || t.latest_summary || t.origin_thread),
+                              el("p", { class: "hint" }, t.question || t.attention?.question || t.latestReport?.summary || t.latest_summary || t.originThread || t.origin_thread || "manual"),
                             ),
                             t.canRetry
                               ? button("Retry", async () => {
@@ -501,10 +501,10 @@
                           },
                             el("div", { class: "sa-row-between" },
                               renderStageBadge(el, t.stage),
-                              el("small", {}, t.short_name),
+                              el("small", {}, t.shortName || t.short_name || ""),
                             ),
                             el("strong", {}, t.title),
-                            el("small", { class: "hint" }, `${t.origin_thread} · ${t.mandate?.strength || "explicit"}`),
+                            el("small", { class: "hint" }, `${t.originThread || t.origin_thread || "manual"} · ${t.mandate?.strength || "explicit"}`),
                           ),
                         ),
                       ),
@@ -513,21 +513,21 @@
                             el("div", { class: "sa-row-between" },
                               el("div", {},
                                 el("h2", {}, activeTicket.title),
-                                el("p", { class: "hint" }, `${activeTicket.id} · Thread ${activeTicket.origin_thread} · Mandate: ${activeTicket.mandate?.strength} (Policy ${activeTicket.mandate?.policyVersion})`),
+                                el("p", { class: "hint" }, `${activeTicket.id} · Thread ${activeTicket.originThread || activeTicket.origin_thread || "manual"} · Mandate: ${activeTicket.mandate?.strength || "explicit"} (Policy ${activeTicket.mandate?.policyVersion || "default"})`),
                               ),
                               renderStageBadge(el, activeTicket.stage),
                             ),
-                            activeTicket.question
+                            (activeTicket.question || activeTicket.attention?.question)
                               ? el("div", { class: "sa-attention-callout" },
                                   el("strong", {}, "Question for Human Operator:"),
-                                  el("p", {}, activeTicket.question),
+                                  el("p", {}, activeTicket.question || activeTicket.attention?.question),
                                 )
                               : null,
                             el("div", { class: "row sa-ticket-actions" },
                               button("Dispatch Worker Turn", async () => {
                                 const r = await rpc("Superagent", "openWorkerSession", [activeTicket.id, true]);
                                 if (r?.error) return toast(r.error, true);
-                                toast(`Dispatched worker session for ${activeTicket.short_name}.`);
+                                toast(`Dispatched worker session for ${activeTicket.shortName || activeTicket.short_name || activeTicket.id}.`);
                                 await openSessionById(r.sessionId);
                               }, "primary"),
                               button("Open Worker Session", async () => {
@@ -581,7 +581,7 @@
                   button(label, () => {
                     settingsSubtab = id;
                     draw(snap);
-                  }, settingsSubtab === id ? "primary" : "quiet"),
+                  }, settingsSubtab === id ? "active" : "quiet"),
                 ),
               );
 

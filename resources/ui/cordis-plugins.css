@@ -70,26 +70,85 @@ html[data-theme="dark"] {
 
 .cordis-segmented {
   display: inline-flex;
-  padding: 3px;
-  border-radius: var(--dsw-radius-md);
+  padding: 2px;
+  border-radius: 10px;
   background: var(--cordis-surface-card);
   border: var(--dsh-hairline-width) solid var(--cordis-surface-stroke);
   gap: 2px;
+  width: fit-content;
 }
 
 .cordis-segmented button {
-  border-radius: var(--dsw-radius-sm);
-  padding: 5px 12px;
-  font-size: 12.5px;
+  border-radius: 8px;
+  padding: 4px 10px;
+  min-height: 24px;
+  font-size: 12px;
   border: 0;
   background: transparent;
+  color: var(--muted);
   cursor: pointer;
 }
 
-.cordis-segmented button.active {
-  background: rgba(65, 118, 230, 0.16);
-  color: var(--cordis-accent);
+.cordis-segmented button:hover {
+  color: var(--text);
+}
+
+.cordis-segmented button.active,
+.cordis-segmented button.primary {
+  background: rgba(76, 139, 245, 0.2);
+  color: var(--text);
   font-weight: 600;
+}
+
+/* Sleek macOS / iOS pill switches for Plugins Manager */
+input[type="checkbox"].cordis-switch {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 34px;
+  height: 20px;
+  min-width: 34px;
+  padding: 0;
+  border-radius: 999px;
+  background: rgba(139, 148, 165, 0.28);
+  border: 1px solid var(--cordis-surface-stroke);
+  position: relative;
+  cursor: pointer;
+  transition: background 150ms ease, border-color 150ms ease;
+}
+
+input[type="checkbox"].cordis-switch::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.32);
+  transition: transform 150ms ease;
+}
+
+input[type="checkbox"].cordis-switch:checked {
+  background: var(--accent);
+  border-color: transparent;
+}
+
+input[type="checkbox"].cordis-switch:checked::after {
+  transform: translateX(14px);
+}
+
+input[type="checkbox"].cordis-switch:disabled {
+  opacity: 0.42;
+  cursor: default;
+}
+
+.cordis-plugins-toolbar input {
+  flex: 1;
+  width: auto;
+  min-width: 200px;
+  height: 32px;
+  padding: 5px 12px;
 }
 
 .cordis-bundle-grid {
@@ -214,7 +273,9 @@ html[data-theme="dark"] {
 
 /* Trajectory & Statistics Views */
 .cordis-alt-view {
-  padding: 18px 20px;
+  flex: 1;
+  min-height: 0;
+  padding: 24px max(24px, calc((100% - 820px) / 2));
   display: flex;
   flex-direction: column;
   gap: 14px;
@@ -274,23 +335,45 @@ html[data-theme="dark"] {
 
 /* Composer Effort, Preset & Context Ring Footer */
 .cordis-composer-select {
-  font-size: 12px;
-  padding: 4px 8px;
-  border-radius: var(--dsw-radius-sm);
-  background: var(--cordis-surface-card);
-  border: var(--dsh-hairline-width) solid var(--cordis-surface-stroke);
-  color: inherit;
+  width: auto !important;
+  flex: 0 0 auto;
+  height: 28px;
+  font-size: 11.5px;
+  padding: 0 24px 0 8px !important;
+  border-radius: 8px;
+  background-color: var(--cordis-surface-card) !important;
+  border: var(--dsh-hairline-width) solid var(--cordis-surface-stroke) !important;
+  color: var(--muted) !important;
+}
+
+.cordis-composer-select:hover {
+  color: var(--text) !important;
+}
+
+#composer-footer-host {
+  display: flex;
+  align-items: center;
+  flex: 1;
+  min-width: 0;
 }
 
 .cordis-composer-footer {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  width: 100%;
   gap: 10px;
-  font-size: 11.5px;
-  opacity: 0.85;
-  padding: 2px 6px 0;
+  font-size: 11px;
+  opacity: 0.82;
+  padding: 0;
   font-variant-numeric: tabular-nums;
+}
+
+.cordis-composer-footer button {
+  font-size: 11px;
+  min-height: 20px;
+  padding: 2px 6px;
+  color: var(--muted);
 }
 
 .cordis-context-pill {
@@ -440,11 +523,11 @@ html[data-theme="dark"] {
   color: var(--cordis-err);
 }
 
-/* Layout polish: compact floating Turn Rail pill & non-crushing Composer Toolbar */
+/* Layout polish: vertical right-margin Turn Rail ladder & crisp single-row Composer Toolbar */
 .conversation .turn-outline-rail {
-  width: fit-content;
-  margin-left: auto;
-  padding: 3px 6px;
+  width: 34px;
+  flex-direction: column;
+  padding: 4px 3px;
   border-radius: 999px;
   background: var(--cordis-surface-card);
   border: var(--dsh-hairline-width) solid var(--cordis-surface-stroke);
@@ -452,13 +535,48 @@ html[data-theme="dark"] {
 }
 
 .composer-tools {
-  flex-wrap: wrap;
-  row-gap: 6px;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.composer-tools::-webkit-scrollbar {
+  display: none;
+}
+
+@container (max-width: 720px) {
+  .composer-tools {
+    flex-wrap: wrap;
+    row-gap: 6px;
+  }
+  .composer-tools .spacer {
+    flex-basis: 100%;
+    height: 0;
+  }
+  .composer-tools .model-control {
+    margin-left: auto;
+  }
+}
+
+@media (max-width: 860px) {
+  .composer-tools {
+    flex-wrap: wrap;
+    row-gap: 5px;
+  }
 }
 
 .composer-tools .model-control {
-  min-width: 110px;
-  max-width: 240px;
+  flex: 0 1 145px;
+  min-width: 72px;
+  max-width: 165px;
+  overflow: hidden;
+}
+
+.composer-tools .model-control > button {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  flex-shrink: 1;
 }
 
 /* =========================================================================
@@ -616,12 +734,12 @@ html[data-theme="dark"] {
  * `ui-superagent` 6-Tab Panel Styles
  * ========================================================================= */
 .sa-page {
-  padding: 22px 26px;
-  max-width: 1160px;
+  padding: 6px 4px 28px;
+  max-width: 1120px;
   margin: 0 auto;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 14px;
 }
 
 .sa-topbar,
@@ -629,7 +747,7 @@ html[data-theme="dark"] {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 10px;
   flex-wrap: wrap;
 }
 
@@ -637,17 +755,29 @@ html[data-theme="dark"] {
 .sa-top-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 7px;
   flex-wrap: wrap;
 }
 
 .sa-title-block h1 {
   margin: 0;
-  font-size: 20px;
+  font-size: 21px;
+  letter-spacing: -0.4px;
 }
 
 .sa-search-input {
-  min-width: 210px;
+  width: 205px !important;
+  min-width: 160px;
+  height: 30px;
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
+.sa-top-actions button {
+  height: 30px;
+  min-height: 30px;
+  padding: 0 10px;
+  font-size: 12px;
 }
 
 .sa-search-results {
@@ -706,6 +836,10 @@ html[data-theme="dark"] {
   gap: 10px;
 }
 
+.sa-section > button {
+  align-self: flex-start;
+}
+
 .sa-section h3 {
   margin: 0;
   font-size: 14.5px;
@@ -757,9 +891,11 @@ html[data-theme="dark"] {
 .sa-ticket-item {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  align-items: stretch;
+  justify-content: flex-start;
+  gap: 5px;
   text-align: left;
-  padding: 10px 12px;
+  padding: 11px 13px;
   border-radius: var(--dsw-radius-md, 10px);
   background: var(--cordis-surface-card);
   border: var(--dsh-hairline-width) solid var(--cordis-surface-stroke);
