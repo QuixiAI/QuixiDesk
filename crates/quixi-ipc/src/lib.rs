@@ -3483,6 +3483,37 @@ mod tests {
         assert!(!multi_ids.contains(&"claude-sonnet-4-6"));
 
         // 4. Verify `stream_event` emission sequence and model resolution during LocalAgentModeSessions
+        let sse_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let sse_url = format!("http://{}/v1", sse_listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            use std::io::{BufRead, BufReader, Write};
+            while let Ok((mut sock, _)) = sse_listener.accept() {
+                let mut rdr = BufReader::new(sock.try_clone().unwrap());
+                let mut line = String::new();
+                while rdr.read_line(&mut line).map(|n| n > 0).unwrap_or(false) {
+                    if line == "\r\n" {
+                        break;
+                    }
+                    line.clear();
+                }
+                let body = "data: {\"choices\":[{\"delta\":{\"content\":\"git status clean\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+                let _ = write!(
+                    sock,
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+            }
+        });
+        {
+            let mut st = engine.provider_manager.state.write();
+            for p in &mut st.providers {
+                if p.id == "openai" {
+                    p.auth_mode = "local".to_string();
+                    p.base_url = sse_url.clone();
+                }
+            }
+        }
         let events = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
         let events_clone = Arc::clone(&events);
         engine.set_emitter(Arc::new(move |ch: &str, payload: Value| {

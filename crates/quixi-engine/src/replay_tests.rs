@@ -818,3 +818,145 @@ fn creator_mode_cordis_inspect_action_cards_undo_restore_and_fork_numbering_work
     assert!(zip_name.ends_with(".zip"));
     assert_eq!(&zip_bytes[0..4], b"PK\x03\x04");
 }
+
+#[test]
+fn llm_retry_recovers_from_openrouter_503_spikes_and_emits_turn_error_not_assistant_prose() {
+    let (engine, eng_dir) = fixture_engine();
+    let work = eng_dir.path().join("retry_ws");
+    fs::create_dir_all(&work).unwrap();
+
+    // Configure fast 10ms backoff for deterministic test execution with maxRetries = 10:
+    engine
+        .cordis
+        .profile_store
+        .set_row_config(
+            "llm-retry",
+            json!({
+                "mode": "normal",
+                "maxRetries": 10,
+                "initialDelayMs": 10,
+                "maxDelayMs": 40,
+                "jitterRatio": 0.0
+            }),
+        )
+        .unwrap();
+    engine.cordis.reconcile_live().unwrap();
+
+    let sid = engine.start_agent_session(&json!({
+        "cwd": work.to_string_lossy(),
+        "userSelectedFolders": [work.to_string_lossy()],
+        "permissionMode": "auto",
+        "model": "gemini-carbon"
+    }));
+
+    let openrouter_503 = json!({
+        "error": {
+            "message": "Provider returned error",
+            "code": 503,
+            "metadata": {
+                "raw": "{\"error\":{\"code\":503,\"message\":\"This model is currently experiencing high demand. Spikes in demand are usually temporary.\",\"status\":\"UNAVAILABLE\"}}",
+                "provider_name": "Google AI Studio",
+                "is_byok": false
+            }
+        },
+        "user_id": "org_secret_should_be_stripped"
+    });
+
+    // Part A: 3 consecutive 503s followed by 200 OK -> automatically recovers!
+    let server = spawn_replay_server(
+        &engine,
+        "openrouter",
+        "gemini-carbon",
+        vec![
+            ReplayStep::http_err("503 Service Unavailable", openrouter_503.clone()),
+            ReplayStep::http_err("503 Service Unavailable", openrouter_503.clone()),
+            ReplayStep::http_err("503 Service Unavailable", openrouter_503.clone()),
+            ReplayStep::ok(vec![json!({
+                "choices": [{"delta": {"content": "Recovered after 3 spikes!"}, "finish_reason": "stop"}]
+            })]),
+        ],
+    );
+
+    let mut events_a = Vec::new();
+    let (reply_a, _) = engine.generate_reply_with_tools_streaming(
+        "Hello",
+        work.to_str().unwrap(),
+        &[],
+        Some("gemini-carbon"),
+        "auto",
+        &sid,
+        &AtomicBool::new(false),
+        |_| {},
+        |m| events_a.push(m),
+    );
+    server.join().unwrap();
+    assert_eq!(reply_a, "Recovered after 3 spikes!");
+    assert_eq!(
+        events_a.iter().filter(|m| m["type"] == "llm_retry").count(),
+        3
+    );
+    assert_eq!(
+        events_a
+            .iter()
+            .filter(|m| m["type"] == "llm_retry_started")
+            .count(),
+        3
+    );
+    assert!(!events_a.iter().any(|m| m["type"] == "turn_error"));
+
+    // Part B: Cap maxRetries = 2 and send 3 consecutive 503s -> emits clean `turn_error`, NO fake prose!
+    engine
+        .cordis
+        .profile_store
+        .set_row_config(
+            "llm-retry",
+            json!({
+                "mode": "normal",
+                "maxRetries": 2,
+                "initialDelayMs": 10,
+                "maxDelayMs": 30,
+                "jitterRatio": 0.0
+            }),
+        )
+        .unwrap();
+    engine.cordis.reconcile_live().unwrap();
+
+    let server_b = spawn_replay_server(
+        &engine,
+        "openrouter",
+        "gemini-carbon",
+        vec![
+            ReplayStep::http_err("503 Service Unavailable", openrouter_503.clone()),
+            ReplayStep::http_err("503 Service Unavailable", openrouter_503.clone()),
+            ReplayStep::http_err("503 Service Unavailable", openrouter_503),
+        ],
+    );
+
+    let mut events_b = Vec::new();
+    let (reply_b, _) = engine.generate_reply_with_tools_streaming(
+        "Try again",
+        work.to_str().unwrap(),
+        &[],
+        Some("gemini-carbon"),
+        "auto",
+        &sid,
+        &AtomicBool::new(false),
+        |_| {},
+        |m| events_b.push(m),
+    );
+    server_b.join().unwrap();
+    assert!(
+        reply_b.is_empty(),
+        "terminal failure must not emit fake assistant reply text, got: {reply_b}"
+    );
+    let err_ev = events_b
+        .iter()
+        .find(|m| m["type"] == "turn_error")
+        .expect("must emit durable turn_error event");
+    assert_eq!(err_ev["code"], "SERVER");
+    assert_eq!(err_ev["status"], 503);
+    let clean_msg = err_ev["message"].as_str().unwrap();
+    assert!(clean_msg.contains("Google AI Studio"));
+    assert!(clean_msg.contains("currently experiencing high demand"));
+    assert!(!clean_msg.contains("org_secret_should_be_stripped"));
+}

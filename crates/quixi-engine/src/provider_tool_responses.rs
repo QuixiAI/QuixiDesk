@@ -1,7 +1,8 @@
 // Responses wire adapter for the existing ChatGPT OAuth connection.
 fn tool_failure(error: String, provider: &str, model: &str) -> ProviderToolTurn {
     ProviderToolTurn {
-        text: format!("Provider error: {error}"),
+        // Never inject error diagnostics into assistant prose (`dsh-llm` boundary invariant).
+        text: String::new(),
         thinking: String::new(),
         reasoning_details: None,
         tool_calls: Vec::new(),
@@ -9,6 +10,7 @@ fn tool_failure(error: String, provider: &str, model: &str) -> ProviderToolTurn 
         provider_name: provider.into(),
         model_id: model.into(),
         stream_error: Some(error),
+        retry_after_ms: None,
         usage: None,
     }
 }
@@ -248,6 +250,7 @@ impl ProviderManager {
                 provider_name: "OpenAI".into(),
                 model_id: model.into(),
                 stream_error: None,
+                retry_after_ms: None,
                 usage,
             },
             Err(error) => tool_failure(error, "OpenAI", model),

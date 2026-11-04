@@ -50,7 +50,12 @@ pub(crate) fn provider_history(transcript: &[Value]) -> Vec<Value> {
                 msg
             };
             if calls.is_empty() {
-                if !text.trim().is_empty() { messages.push(attach_replay(json!({"role":"assistant","content":text}))); }
+                if !text.trim().is_empty()
+                    && !text.trim_start().starts_with("Provider error:")
+                    && !text.trim_start().starts_with("Provider turn failed:")
+                {
+                    messages.push(attach_replay(json!({"role":"assistant","content":text})));
+                }
             } else {
                 messages.push(attach_replay(json!({"role":"assistant","content":if text.is_empty(){Value::Null}else{json!(text)},"tool_calls":calls})));
                 for call in calls {
