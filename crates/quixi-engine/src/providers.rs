@@ -3285,7 +3285,7 @@ impl ProviderManager {
         // Internal replay/error metadata belongs to adapters, never the Chat Completions wire format,
         // while provider-required reasoning fields (`reasoning_content`, `reasoning_details`, Gemini
         // `extra_content.google.thought_signature`) are preserved when continuing on compatible routes.
-        let wire_messages: Vec<Value> = messages.iter().cloned().map(|mut message| {
+        let mut wire_messages: Vec<Value> = messages.iter().cloned().map(|mut message| {
             if let Some(object) = message.as_object_mut() {
                 object.remove("is_error");
                 object.remove("_responses_output");
@@ -3313,6 +3313,10 @@ impl ProviderManager {
             }
             message
         }).collect();
+
+        if is_gemini {
+            sanitize_gemini_unsigned_tool_history(&mut wire_messages);
+        }
 
         let mut payload = json!({
             "model": model_id,
@@ -3377,6 +3381,105 @@ fn extract_retry_after_from_aisdk_details(details: &str) -> Option<u64> {
     let after = &details[pos + marker.len()..];
     let end = after.find(']')?;
     after[..end].trim().parse::<u64>().ok().map(|s| s.saturating_mul(1000))
+}
+
+/// Google AI Studio (`gemini-3` / `gemini-4`, direct or via OpenRouter) rejects any historical
+/// `assistant` `tool_calls` message whose `functionCall` parts lack a Gemini `thought_signature`
+/// (carried either in OpenRouter `reasoning_details` `reasoning.encrypted` / `google-gemini-v1` or
+/// `tool_calls[].extra_content.google.thought_signature`). When a session switches models mid-stream
+/// or resumes turns recorded without signatures, degrade ONLY those unsigned historical tool turns
+/// into plain text `assistant`/`user` records while keeping signed Gemini tool turns 100% native.
+fn assistant_has_gemini_signature(msg: &Value) -> bool {
+    if msg
+        .get("reasoning_details")
+        .and_then(Value::as_array)
+        .is_some_and(|arr| {
+            arr.iter().any(|r| {
+                r.get("type").and_then(Value::as_str) == Some("reasoning.encrypted")
+                    || r.get("format").and_then(Value::as_str) == Some("google-gemini-v1")
+                    || r.get("signature").and_then(Value::as_str).is_some_and(|s| !s.is_empty())
+            })
+        })
+    {
+        return true;
+    }
+    msg.get("tool_calls")
+        .and_then(Value::as_array)
+        .is_some_and(|calls| {
+            calls.iter().any(|tc| {
+                tc.pointer("/extra_content/google/thought_signature")
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| !s.is_empty())
+            })
+        })
+}
+
+pub(crate) fn sanitize_gemini_unsigned_tool_history(wire_messages: &mut Vec<Value>) {
+    let mut degraded_ids: HashMap<String, String> = HashMap::new();
+    for msg in wire_messages.iter_mut() {
+        if msg.get("role").and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+        let has_calls = msg
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .is_some_and(|c| !c.is_empty());
+        if !has_calls || assistant_has_gemini_signature(msg) {
+            continue;
+        }
+        let mut lines: Vec<String> = Vec::new();
+        if let Some(existing) = msg.get("content").and_then(Value::as_str).filter(|s| !s.trim().is_empty()) {
+            lines.push(existing.to_string());
+        }
+        if let Some(calls) = msg.get("tool_calls").and_then(Value::as_array) {
+            for tc in calls {
+                let id = tc.get("id").and_then(Value::as_str).unwrap_or("call");
+                let name = tc.pointer("/function/name").and_then(Value::as_str).unwrap_or("tool");
+                let args = tc.pointer("/function/arguments").and_then(Value::as_str).unwrap_or("{}");
+                degraded_ids.insert(id.to_string(), name.to_string());
+                lines.push(format!("[Completed tool call {name} ({id}): {args}]"));
+            }
+        }
+        if let Some(obj) = msg.as_object_mut() {
+            obj.remove("tool_calls");
+            obj.remove("reasoning_details");
+            obj.insert("content".to_string(), json!(lines.join("\n")));
+        }
+    }
+    if degraded_ids.is_empty() {
+        return;
+    }
+    let mut rebuilt: Vec<Value> = Vec::with_capacity(wire_messages.len());
+    for msg in wire_messages.drain(..) {
+        if msg.get("role").and_then(Value::as_str) == Some("tool") {
+            let cid = msg.get("tool_call_id").and_then(Value::as_str).unwrap_or("");
+            if let Some(tname) = degraded_ids.get(cid) {
+                let out = msg.get("content").and_then(Value::as_str).unwrap_or("");
+                let formatted = format!("[Tool output for {tname} ({cid})]:\n{out}");
+                if let Some(prev) = rebuilt.last_mut().filter(|p| {
+                    p.get("role").and_then(Value::as_str) == Some("user")
+                        && p.get("_degraded_tool_result") == Some(&json!(true))
+                }) {
+                    let combined = format!("{}\n\n{formatted}", prev["content"].as_str().unwrap_or(""));
+                    prev["content"] = json!(combined);
+                } else {
+                    rebuilt.push(json!({
+                        "role": "user",
+                        "content": formatted,
+                        "_degraded_tool_result": true
+                    }));
+                }
+                continue;
+            }
+        }
+        rebuilt.push(msg);
+    }
+    for m in &mut rebuilt {
+        if let Some(obj) = m.as_object_mut() {
+            obj.remove("_degraded_tool_result");
+        }
+    }
+    *wire_messages = rebuilt;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3459,6 +3562,7 @@ fn complete_turn_via_aisdk<F: FnMut(StreamChunk)>(
     let rt = aisdk_tokio_runtime();
     let mut text = String::new();
     let mut thinking = String::new();
+    let mut reasoning_details: Vec<Value> = Vec::new();
     let mut finalized_calls: Vec<ProviderToolCall> = Vec::new();
     let mut usage_out: Option<ProviderTokenUsage> = None;
     let mut preparing_map: HashMap<String, (String, String, usize)> = HashMap::new();
@@ -3480,6 +3584,13 @@ fn complete_turn_via_aisdk<F: FnMut(StreamChunk)>(
                             if !th.is_empty() {
                                 thinking.push_str(&th);
                                 on_chunk(StreamChunk::Thinking(th));
+                            }
+                        }
+                        LanguageModelStreamChunkType::ReasoningDetails(details) => {
+                            if let Some(arr) = details.as_array() {
+                                reasoning_details.extend(arr.iter().cloned());
+                            } else if !details.is_null() {
+                                reasoning_details.push(details);
                             }
                         }
                         LanguageModelStreamChunkType::TextDelta(t) => {
@@ -3577,7 +3688,7 @@ fn complete_turn_via_aisdk<F: FnMut(StreamChunk)>(
             response_items: Vec::new(),
             text,
             thinking,
-            reasoning_details: None,
+            reasoning_details: (!reasoning_details.is_empty()).then_some(Value::Array(reasoning_details)),
             tool_calls: finalized_calls,
             provider_name: provider_name.to_owned(),
             model_id: model_id.to_owned(),

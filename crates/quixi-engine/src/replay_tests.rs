@@ -960,3 +960,188 @@ fn llm_retry_recovers_from_openrouter_503_spikes_and_emits_turn_error_not_assist
     assert!(clean_msg.contains("currently experiencing high demand"));
     assert!(!clean_msg.contains("org_secret_should_be_stripped"));
 }
+
+#[test]
+fn openrouter_gemini_preserves_reasoning_details_dedupes_call_ids_degrades_unsigned_history_and_retries_in_place() {
+    let (engine, eng_dir) = fixture_engine();
+    let work = eng_dir.path().join("gemini_ws");
+    fs::create_dir_all(&work).unwrap();
+    fs::write(work.join("note.txt"), "alpha\nbeta\n").unwrap();
+
+    let sid = engine.start_agent_session(&json!({
+        "cwd": work.to_string_lossy(),
+        "userSelectedFolders": [work.to_string_lossy()],
+        "permissionMode": "auto",
+        "model": "google/gemini-4-carbon-eap"
+    }));
+
+    // Seed an UNSIGNED historical tool call (e.g. from an earlier model or pre-fix session)
+    // PLUS a signed historical tool call with `call_539928` so we test:
+    // 1) Unsigned historical tool call degrades cleanly to text on Gemini routes (no HTTP 400!),
+    // 2) Reusing `call_539928` in the live turn is disambiguated on both `tool_calls` and `reasoning_details`,
+    // 3) Streamed `reasoning_details` (`google-gemini-v1`) from `aisdk` survives onto Round 2!
+    engine.agent_sessions.write().get_mut(&sid).unwrap().buffered_messages = vec![
+        json!({
+            "type": "user",
+            "uuid": "u-prev",
+            "message": { "role": "user", "content": [{ "type": "text", "text": "Earlier check" }] }
+        }),
+        json!({
+            "type": "assistant",
+            "uuid": "a-unsigned",
+            "message": {
+                "role": "assistant",
+                "content": [{ "type": "tool_use", "id": "call_unsigned_1", "name": "ListDirectory", "input": { "path": "." } }]
+            }
+        }),
+        json!({
+            "type": "user",
+            "uuid": "u-unsigned-res",
+            "message": {
+                "role": "user",
+                "content": [{ "type": "tool_result", "tool_use_id": "call_unsigned_1", "content": "note.txt", "is_error": false }]
+            }
+        }),
+        json!({
+            "type": "assistant",
+            "uuid": "a-signed-prev",
+            "message": {
+                "role": "assistant",
+                "content": [{ "type": "tool_use", "id": "call_539928", "name": "ListDirectory", "input": { "path": "." } }],
+                "reasoning_details": [{
+                    "type": "reasoning.encrypted",
+                    "format": "google-gemini-v1",
+                    "id": "call_539928",
+                    "index": 0,
+                    "data": "SIG_PREV_539928"
+                }]
+            }
+        }),
+        json!({
+            "type": "user",
+            "uuid": "u-signed-res",
+            "message": {
+                "role": "user",
+                "content": [{ "type": "tool_result", "tool_use_id": "call_539928", "content": "note.txt", "is_error": false }]
+            }
+        }),
+    ];
+
+    let server = spawn_replay_server(
+        &engine,
+        "openrouter",
+        "google/gemini-4-carbon-eap",
+        vec![
+            // Step 1: OpenRouter streams `reasoning_details` AND collides on `call_539928`!
+            ReplayStep::ok(vec![json!({
+                "choices": [{
+                    "delta": {
+                        "reasoning": "Reading note.txt now.",
+                        "reasoning_details": [{
+                            "type": "reasoning.encrypted",
+                            "format": "google-gemini-v1",
+                            "id": "call_539928",
+                            "index": 0,
+                            "data": "SIG_LIVE_ROUND_1"
+                        }],
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": "call_539928",
+                            "type": "function",
+                            "function": {
+                                "name": "Read",
+                                "arguments": json!({ "file_path": "note.txt" }).to_string()
+                            }
+                        }]
+                    },
+                    "finish_reason": "tool_calls"
+                }]
+            })]),
+            // Step 2: Receives wire_messages with preserved `reasoning_details`, unique call IDs, and zero unsigned `tool_calls`!
+            ReplayStep::ok(vec![json!({
+                "choices": [{
+                    "delta": { "content": "Read note.txt cleanly!" },
+                    "finish_reason": "stop"
+                }]
+            })]),
+        ],
+    );
+
+    let mut emitted = Vec::new();
+    let (reply, _) = engine.generate_reply_with_tools_streaming(
+        "Read note.txt",
+        work.to_str().unwrap(),
+        &[],
+        Some("google/gemini-4-carbon-eap"),
+        "auto",
+        &sid,
+        &AtomicBool::new(false),
+        |_| {},
+        |m| emitted.push(m),
+    );
+    let requests = server.join().unwrap();
+    assert_eq!(reply, "Read note.txt cleanly!");
+    assert_eq!(requests.len(), 2);
+
+    let round2_msgs = requests[1]["messages"].as_array().unwrap();
+    // 1. ZERO assistant messages in `round2_msgs` may have `tool_calls` without `reasoning_details`!
+    let mut seen_wire_ids = std::collections::HashSet::new();
+    let mut signed_tc_msgs = 0usize;
+    for m in round2_msgs {
+        if let Some(tcs) = m.get("tool_calls").and_then(Value::as_array) {
+            signed_tc_msgs += 1;
+            let rds = m["reasoning_details"]
+                .as_array()
+                .expect("every Gemini assistant tool_calls message on OpenRouter must carry reasoning_details");
+            assert!(!rds.is_empty());
+            for tc in tcs {
+                let id = tc["id"].as_str().unwrap().to_string();
+                assert!(
+                    seen_wire_ids.insert(id.clone()),
+                    "duplicate tool_call id `{id}` leaked onto OpenRouter wire!"
+                );
+            }
+        }
+    }
+    assert_eq!(signed_tc_msgs, 2, "both the signed historical turn and live round-1 turn must remain native tool_calls");
+
+    // 2. Also verify `retry_failed_turn` resumes IN PLACE without creating a `· branch` session:
+    let session_count_before = engine.agent_sessions.read().len();
+    {
+        let mut guard = engine.agent_sessions.write();
+        let sess = guard.get_mut(&sid).unwrap();
+        sess.buffered_messages.extend(emitted.into_iter().filter(|m| m["type"] != "result"));
+        sess.buffered_messages.push(json!({
+            "type": "turn_error",
+            "uuid": "err-1",
+            "code": "BAD_REQUEST",
+            "status": 400,
+            "message": "Simulated transient error"
+        }));
+    }
+    let server_retry = spawn_replay_server(
+        &engine,
+        "openrouter",
+        "google/gemini-4-carbon-eap",
+        vec![ReplayStep::ok(vec![json!({
+            "choices": [{ "delta": { "content": "Resumed in place!" }, "finish_reason": "stop" }]
+        })])],
+    );
+    let retry_res = engine.retry_failed_turn(&sid, None).unwrap();
+    assert_eq!(retry_res["retried"], true);
+    assert_eq!(retry_res["sessionId"], sid);
+    assert_eq!(
+        engine.agent_sessions.read().len(),
+        session_count_before,
+        "retry_failed_turn must NOT clone a `· branch` session"
+    );
+    for _ in 0..100 {
+        if !engine.agent_sessions.read()[&sid].is_running {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    server_retry.join().unwrap();
+    let final_msgs = &engine.agent_sessions.read()[&sid].buffered_messages;
+    assert!(!final_msgs.iter().any(|m| m["type"] == "turn_error"), "resolved turn_error must be removed");
+}
