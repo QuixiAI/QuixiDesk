@@ -56,19 +56,98 @@
       }
       async function openArtifact(id) {
         const a=checked(await api("/api/quixi/artifacts/"+encodeURIComponent(id)));
-        const frame=el("iframe",{class:"preview-frame",sandbox:"allow-scripts allow-forms",referrerpolicy:"no-referrer",title:a.name||a.title||"Artifact preview"});frame.srcdoc=a.html||"";
+        const bridgeScript=`<script>(()=>{const post=(t,d)=>{try{parent.postMessage({type:t,...d},"*");}catch{}};window.quixi=Object.freeze({ask(prompt){post("quixi:artifact-ask",{prompt:String(prompt??"")});}});for(const lvl of["log","info","warn","error"]){const orig=console[lvl]?.bind(console);console[lvl]=(...args)=>{post("quixi:artifact-console",{level:lvl,text:args.map(x=>{try{return typeof x==="string"?x:JSON.stringify(x);}catch{return String(x);}}).join(" ")});orig?.(...args);};}window.addEventListener("error",e=>post("quixi:artifact-console",{level:"error",text:String(e.message||e.error||"Runtime error")}));window.addEventListener("unhandledrejection",e=>post("quixi:artifact-console",{level:"error",text:"Unhandled rejection: "+String(e.reason?.message||e.reason||"unknown")}));window.addEventListener("message",e=>{if(e.data?.type==="quixi:artifact-theme"){const t=e.data.theme;if(t==="light"||t==="dark"){document.documentElement.dataset.theme=t;document.documentElement.style.colorScheme=t;}else{delete document.documentElement.dataset.theme;document.documentElement.style.colorScheme="";}}});})();</script>`;
+        const frame=el("iframe",{class:"preview-frame",sandbox:"allow-scripts allow-forms",referrerpolicy:"no-referrer",title:a.name||a.title||"Artifact preview"});
+        const buildSrcdoc=()=>bridgeScript+(a.html||"");
+        frame.srcdoc=buildSrcdoc();
+        const frameStage=el("div",{class:"artifact-stage",dataset:{viewport:"desktop",surface:"auto"}},frame);
         const source=el("pre",{class:"code-preview artifact-source",hidden:true},a.html||"");
+        const consoleList=el("div",{class:"artifact-console-list"},el("p",{class:"hint"},"No console output or runtime errors recorded."));
+        const consolePane=el("div",{class:"artifact-console-pane",hidden:true});
+        const consoleEntries=[];
         const status=el("p",{class:"hint",role:"status"},`Revision ${a.revision||1} · Saved ${date(a.updatedAt)}`);
-        let busy=false;
+        let busy=false,isPinned=Boolean(a.isStarred);
         const run=async(fn)=>{if(busy)return;busy=true;try{await fn();}catch(e){status.textContent=e.message;status.className="error-text";}finally{busy=false;}};
+        const continueWithPrompt=async(seedPrompt)=>{
+          await c.loadSessions();
+          let s=state.sessions.find(s=>s.sessionId===a.createdBySessionId);
+          d.close();
+          if(s)navigate("chat",s.sessionId);else{state.project=null;state.folder="";navigate("new");}
+          const prompt=document.getElementById("prompt");
+          if(prompt){
+            prompt.value=seedPrompt||`I want to improve the artifact “${a.name||a.title}” (id: ${a.id}). `;
+            if(!s)state.attachments.push({name:(a.name||"artifact")+".html",text:a.html||""});
+            c.saveDraft();c.renderChips();prompt.focus();
+          }
+        };
+        const pinBtn=button(isPinned?"Pinned":"Pin",()=>run(async()=>{isPinned=!isPinned;checked(await rpc("CoworkArtifacts","setArtifactStarred",[id,isPinned]));pinBtn.replaceChildren(icon("star"),isPinned?"Pinned":"Pin");pinBtn.classList.toggle("active",isPinned);await c.loadArtifacts();}),"quiet"+(isPinned?" active":""),"star");
+        pinBtn.setAttribute("aria-label","Toggle pin artifact");
+        const reloadBtn=button("Reload",()=>{consoleEntries.length=0;renderConsole();frame.srcdoc=buildSrcdoc();},"quiet","refresh");
         const actions=el("div",{class:"artifact-actions"},
           button("Export HTML",()=>run(async()=>{const folder=await rpc("FileSystem","browseFolder",["Export artifact to folder"]);if(!folder)return;const result=checked(await rpc("CoworkArtifacts","exportArtifactHtml",[id,folder]));status.textContent="Saved to "+result.path;status.className="hint";toast("Artifact exported.");}),"primary"),
           button("Copy HTML",()=>run(async()=>{await copy(a.html||"");toast("HTML copied.");}),"quiet"),
+          button("Print / PDF",()=>run(async()=>{const w=window.open("","_blank","noopener,noreferrer");if(w){w.document.open();w.document.write(a.html||"");w.document.close();w.focus();w.print();}else if(frame.contentWindow?.print){frame.contentWindow.print();}}),"quiet"),
+          reloadBtn,
+          pinBtn,
           button("Duplicate",()=>run(async()=>{const created=checked(await rpc("CoworkArtifacts","duplicateArtifact",[id]));await c.loadArtifacts();d.close();await openArtifact(created.id);}),"quiet"),
-          button("Continue in chat",()=>run(async()=>{await c.loadSessions();let s=state.sessions.find(s=>s.sessionId===a.createdBySessionId);d.close();if(s)navigate("chat",s.sessionId);else{state.project=null;state.folder="";navigate("new");}const prompt=document.getElementById("prompt");if(prompt){prompt.value=`I want to improve the artifact “${a.name||a.title}” (id: ${a.id}). `;if(!s)state.attachments.push({name:(a.name||"artifact")+".html",text:a.html||""});c.saveDraft();c.renderChips();prompt.focus();}}),"quiet","arrow"));
-        const tabs=el("div",{class:"toolbar"},button("Preview",()=>{frame.hidden=false;source.hidden=true;},"quiet"),button("Source",()=>{frame.hidden=true;source.hidden=false;},"quiet"));
+          button("Continue in chat",()=>run(()=>continueWithPrompt()),"quiet","arrow"));
+        let viewMode="preview",vp="desktop",surfaceTheme="auto";
+        const previewBtn=button("Preview",()=>{viewMode="preview";frameStage.hidden=false;source.hidden=true;consolePane.hidden=true;syncToolbar();},"quiet active");
+        const sourceBtn=button("Source",()=>{viewMode="source";frameStage.hidden=true;source.hidden=false;consolePane.hidden=true;syncToolbar();},"quiet");
+        const consoleBtn=button("Console",()=>{viewMode="console";frameStage.hidden=true;source.hidden=true;consolePane.hidden=false;syncToolbar();},"quiet");
+        consoleBtn.setAttribute("aria-label","Artifact console");
+        function renderConsole(){
+          const errs=consoleEntries.filter(e=>e.level==="error");
+          consoleBtn.textContent=errs.length?`Console (${errs.length} err)`:consoleEntries.length?`Console (${consoleEntries.length})`:"Console";
+          consoleBtn.classList.toggle("has-error",errs.length>0);
+          if(!consoleEntries.length){
+            consoleList.replaceChildren(el("p",{class:"hint"},"No console output or runtime errors recorded."));
+          }else{
+            consoleList.replaceChildren(...consoleEntries.map(item=>el("div",{class:"artifact-console-row is-"+item.level},el("span",{class:"cordis-badge"},item.level),el("code",{},item.text))));
+          }
+          const fixBar=errs.length?el("div",{class:"toolbar"},button("Fix error in chat",()=>continueWithPrompt(`Please fix this runtime error in artifact “${a.name||a.title}” (id: ${a.id}):\n${errs.map(e=>e.text).join("\n")}`),"primary"),button("Clear console",()=>{consoleEntries.length=0;renderConsole();},"quiet")):el("div",{class:"toolbar"},button("Clear console",()=>{consoleEntries.length=0;renderConsole();},"quiet"));
+          consolePane.replaceChildren(fixBar,consoleList);
+        }
+        renderConsole();
+        const vpBtns=[["desktop","Desktop"],["tablet","Tablet"],["mobile","Mobile"]].map(([k,lbl])=>{
+          const b=button(lbl,()=>{vp=k;frameStage.dataset.viewport=k;syncToolbar();},"quiet"+(k==="desktop"?" active":""));
+          b.dataset.vp=k;
+          return b;
+        });
+        const vpGroup=el("div",{class:"cordis-segmented artifact-vp-switch"},...vpBtns);
+        const surfBtns=[["auto","Auto"],["light","Light"],["dark","Dark"]].map(([k,lbl])=>{
+          const b=button(lbl,()=>{surfaceTheme=k;frameStage.dataset.surface=k;try{frame.contentWindow?.postMessage({type:"quixi:artifact-theme",theme:k},"*");}catch{}syncToolbar();},"quiet"+(k==="auto"?" active":""));
+          b.dataset.surface=k;
+          return b;
+        });
+        const surfGroup=el("div",{class:"cordis-segmented artifact-surface-switch","aria-label":"Artifact preview theme"},...surfBtns);
+        function syncToolbar(){
+          previewBtn.classList.toggle("active",viewMode==="preview");
+          sourceBtn.classList.toggle("active",viewMode==="source");
+          consoleBtn.classList.toggle("active",viewMode==="console");
+          vpGroup.hidden=viewMode!=="preview";
+          surfGroup.hidden=viewMode!=="preview";
+          for(const b of vpBtns)b.classList.toggle("active",b.dataset.vp===vp);
+          for(const b of surfBtns)b.classList.toggle("active",b.dataset.surface===surfaceTheme);
+        }
+        const tabs=el("div",{class:"toolbar artifact-studio-bar"},el("div",{class:"cordis-segmented"},previewBtn,sourceBtn,consoleBtn),vpGroup,surfGroup);
         if(a.versions?.length){const revisions=select([["","Earlier revisions…"],...a.versions.slice().reverse().map(v=>[String(v.revision),`Revision ${v.revision} · ${date(v.savedAt)}`])],"",null,{"aria-label":"Artifact revision"});tabs.append(revisions,button("Restore revision",()=>run(async()=>{if(!revisions.value)throw Error("Choose a revision first.");checked(await rpc("CoworkArtifacts","restoreArtifactVersion",[id,Number(revisions.value)]));await c.loadArtifacts();d.close();openArtifact(id);}),"quiet"));}
-        const d=dialog(a.name||a.title||"Artifact",[actions,status,tabs,frame,source],{wide:true});
+        const d=dialog(a.name||a.title||"Artifact",[actions,status,tabs,frameStage,source,consolePane],{wide:true});
+        const onMsg=(ev)=>{
+          if(ev.source&&frame.contentWindow&&ev.source!==frame.contentWindow)return;
+          if(ev.data?.type==="quixi:artifact-ask"){
+            const q=String(ev.data.prompt||"").trim().slice(0,4000);
+            if(q)void continueWithPrompt(`Regarding artifact “${a.name||a.title}” (id: ${a.id}): ${q}`);
+          }else if(ev.data?.type==="quixi:artifact-console"){
+            if(consoleEntries.length<200){
+              consoleEntries.push({level:String(ev.data.level||"log"),text:String(ev.data.text||"").slice(0,2000)});
+              renderConsole();
+            }
+          }
+        };
+        window.addEventListener("message",onMsg);
+        d.addEventListener("close",()=>window.removeEventListener("message",onMsg),{once:true});
+        syncToolbar();
       }
       function artifactsPage(host){
         const input=el("input",{type:"search",placeholder:"Find an artifact","aria-label":"Search artifacts"});

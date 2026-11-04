@@ -725,6 +725,14 @@ impl EipcRouter {
                 self.engine.emit_session_collab_updated(sid);
                 self.engine.collaboration.client_view(sid)
             }
+            ("LocalAgentModeSessions" | "LocalSessions", "setOutputStyle") => {
+                let sid = args.first().and_then(Value::as_str).unwrap_or("");
+                let style = args.get(1).and_then(Value::as_str).unwrap_or("normal");
+                let custom = args.get(2).and_then(Value::as_str);
+                self.engine.collaboration.set_output_style(sid, style, custom);
+                self.engine.emit_session_collab_updated(sid);
+                self.engine.collaboration.client_view(sid)
+            }
             ("LocalAgentModeSessions" | "LocalSessions", "forkSessionBranch") => {
                 let sid = args.first().and_then(Value::as_str).unwrap_or("");
                 let upto = args.get(1).and_then(Value::as_str).filter(|s| !s.is_empty());
@@ -1180,6 +1188,14 @@ impl EipcRouter {
                     self.engine.guide_pending_message(sid, uuid)
                 };
                 result.unwrap_or_else(|error| json!({"error":error}))
+            }
+            ("LocalAgentModeSessions" | "LocalSessions", "reorderPendingMessage") => {
+                let sid = args.first().and_then(Value::as_str).unwrap_or_default();
+                let uuid = args.get(1).and_then(Value::as_str).unwrap_or_default();
+                let dir = args.get(2).and_then(Value::as_str).unwrap_or("top");
+                self.engine
+                    .reorder_pending_message(sid, uuid, dir)
+                    .unwrap_or_else(|error| json!({"error":error}))
             }
             ("LocalAgentModeSessions" | "LocalSessions", "sendMessageV2") => {
                 let sid=args.first().and_then(Value::as_str).unwrap_or_default();
@@ -3644,15 +3660,23 @@ mod tests {
         let sse_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let sse_url = format!("http://{}/v1", sse_listener.local_addr().unwrap());
         std::thread::spawn(move || {
-            use std::io::{BufRead, BufReader, Write};
+            use std::io::{BufRead, BufReader, Read, Write};
             while let Ok((mut sock, _)) = sse_listener.accept() {
                 let mut rdr = BufReader::new(sock.try_clone().unwrap());
+                let mut content_len = 0usize;
                 let mut line = String::new();
                 while rdr.read_line(&mut line).map(|n| n > 0).unwrap_or(false) {
-                    if line == "\r\n" {
+                    if line == "\r\n" || line == "\n" {
                         break;
                     }
+                    if let Some(rest) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        content_len = rest.trim().parse().unwrap_or(0);
+                    }
                     line.clear();
+                }
+                if content_len > 0 {
+                    let mut req_body = vec![0u8; content_len];
+                    let _ = rdr.read_exact(&mut req_body);
                 }
                 let body = "data: {\"choices\":[{\"delta\":{\"content\":\"git status clean\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
                 let _ = write!(

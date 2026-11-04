@@ -321,6 +321,259 @@ impl QuixiEngine {
     }
 }
 
+pub(crate) fn parse_unified_diff_hunks(diff_text: &str) -> (Vec<Value>, usize, usize, bool) {
+    let mut hunks: Vec<Value> = Vec::new();
+    let mut cur_header: Option<String> = None;
+    let mut cur_old_start = 0usize;
+    let mut cur_new_start = 0usize;
+    let mut old_ln = 0usize;
+    let mut new_ln = 0usize;
+    let mut cur_lines: Vec<Value> = Vec::new();
+    let mut added = 0usize;
+    let mut deleted = 0usize;
+    let mut binary = false;
+    let mut total_emitted = 0usize;
+
+    for line in diff_text.lines() {
+        if line.starts_with("Binary files ") || line.starts_with("GIT binary patch") {
+            binary = true;
+            continue;
+        }
+        if let Some(after) = line.strip_prefix("@@ -") {
+            if let Some(hdr) = cur_header.take() {
+                hunks.push(json!({
+                    "header": hdr,
+                    "oldStart": cur_old_start,
+                    "newStart": cur_new_start,
+                    "lines": std::mem::take(&mut cur_lines),
+                }));
+            }
+            let (old_s, new_s) = after
+                .split_once(" @@")
+                .map(|(coords, _)| {
+                    let mut parts = coords.split_whitespace();
+                    let o = parts
+                        .next()
+                        .unwrap_or("1")
+                        .split(',')
+                        .next()
+                        .and_then(|n| n.parse::<usize>().ok())
+                        .unwrap_or(1);
+                    let n = parts
+                        .next()
+                        .unwrap_or("+1")
+                        .trim_start_matches('+')
+                        .split(',')
+                        .next()
+                        .and_then(|v| v.parse::<usize>().ok())
+                        .unwrap_or(1);
+                    (o, n)
+                })
+                .unwrap_or((1, 1));
+            cur_header = Some(line.to_string());
+            cur_old_start = old_s;
+            cur_new_start = new_s;
+            old_ln = old_s;
+            new_ln = new_s;
+            continue;
+        }
+        if cur_header.is_none() || total_emitted >= 5000 {
+            continue;
+        }
+        if line.starts_with("\\ No newline at end of file") {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix('+') {
+            added += 1;
+            total_emitted += 1;
+            cur_lines.push(json!({
+                "kind": "add",
+                "oldLine": Value::Null,
+                "newLine": new_ln,
+                "text": rest,
+            }));
+            new_ln += 1;
+        } else if let Some(rest) = line.strip_prefix('-') {
+            deleted += 1;
+            total_emitted += 1;
+            cur_lines.push(json!({
+                "kind": "del",
+                "oldLine": old_ln,
+                "newLine": Value::Null,
+                "text": rest,
+            }));
+            old_ln += 1;
+        } else {
+            let rest = line.strip_prefix(' ').unwrap_or(line);
+            total_emitted += 1;
+            cur_lines.push(json!({
+                "kind": "ctx",
+                "oldLine": old_ln,
+                "newLine": new_ln,
+                "text": rest,
+            }));
+            old_ln += 1;
+            new_ln += 1;
+        }
+    }
+    if let Some(hdr) = cur_header.take() {
+        hunks.push(json!({
+            "header": hdr,
+            "oldStart": cur_old_start,
+            "newStart": cur_new_start,
+            "lines": cur_lines,
+        }));
+    }
+    (hunks, added, deleted, binary)
+}
+
+pub(crate) fn workspace_file_diff(cwd_raw: &str, path_raw: &str) -> Result<Value, String> {
+    let cwd = Path::new(cwd_raw.trim())
+        .canonicalize()
+        .map_err(|_| "Workspace folder is unavailable.".to_string())?;
+    if !cwd.is_dir() {
+        return Err("Workspace folder is not a directory.".into());
+    }
+    let raw_trimmed = path_raw.trim();
+    if raw_trimmed.is_empty() {
+        return Err("File path is required.".into());
+    }
+    let candidate = if Path::new(raw_trimmed).is_absolute() {
+        PathBuf::from(raw_trimmed)
+    } else {
+        cwd.join(raw_trimmed)
+    };
+    // Reject `..` segments or symlinks escaping the workspace root.
+    if candidate
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err("Relative parent traversal is not permitted.".into());
+    }
+    if let Ok(canon) = candidate.canonicalize() {
+        if !canon.starts_with(&cwd) {
+            return Err("File lies outside the workspace root.".into());
+        }
+    } else if !candidate.starts_with(&cwd) {
+        return Err("File lies outside the workspace root.".into());
+    }
+    let rel = candidate
+        .strip_prefix(&cwd)
+        .unwrap_or(Path::new(raw_trimmed))
+        .to_string_lossy()
+        .to_string();
+
+    let run_git = |args: &[&str]| -> Option<String> {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&cwd)
+            .args(args)
+            .output()
+            .ok()?;
+        if !out.status.success() && out.stdout.is_empty() {
+            return None;
+        }
+        Some(String::from_utf8_lossy(&out.stdout).into_owned())
+    };
+
+    let diff_out = run_git(&["diff", "HEAD", "--unified=3", "--", &rel])
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| run_git(&["diff", "--unified=3", "--", &rel]).filter(|s| !s.trim().is_empty()));
+
+    if let Some(raw_diff) = diff_out {
+        let (hunks, added, deleted, binary) = parse_unified_diff_hunks(&raw_diff);
+        let status = if !candidate.exists() {
+            "deleted"
+        } else {
+            "modified"
+        };
+        return Ok(json!({
+            "path": candidate.to_string_lossy(),
+            "relativePath": rel,
+            "status": status,
+            "added": added,
+            "deleted": deleted,
+            "binary": binary,
+            "hunks": hunks,
+        }));
+    }
+
+    // Check if it is an untracked new file inside the workspace:
+    if let Ok(meta) = fs::symlink_metadata(&candidate) {
+        if meta.file_type().is_symlink() {
+            return Err("Symlink targets cannot be previewed.".into());
+        }
+        if meta.is_file() {
+            if meta.len() > 512_000 {
+                return Ok(json!({
+                    "path": candidate.to_string_lossy(),
+                    "relativePath": rel,
+                    "status": "untracked",
+                    "added": 0,
+                    "deleted": 0,
+                    "binary": false,
+                    "oversized": true,
+                    "hunks": [],
+                }));
+            }
+            return match fs::read(&candidate) {
+                Ok(bytes) => match String::from_utf8(bytes) {
+                    Ok(contents) => {
+                        let lines: Vec<Value> = contents
+                            .lines()
+                            .take(5000)
+                            .enumerate()
+                            .map(|(i, text)| {
+                                json!({
+                                    "kind": "add",
+                                    "oldLine": Value::Null,
+                                    "newLine": i + 1,
+                                    "text": text,
+                                })
+                            })
+                            .collect();
+                        let count = lines.len();
+                        Ok(json!({
+                            "path": candidate.to_string_lossy(),
+                            "relativePath": rel,
+                            "status": "added",
+                            "added": count,
+                            "deleted": 0,
+                            "binary": false,
+                            "hunks": [{
+                                "header": format!("@@ -0,0 +1,{count} @@"),
+                                "oldStart": 0,
+                                "newStart": 1,
+                                "lines": lines,
+                            }],
+                        }))
+                    }
+                    Err(_) => Ok(json!({
+                        "path": candidate.to_string_lossy(),
+                        "relativePath": rel,
+                        "status": "added",
+                        "added": 0,
+                        "deleted": 0,
+                        "binary": true,
+                        "hunks": [],
+                    })),
+                },
+                Err(e) => Err(format!("Cannot read file: {e}")),
+            };
+        }
+    }
+
+    Ok(json!({
+        "path": candidate.to_string_lossy(),
+        "relativePath": rel,
+        "status": "clean",
+        "added": 0,
+        "deleted": 0,
+        "binary": false,
+        "hunks": [],
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -521,5 +774,24 @@ mod tests {
             matching_snippet("grocery", "Grocery", &[]),
             Some("Grocery".into())
         );
+    }
+
+    #[test]
+    fn workspace_diff_parses_hunks_and_rejects_outside_paths() {
+        let sample = "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -10,3 +10,4 @@ fn demo()\n keep\n-old\n+new1\n+new2\n";
+        let (hunks, added, deleted, binary) = parse_unified_diff_hunks(sample);
+        assert!(!binary);
+        assert_eq!(added, 2);
+        assert_eq!(deleted, 1);
+        assert_eq!(hunks.len(), 1);
+        assert_eq!(hunks[0]["lines"].as_array().unwrap().len(), 4);
+
+        let root = std::env::temp_dir().join(format!("quixi-diff-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("note.txt"), "alpha\nbeta\n").unwrap();
+        let added_diff = workspace_file_diff(root.to_str().unwrap(), "note.txt").unwrap();
+        assert_eq!(added_diff["added"], 2);
+        assert!(workspace_file_diff(root.to_str().unwrap(), "../outside.txt").is_err());
+        let _ = fs::remove_dir_all(root);
     }
 }
