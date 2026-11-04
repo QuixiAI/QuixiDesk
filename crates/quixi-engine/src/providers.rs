@@ -37,6 +37,15 @@ const XAI_DEVICE_GRANT_TYPE: &str = "urn:ietf:params:oauth:grant-type:device_cod
 pub enum StreamChunk {
     Text(String),
     Thinking(String),
+    /// Emitted in real time via `aisdk`'s `ToolCallStart` / `ToolCallDelta` stream events
+    /// while the model is generating a tool call (before `finish_reason = tool_calls`),
+    /// so the UI immediately displays what action is being prepared!
+    ToolCallPreparing {
+        id: String,
+        name: String,
+        arguments_preview: String,
+        total_bytes: usize,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3188,8 +3197,6 @@ impl ProviderManager {
     where
         F: FnMut(StreamChunk),
     {
-        use std::io::BufReader;
-
         let prepared = crate::tool_media::provider_messages(messages);
         let messages = prepared.as_slice();
         let resolved_model = self.resolve_connected_model(model_override);
@@ -3250,7 +3257,7 @@ impl ProviderManager {
         if api_format == "anthropic" && !base_url.is_empty() {
             return Some(self.complete_anthropic_tool_turn_with_effort(messages,tools,&model_id,&base_url,&credential,&provider_name,effort_override,&mut on_chunk));
         }
-        if api_format != "openai" {
+        if !matches!(api_format.as_str(), "openai" | "google") {
             return Some(tool_failure(format!("Tool calling is not supported for provider format {api_format}"), &provider_name, &model_id));
         }
         if base_url.is_empty()
@@ -3260,19 +3267,12 @@ impl ProviderManager {
             return None;
         }
 
-        let http = reqwest::blocking::Client::builder()
-            .connect_timeout(std::time::Duration::from_secs(15))
-            .timeout(std::time::Duration::from_secs(600))
-            .build()
-            .ok()?;
-
         tracing::info!(
             provider = %provider_id,
             model = %model_id,
             messages = messages.len(),
-            "agent tools: streaming tool-calling turn"
+            "agent tools: streaming tool-calling turn via aisdk"
         );
-        let url = format!("{}/chat/completions", base_url);
 
         let is_deepseek = provider_id == "deepseek" || model_id.contains("deepseek");
         let is_gemini = provider_id == "gemini" || model_id.contains("gemini");
@@ -3331,90 +3331,276 @@ impl ProviderManager {
             }
         }
 
-        let mut req = http
-            .post(&url)
-            .header("User-Agent", concat!("quixi-desk/", env!("CARGO_PKG_VERSION")))
-            .header("content-type", "application/json")
-            .header("accept", "text/event-stream");
-        if !credential.is_empty() {
-            req = req.header("Authorization", format!("Bearer {}", credential));
-        }
-        if provider_id == "openrouter" {
-            req = req
-                .header("HTTP-Referer", "https://quixidesk.local")
-                .header("X-Title", "QuixiDesk");
-        }
-        let resp = match req.json(&payload).send() {
-            Ok(resp) => resp,
-            Err(err) => {
-                return Some(tool_failure(
-                    format!("{provider_name} unreachable: {err}"),
-                    &provider_name,
-                    &model_id,
-                ))
-            }
-        };
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let retry_after_ms = resp
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.trim().parse::<u64>().ok())
-                .map(|secs| secs.saturating_mul(1000));
-            let body = resp.text().unwrap_or_default();
-            let mut turn_fail = tool_failure(
-                format!(
-                    "{provider_name} returned HTTP {} for model `{model_id}`: {}",
-                    status.as_u16(),
-                    body.chars().take(2048).collect::<String>()
-                ),
-                &provider_name,
-                &model_id,
-            );
-            turn_fail.retry_after_ms = retry_after_ms;
-            return Some(turn_fail);
-        }
-
-        let (text, thinking, reasoning_details, tool_calls, usage) = match parse_tool_stream(BufReader::new(resp), &mut on_chunk) {
-            Ok(turn) => turn,
-            Err(error) => {
-                return Some(ProviderToolTurn {
-                    text: String::new(),
-                    thinking: String::new(),
-                    reasoning_details: None,
-                    tool_calls: Vec::new(),
-                    response_items: Vec::new(),
-                    provider_name,
-                    model_id,
-                    stream_error: Some(error),
-                    retry_after_ms: None,
-                    usage: None,
-                });
-            }
-        };
-
-        tracing::info!(
-            text_chars = text.len(),
-            thinking_chars = thinking.len(),
-            tool_calls = tool_calls.len(),
-            "agent tools: turn finished"
+        let mut extra_headers = HashMap::new();
+        extra_headers.insert(
+            "User-Agent".to_string(),
+            concat!("quixi-desk/", env!("CARGO_PKG_VERSION")).to_string(),
         );
-        Some(ProviderToolTurn {
+        if provider_id == "openrouter" {
+            extra_headers.insert(
+                "HTTP-Referer".to_string(),
+                "https://quixidesk.local".to_string(),
+            );
+            extra_headers.insert("X-Title".to_string(), "QuixiDesk".to_string());
+        }
+
+        // Route native Google Gemini API (`api_format == "google"` or `generativelanguage.googleapis.com` without `/openai`)
+        // or OpenAI-family / DeepSeek / OpenRouter / xAI / Groq / Mistral / TogetherAI / Fireworks / Moonshot / ZhipuAI
+        // through `lazy-hq/aisdk` (`v0.5.2`) `LanguageModel::stream_text`!
+        Some(complete_turn_via_aisdk(
+            &provider_id,
+            &provider_name,
+            &model_id,
+            &base_url,
+            &credential,
+            &payload,
+            extra_headers,
+            &mut on_chunk,
+        ))
+    }
+}
+
+fn aisdk_tokio_runtime() -> &'static tokio::runtime::Runtime {
+    static RT: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    RT.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("aisdk tokio runtime")
+    })
+}
+
+fn extract_retry_after_from_aisdk_details(details: &str) -> Option<u64> {
+    let marker = "[retry-after=";
+    let pos = details.find(marker)?;
+    let after = &details[pos + marker.len()..];
+    let end = after.find(']')?;
+    after[..end].trim().parse::<u64>().ok().map(|s| s.saturating_mul(1000))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn complete_turn_via_aisdk<F: FnMut(StreamChunk)>(
+    provider_id: &str,
+    provider_name: &str,
+    model_id: &str,
+    base_url: &str,
+    credential: &str,
+    wire_payload: &Value,
+    extra_headers: HashMap<String, String>,
+    on_chunk: &mut F,
+) -> ProviderToolTurn {
+    use aisdk::core::language_model::{
+        LanguageModel, LanguageModelResponseContentType, LanguageModelStreamChunk,
+        LanguageModelStreamChunkType,
+    };
+    use aisdk::core::{DynamicModel, LanguageModelRequest, Message};
+    use futures_util::StreamExt;
+
+    let api_key = if credential.trim().is_empty() {
+        "local-keyless"
+    } else {
+        credential
+    };
+
+    let build_and_open_stream = async {
+        // Construct options via `aisdk`'s `LanguageModelRequest::builder()` and invoke `LanguageModel::stream_text`
+        // directly so QuixiDesk's Cordis `ToolsService` + `dsh-llm-retry` owns tool execution & step recovery!
+        macro_rules! open_compat_stream {
+            ($ProviderTy:path) => {{
+                type Prov = $ProviderTy;
+                let mut model = Prov::builder()
+                    .provider_name(provider_name)
+                    .base_url(base_url)
+                    .api_key(api_key)
+                    .model_name(model_id)
+                    .build()
+                    .map_err(|e| format!("{provider_name} configuration error: {e}"))?;
+                let req = LanguageModelRequest::builder()
+                    .model(model.clone())
+                    .messages(vec![Message::User(String::new().into())])
+                    .headers(extra_headers.clone())
+                    .body(wire_payload.clone())
+                    .build();
+                let opts = (*req).clone();
+                model
+                    .stream_text(opts)
+                    .await
+                    .map_err(|e| format!("{provider_name} request error for model `{model_id}`: {e}"))
+            }};
+        }
+
+        match provider_id {
+            "deepseek" => open_compat_stream!(aisdk::providers::deepseek::Deepseek<DynamicModel>),
+            "openrouter" => open_compat_stream!(aisdk::providers::openrouter::Openrouter<DynamicModel>),
+            "xai" => open_compat_stream!(aisdk::providers::xai::XAI<DynamicModel>),
+            "groq" => open_compat_stream!(aisdk::providers::groq::Groq<DynamicModel>),
+            "mistral" => open_compat_stream!(aisdk::providers::mistral::Mistral<DynamicModel>),
+            "together" | "togetherai" => {
+                open_compat_stream!(aisdk::providers::togetherai::TogetherAI<DynamicModel>)
+            }
+            "fireworks" | "fireworks-ai" => {
+                open_compat_stream!(aisdk::providers::fireworks_ai::FireworksAi<DynamicModel>)
+            }
+            "opencode" => open_compat_stream!(aisdk::providers::opencode::Opencode<DynamicModel>),
+            "moonshot" | "kimi" => {
+                open_compat_stream!(aisdk::providers::moonshotai::Moonshotai<DynamicModel>)
+            }
+            "siliconflow" => {
+                open_compat_stream!(aisdk::providers::siliconflow::Siliconflow<DynamicModel>)
+            }
+            "zhipu" | "zhipuai" | "glm" => {
+                open_compat_stream!(aisdk::providers::zhipuai::Zhipuai<DynamicModel>)
+            }
+            _ => open_compat_stream!(aisdk::providers::openai_compatible::OpenAICompatible<DynamicModel>),
+        }
+    };
+
+    let rt = aisdk_tokio_runtime();
+    let mut text = String::new();
+    let mut thinking = String::new();
+    let mut finalized_calls: Vec<ProviderToolCall> = Vec::new();
+    let mut usage_out: Option<ProviderTokenUsage> = None;
+    let mut preparing_map: HashMap<String, (String, String, usize)> = HashMap::new();
+    let mut saw_done = false;
+
+    let stream_outcome: Result<(), (String, Option<u64>)> = rt.block_on(async {
+        let mut stream = build_and_open_stream.await.map_err(|e| (e, None))?;
+        while let Some(batch_res) = stream.next().await {
+            let chunks = batch_res.map_err(|err| {
+                let msg = format!("{provider_name} returned error for model `{model_id}`: {err}");
+                let ra = extract_retry_after_from_aisdk_details(&msg);
+                (msg, ra)
+            })?;
+
+            for chunk in chunks {
+                match chunk {
+                    LanguageModelStreamChunk::Delta(delta_ty) => match delta_ty {
+                        LanguageModelStreamChunkType::ReasoningDelta(th) => {
+                            if !th.is_empty() {
+                                thinking.push_str(&th);
+                                on_chunk(StreamChunk::Thinking(th));
+                            }
+                        }
+                        LanguageModelStreamChunkType::TextDelta(t) => {
+                            if !t.is_empty() {
+                                text.push_str(&t);
+                                on_chunk(StreamChunk::Text(t));
+                            }
+                        }
+                        LanguageModelStreamChunkType::ToolCallStart(details) => {
+                            preparing_map
+                                .insert(details.id.clone(), (details.name.clone(), String::new(), 0));
+                            on_chunk(StreamChunk::ToolCallPreparing {
+                                id: details.id,
+                                name: details.name,
+                                arguments_preview: String::new(),
+                                total_bytes: 0,
+                            });
+                        }
+                        LanguageModelStreamChunkType::ToolCallDelta { id, delta } => {
+                            let entry = preparing_map
+                                .entry(id.clone())
+                                .or_insert_with(|| (String::new(), String::new(), 0));
+                            entry.1.push_str(&delta);
+                            let total_bytes = entry.1.len();
+                            let prev_notified = entry.2;
+                            // Notify promptly on early field names and every 96 bytes thereafter:
+                            if total_bytes <= 256 || total_bytes.saturating_sub(prev_notified) >= 96 {
+                                entry.2 = total_bytes;
+                                let preview: String = entry.1.chars().take(512).collect();
+                                on_chunk(StreamChunk::ToolCallPreparing {
+                                    id,
+                                    name: entry.0.clone(),
+                                    arguments_preview: preview,
+                                    total_bytes,
+                                });
+                            }
+                        }
+                        LanguageModelStreamChunkType::Failed(reason) => {
+                            return Err((reason, None));
+                        }
+                        LanguageModelStreamChunkType::Incomplete(reason) => {
+                            return Err((
+                                format!("Provider stream did not complete (finish_reason=Some(\"{reason}\"))"),
+                                None,
+                            ));
+                        }
+                        _ => {}
+                    },
+                    LanguageModelStreamChunk::Done(assistant_msg) => {
+                        saw_done = true;
+                        if let Some(u) = assistant_msg.usage {
+                            let cached = u.cached_tokens.unwrap_or(0) as u64;
+                            let raw_in = u.input_tokens.unwrap_or(0) as u64;
+                            usage_out = Some(ProviderTokenUsage {
+                                input_tokens: raw_in.saturating_sub(cached),
+                                output_tokens: u.output_tokens.unwrap_or(0) as u64,
+                                cache_read_tokens: cached,
+                                cache_write_tokens: 0,
+                                reasoning_tokens: u.reasoning_tokens.unwrap_or(0) as u64,
+                            });
+                        }
+                        if let LanguageModelResponseContentType::ToolCall(tc_info) =
+                            assistant_msg.content
+                        {
+                            crate::agent_tools::validate_provider_input(
+                                &tc_info.tool.name,
+                                &tc_info.input,
+                            )
+                            .map_err(|e| (format!("Invalid tool arguments: {e}"), None))?;
+                            let ext_val = (*tc_info.extensions.get::<Value>()).clone();
+                            let extra_content = (!ext_val.is_null()).then_some(ext_val);
+                            finalized_calls.push(ProviderToolCall {
+                                id: tc_info.tool.id,
+                                name: tc_info.tool.name,
+                                arguments: serde_json::to_string(&tc_info.input)
+                                    .unwrap_or_else(|_| "{}".to_string()),
+                                extra_content,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        if !saw_done {
+            return Err((
+                "Provider stream ended before finish_reason; Incomplete tool call or truncated stream.".into(),
+                None,
+            ));
+        }
+        Ok(())
+    });
+
+    match stream_outcome {
+        Ok(()) => ProviderToolTurn {
             response_items: Vec::new(),
             text,
             thinking,
-            reasoning_details,
-            tool_calls,
-            provider_name,
-            model_id,
+            reasoning_details: None,
+            tool_calls: finalized_calls,
+            provider_name: provider_name.to_owned(),
+            model_id: model_id.to_owned(),
             stream_error: None,
             retry_after_ms: None,
-            usage,
-        })
+            usage: usage_out,
+        },
+        Err((error, retry_after_ms)) => ProviderToolTurn {
+            response_items: Vec::new(),
+            text: String::new(),
+            thinking: String::new(),
+            reasoning_details: None,
+            tool_calls: Vec::new(),
+            provider_name: provider_name.to_owned(),
+            model_id: model_id.to_owned(),
+            stream_error: Some(error),
+            retry_after_ms,
+            usage: None,
+        },
     }
 }
+
+#[allow(dead_code)]
 
 fn parse_tool_stream<R: std::io::BufRead, F: FnMut(StreamChunk)>(reader: R, mut on_chunk: F)
     -> Result<(String, String, Option<Value>, Vec<ProviderToolCall>, Option<ProviderTokenUsage>), String> {
@@ -3710,6 +3896,7 @@ mod streaming_chunk_tests {
             |chunk| match chunk {
                 StreamChunk::Thinking(t) => thinking.push_str(&t),
                 StreamChunk::Text(t) => text.push_str(&t),
+                StreamChunk::ToolCallPreparing { .. } => {}
             },
         );
         server.join().ok();

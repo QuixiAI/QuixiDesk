@@ -1,0 +1,27 @@
+[package]
+name = "aisdk-macros"
+version = "0.3.0"
+edition = "2024"
+license = "MIT"
+description = "Procedural macros for the aisdk library"
+homepage = "https://github.com/lazy-hq/aisdk"
+repository = "https://github.com/lazy-hq/aisdk"
+readme = "README.md"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1.0.66"
+syn = { version = "2.0", features = ["full", "parsing", "extra-traits"] }
+quote = "1.0"
+
+[dev-dependencies]
+serde_json = "1.0"
+futures = "0.3"
+tokio = { version = "1.46.1", features = ["full"]}
+aisdk = {path = "..", version = "0.5.2" }
+
+[[test]]
+name = "test_tools"
+path = "tests/test_tools.rs"

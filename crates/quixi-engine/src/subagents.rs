@@ -358,6 +358,16 @@ impl QuixiEngine {
                 if cancelled.load(Ordering::SeqCst) {
                     return Err("Stopped with parent task.".into());
                 }
+                self.emit_turn_activity(
+                    session,
+                    json!({
+                        "phase": "subagent_step",
+                        "agentId": id,
+                        "title": title,
+                        "round": round + 1,
+                        "status": "thinking",
+                    }),
+                );
                 if !reuse_parent_system {
                     let current_mode = self.current_permission_mode(session, mode);
                     messages[0]["content"] = json!(format!(

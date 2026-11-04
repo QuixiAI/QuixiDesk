@@ -460,3 +460,352 @@ html[data-theme="dark"] {
   min-width: 110px;
   max-width: 240px;
 }
+
+/* =========================================================================
+ * DeepSeek Harness Live Agentic Loop Visibility (`ui-chat` parity)
+ * ========================================================================= */
+@keyframes dshShimmerSweep {
+  0% { opacity: 0.72; }
+  50% { opacity: 1; }
+  100% { opacity: 0.72; }
+}
+
+.dsh-live-shimmer {
+  animation: dshShimmerSweep 1.6s ease-in-out infinite;
+}
+
+.activity-group.is-live {
+  border-color: rgba(77, 156, 255, 0.35);
+}
+
+.activity-live-detail {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 11.5px;
+  opacity: 0.78;
+  max-width: 360px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dsh-running-turn-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  margin-top: 8px;
+  border-radius: var(--dsw-radius-lg);
+  background: var(--cordis-surface-card);
+  border: var(--dsh-hairline-width) solid var(--cordis-surface-stroke);
+}
+
+.dsh-running-turn-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.dsh-running-turn-line {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dsh-running-turn-detail {
+  font-size: 12.5px;
+  opacity: 0.8;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dsh-turn-elapsed {
+  font-variant-numeric: tabular-nums;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 12px;
+  opacity: 0.72;
+  flex-shrink: 0;
+}
+
+.dsh-bash-live-tail {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 11.5px;
+  line-height: 1.4;
+  padding: 4px 8px;
+  border-radius: var(--dsw-radius-xs);
+  background: rgba(127, 127, 127, 0.1);
+  opacity: 0.88;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.thinking-preview {
+  font-size: 12px;
+  opacity: 0.72;
+}
+
+/* =========================================================================
+ * DeepSeek Harness Planning & Task Progress Dock (`ui-plan` + `ui-todo`)
+ * ========================================================================= */
+.dsh-plan-pill-bar,
+.dsh-plan-card-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 12px;
+  border-radius: var(--dsw-radius-md, 10px);
+  background: rgba(59, 130, 246, 0.09);
+  border: var(--dsh-hairline-width) solid rgba(59, 130, 246, 0.3);
+  font-size: 12.5px;
+}
+
+.dsh-plan-pill-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-weight: 600;
+  color: #60a5fa;
+  flex-shrink: 0;
+}
+
+.dsh-plan-status-chip {
+  margin-left: 8px;
+  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(59, 130, 246, 0.16);
+}
+
+.dsh-plan-viewer-body {
+  max-height: 62vh;
+  overflow-y: auto;
+  padding: 12px 14px;
+  border-radius: var(--dsw-radius-md, 10px);
+  background: var(--cordis-surface-card);
+  border: var(--dsh-hairline-width) solid var(--cordis-surface-stroke);
+}
+
+.dsh-todo-dock summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.dsh-todo-meter {
+  width: 64px;
+  height: 5px;
+  border-radius: 999px;
+  background: rgba(127, 127, 127, 0.22);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.dsh-todo-meter-fill {
+  display: block;
+  height: 100%;
+  background: #34d399;
+  transition: width 220ms ease;
+}
+
+/* =========================================================================
+ * `ui-superagent` 6-Tab Panel Styles
+ * ========================================================================= */
+.sa-page {
+  padding: 22px 26px;
+  max-width: 1160px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.sa-topbar,
+.sa-row-between {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.sa-title-block,
+.sa-top-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.sa-title-block h1 {
+  margin: 0;
+  font-size: 20px;
+}
+
+.sa-search-input {
+  min-width: 210px;
+}
+
+.sa-search-results {
+  padding: 10px;
+  border-radius: var(--dsw-radius-lg);
+  background: var(--cordis-surface-card);
+  border: var(--dsh-hairline-width) solid var(--cordis-surface-stroke);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sa-search-hit {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  text-align: left;
+  border-radius: var(--dsw-radius-xs);
+  background: transparent;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+}
+
+.sa-grid-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.sa-stat-card,
+.sa-section,
+.sa-ticket-detail {
+  padding: 14px 16px;
+  border-radius: var(--dsw-radius-lg);
+  background: var(--cordis-surface-card);
+  border: var(--dsh-hairline-width) solid var(--cordis-surface-stroke);
+}
+
+.sa-stat-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sa-stat-num {
+  font-size: 22px;
+  font-variant-numeric: tabular-nums;
+}
+
+.sa-section {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.sa-section h3 {
+  margin: 0;
+  font-size: 14.5px;
+}
+
+.sa-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sa-row-card,
+.sa-problem-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: var(--dsw-radius-md, 10px);
+  background: rgba(127, 127, 127, 0.06);
+}
+
+.sa-badge {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.sa-badge.tone-ok { background: rgba(52, 211, 153, 0.16); color: #34d399; }
+.sa-badge.tone-warn { background: rgba(251, 191, 36, 0.18); color: #fbbf24; }
+.sa-badge.tone-err { background: rgba(239, 68, 68, 0.18); color: #f87171; }
+.sa-badge.tone-info { background: rgba(96, 165, 250, 0.16); color: #60a5fa; }
+.sa-badge.tone-muted { background: rgba(148, 163, 184, 0.16); opacity: 0.85; }
+
+.sa-split-execution {
+  display: grid;
+  grid-template-columns: 300px 1fr;
+  gap: 14px;
+  align-items: start;
+}
+
+.sa-ticket-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sa-ticket-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  text-align: left;
+  padding: 10px 12px;
+  border-radius: var(--dsw-radius-md, 10px);
+  background: var(--cordis-surface-card);
+  border: var(--dsh-hairline-width) solid var(--cordis-surface-stroke);
+  color: inherit;
+  cursor: pointer;
+}
+
+.sa-ticket-item.active {
+  border-color: #60a5fa;
+}
+
+.sa-attention-callout {
+  margin: 10px 0;
+  padding: 10px 12px;
+  border-radius: var(--dsw-radius-md, 10px);
+  background: rgba(251, 191, 36, 0.12);
+  border: var(--dsh-hairline-width) solid rgba(251, 191, 36, 0.35);
+}
+
+.sa-assignment-card {
+  margin-top: 8px;
+  padding: 10px 12px;
+  border-radius: var(--dsw-radius-md, 10px);
+  background: rgba(127, 127, 127, 0.06);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sa-report-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+}
+
+.sa-glossary-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 55vh;
+  overflow-y: auto;
+}
+
+.sa-glossary-item p {
+  margin: 3px 0 0;
+  font-size: 12.5px;
+  opacity: 0.85;
+}

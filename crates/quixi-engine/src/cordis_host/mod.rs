@@ -1334,6 +1334,7 @@ impl Plugin for CollaborationToolsPlugin {
     }
     fn apply(&self, ctx: &Context, _cfg: &Value) -> Result<(), CordisError> {
         let tools = ctx.get(TOOLS_SERVICE)?;
+        let prompt = ctx.get(SYSTEM_PROMPT_SERVICE)?;
         // Register collaboration tools (including TeamTask* conditionally gated by `act.team_enabled`!)
         let schemas = crate::collaboration::collaboration_tool_schemas(true);
         register_schema_list(
@@ -1350,6 +1351,22 @@ impl Plugin for CollaborationToolsPlugin {
                 } else {
                     None
                 }
+            },
+        )?;
+        prompt.register_section(
+            ctx,
+            PromptSectionSpec {
+                name: "tool:collaboration-todo".into(),
+                order: SectionOrder::TOOL_COLLABORATION,
+                text: TextContribution::Static(
+                    "Task planning & live progress (`TodoWrite`):\n\
+                    - On any multi-step task (3+ concrete actions, investigations, edits, or verifications), call `TodoWrite` early to publish a clear task checklist (`pending`, `in_progress`, `completed`).\n\
+                    - Each `TodoWrite` call replaces the entire list: mark the current step(s) `in_progress` before starting them, and mark items `completed` promptly as each settles so the user always sees live progress.\n\
+                    - Skip `TodoWrite` for trivial 1-step questions or while drafting inside Plan Mode (`ExitPlanMode` owns the plan review there)."
+                        .into(),
+                ),
+                interpolate: false,
+                complete: false,
             },
         )
     }
@@ -1821,6 +1838,9 @@ fn register_builtin_factories(runtime: &Arc<CordisRuntime>, data_dir: &Path) {
     }));
     runtime.register_factory(Arc::new(ClientFeatureFlagPlugin {
         plugin_name: "dsh-client-ui-secret-mask",
+    }));
+    runtime.register_factory(Arc::new(crate::superagent::SuperagentPlugin {
+        data_dir: data_dir.to_path_buf(),
     }));
 }
 
@@ -2344,6 +2364,7 @@ pub fn builtin_bundles() -> Vec<BundleManifest> {
                 },
             ],
         },
+        crate::superagent::superagent_bundle_manifest(),
     ]
 }
 

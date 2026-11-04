@@ -878,6 +878,164 @@ impl EipcRouter {
                 let q = args.first().and_then(Value::as_str).unwrap_or("");
                 self.engine.cordis.cordis_inspect_query(q)
             }
+            // --- dsh-superagent Proactive Repository Orchestrator ---
+            ("Superagent", "snapshot") => match self.engine.superagent_service() {
+                Some(svc) => svc.panel_snapshot(),
+                None => json!({ "error": "Superagent plugin is disabled." }),
+            },
+            ("Superagent", "search") => {
+                let q = args.first().and_then(Value::as_str).unwrap_or("");
+                match self.engine.superagent_service() {
+                    Some(svc) => svc.search(q),
+                    None => json!({ "tickets": [], "threads": [], "items": [] }),
+                }
+            }
+            ("Superagent", "submitTrigger") => {
+                let payload = args.first().cloned().unwrap_or_else(|| json!({}));
+                match self.engine.superagent_service() {
+                    Some(svc) => {
+                        let trig = quixi_engine::superagent::Trigger {
+                            id: payload["id"].as_str().unwrap_or("").to_owned(),
+                            source: payload["source"].as_str().unwrap_or("github").to_owned(),
+                            scope: payload["scope"].as_str().unwrap_or("issues").to_owned(),
+                            actor: payload["actor"].as_str().unwrap_or("maintainer").to_owned(),
+                            is_bot: payload["isBot"].as_bool().unwrap_or(false),
+                            addressed: payload["addressed"]
+                                .as_str()
+                                .unwrap_or("mention")
+                                .to_owned(),
+                            threads: payload["threads"]
+                                .as_array()
+                                .map(|a| {
+                                    a.iter()
+                                        .filter_map(|v| v.as_str().map(str::to_owned))
+                                        .collect()
+                                })
+                                .unwrap_or_else(|| {
+                                    vec![payload["thread"]
+                                        .as_str()
+                                        .unwrap_or("github:1")
+                                        .to_owned()]
+                                }),
+                            title: payload["title"]
+                                .as_str()
+                                .unwrap_or("Manual Trigger")
+                                .to_owned(),
+                            text: payload["text"].as_str().unwrap_or("").to_owned(),
+                            url: payload["url"].as_str().map(str::to_owned),
+                            at: String::new(),
+                            meta: json!({}),
+                        };
+                        let res = svc.receive_trigger(trig);
+                        self.engine.emit_superagent_changed();
+                        res
+                    }
+                    None => json!({ "error": "Superagent plugin is disabled." }),
+                }
+            }
+            ("Superagent", "routeDecisions") => {
+                let items = args
+                    .first()
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                match self.engine.superagent_service() {
+                    Some(svc) => {
+                        let res = svc.route_decisions(&items);
+                        self.engine.emit_superagent_changed();
+                        res
+                    }
+                    None => json!({ "error": "Superagent plugin is disabled." }),
+                }
+            }
+            ("Superagent", "pollGithubNow") => match self.engine.superagent_service() {
+                Some(svc) => {
+                    let res = svc.poll_github_now();
+                    self.engine.emit_superagent_changed();
+                    res
+                }
+                None => json!({ "error": "Superagent plugin is disabled." }),
+            },
+            ("Superagent", "saveSettingsBlock") => {
+                let block = args.first().and_then(Value::as_str).unwrap_or("");
+                let val = args.get(1).cloned().unwrap_or_else(|| json!({}));
+                match self.engine.superagent_service() {
+                    Some(svc) => match svc.save_settings_block(block, &val, "panel") {
+                        Ok(res) => {
+                            self.engine.emit_superagent_changed();
+                            res
+                        }
+                        Err(e) => json!({ "error": e }),
+                    },
+                    None => json!({ "error": "Superagent plugin is disabled." }),
+                }
+            }
+            ("Superagent", "savePrompts") => {
+                let val = args.first().cloned().unwrap_or_else(|| json!({}));
+                match self.engine.superagent_service() {
+                    Some(svc) => {
+                        match serde_json::from_value::<quixi_engine::superagent::PromptConfig>(val)
+                        {
+                            Ok(cfg) => {
+                                let res = svc.save_prompts(cfg, "panel");
+                                self.engine.emit_superagent_changed();
+                                res
+                            }
+                            Err(e) => json!({ "error": format!("Invalid prompts config: {e}") }),
+                        }
+                    }
+                    None => json!({ "error": "Superagent plugin is disabled." }),
+                }
+            }
+            ("Superagent", "stopTicket") => {
+                let tid = args.first().and_then(Value::as_str).unwrap_or("");
+                let reason = args.get(1).and_then(Value::as_str);
+                match self.engine.superagent_service() {
+                    Some(svc) => match svc.stop_ticket_by_person(tid, reason) {
+                        Ok(res) => {
+                            self.engine.emit_superagent_changed();
+                            res
+                        }
+                        Err(e) => json!({ "error": e }),
+                    },
+                    None => json!({ "error": "Superagent plugin is disabled." }),
+                }
+            }
+            ("Superagent", "retryTicket") => {
+                let tid = args.first().and_then(Value::as_str).unwrap_or("");
+                match self.engine.superagent_service() {
+                    Some(svc) => match svc.retry_ticket(tid) {
+                        Ok(res) => {
+                            self.engine.emit_superagent_changed();
+                            res
+                        }
+                        Err(e) => json!({ "error": e }),
+                    },
+                    None => json!({ "error": "Superagent plugin is disabled." }),
+                }
+            }
+            ("Superagent", "openMainSession") => {
+                let msg = args.first().and_then(Value::as_str);
+                match self.engine.ensure_superagent_main_session(msg) {
+                    Ok(sid) => json!({ "sessionId": sid }),
+                    Err(e) => json!({ "error": e }),
+                }
+            }
+            ("Superagent", "openWorkerSession") => {
+                let tid = args.first().and_then(Value::as_str).unwrap_or("");
+                let dispatch = args.get(1).and_then(Value::as_bool).unwrap_or(false);
+                match self.engine.open_or_dispatch_superagent_worker(tid, dispatch) {
+                    Ok(res) => res,
+                    Err(e) => json!({ "error": e }),
+                }
+            }
+            ("Superagent", "dispatchEval") => {
+                let trig_id = args.first().and_then(Value::as_str).unwrap_or("");
+                match self.engine.dispatch_superagent_eval(trig_id) {
+                    Ok(res) => res,
+                    Err(e) => json!({ "error": e }),
+                }
+            }
             // --- GitHub Forge PRs & Diff ---
             ("Forge", "refreshSession") => {
                 let sid = args.first().and_then(Value::as_str).unwrap_or("");

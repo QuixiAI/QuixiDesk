@@ -1,0 +1,418 @@
+//! Type definitions for the OpenAI Chat Completions API.
+
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+// ============================================================================
+// REQUEST TYPES
+// ============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub(crate) struct ChatCompletionsOptions {
+    pub model: String,
+    pub messages: Vec<ChatMessage>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frequency_penalty: Option<f32>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub logit_bias: Option<HashMap<String, i32>>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub logprobs: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_logprobs: Option<u32>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_completion_tokens: Option<u32>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub n: Option<u32>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub presence_penalty: Option<f32>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_format: Option<ResponseFormat>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seed: Option<u32>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stop: Option<StopSequences>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_options: Option<StreamOptions>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f32>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<Tool>>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<ToolChoice>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parallel_tool_calls: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verbosity: Option<String>,
+
+    #[serde(skip)]
+    pub extra_body: Option<serde_json::Map<String, serde_json::Value>>,
+    #[serde(skip)]
+    pub extra_headers: Option<std::collections::HashMap<String, String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub(crate) struct ChatMessage {
+    pub role: Role,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ToolCall>>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Role {
+    System,
+    User,
+    Assistant,
+    Tool,
+    Developer,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub(crate) struct Tool {
+    #[serde(rename = "type")]
+    pub type_: String,
+    pub function: FunctionDefinition,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub(crate) struct FunctionDefinition {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub parameters: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strict: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub(crate) struct ToolCall {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub type_: String,
+    pub function: FunctionCall,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub(crate) struct FunctionCall {
+    pub name: String,
+    pub arguments: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum ToolChoice {
+    String(String),
+    Specific(ToolChoiceSpecific),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ToolChoiceSpecific {
+    #[serde(rename = "type")]
+    pub type_: String,
+    pub function: FunctionChoice,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct FunctionChoice {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum StopSequences {
+    Single(String),
+    Multiple(Vec<String>),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum ResponseFormat {
+    Text,
+    JsonObject,
+    JsonSchema { json_schema: JsonSchemaDefinition },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct JsonSchemaDefinition {
+    pub name: String,
+    pub schema: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strict: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct StreamOptions {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub include_usage: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub include_obfuscation: Option<bool>,
+}
+
+// ============================================================================
+// RESPONSE TYPES
+// ============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ChatCompletionsResponse {
+    pub id: String,
+    pub object: String,
+    pub created: u64,
+    pub model: String,
+    pub choices: Vec<Choice>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Usage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system_fingerprint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct Choice {
+    pub index: u32,
+    pub message: ChatMessage,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub logprobs: Option<LogProbs>,
+    pub finish_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub(crate) struct Usage {
+    #[serde(default)]
+    pub prompt_tokens: u32,
+    #[serde(default)]
+    pub completion_tokens: u32,
+    #[serde(default)]
+    pub total_tokens: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_hit_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_miss_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_tokens_details: Option<PromptTokensDetails>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_tokens_details: Option<CompletionTokensDetails>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub(crate) struct PromptTokensDetails {
+    #[serde(default)]
+    pub cached_tokens: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_tokens: Option<u32>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub(crate) struct CompletionTokensDetails {
+    #[serde(default)]
+    pub reasoning_tokens: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted_prediction_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rejected_prediction_tokens: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub(crate) struct LogProbs {
+    pub content: Vec<ContentLogProb>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<Vec<ContentLogProb>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub(crate) struct ContentLogProb {
+    pub token: String,
+    pub logprob: f64,
+    pub bytes: Option<Vec<u8>>,
+    pub top_logprobs: Vec<TopLogProb>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub(crate) struct TopLogProb {
+    pub token: String,
+    pub logprob: f64,
+    pub bytes: Option<Vec<u8>>,
+}
+
+// ============================================================================
+// STREAMING TYPES
+// ============================================================================
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub(crate) struct ChatCompletionsStreamChunk {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub object: String,
+    #[serde(default)]
+    pub created: u64,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub choices: Vec<StreamChoice>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Usage>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub(crate) struct StreamChoice {
+    #[serde(default)]
+    pub index: u32,
+    #[serde(default)]
+    pub delta: Delta,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logprobs: Option<LogProbs>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finish_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub(crate) struct Delta {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<Role>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+
+    /// Reasoning content for reasoning models (e.g., OpenAI o1, DeepSeek R1)
+    #[serde(default, alias = "reasoning", skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_details: Option<serde_json::Value>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<DeltaToolCall>>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub(crate) struct DeltaToolCall {
+    #[serde(default)]
+    pub index: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "type")]
+    pub type_: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub function: Option<DeltaFunction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_content: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub(crate) struct DeltaFunction {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub(crate) enum ChatCompletionsStreamEvent {
+    Chunk(ChatCompletionsStreamChunk),
+    Done,
+    Error(String),
+    Open,
+}
+
+// ============================================================================
+// EMBEDDING TYPES
+// ============================================================================
+
+/// Request options for the OpenAI Embeddings API.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub(crate) struct EmbeddingOptions {
+    /// The input text(s) to embed.
+    pub input: Vec<String>,
+    /// The model to use for embeddings.
+    pub model: String,
+    /// Optional user identifier for abuse monitoring.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+    /// The number of dimensions for the embedding (for models that support it).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dimensions: Option<usize>,
+    /// The format to return embeddings in (default: "float").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encoding_format: Option<String>,
+    #[serde(skip)]
+    pub extra_body: Option<serde_json::Map<String, serde_json::Value>>,
+    #[serde(skip)]
+    pub extra_headers: Option<std::collections::HashMap<String, String>>,
+}
+
+/// A single embedding vector.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub(crate) struct Embedding {
+    /// The embedding vector.
+    pub embedding: Vec<f32>,
+    /// The index of this embedding in the response.
+    pub index: usize,
+    /// The object type (always "embedding").
+    pub object: String,
+}
+
+/// Usage statistics for embedding requests.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub(crate) struct EmbeddingUsage {
+    /// Number of tokens in the input.
+    pub prompt_tokens: usize,
+    /// Total tokens used (same as prompt_tokens for embeddings).
+    pub total_tokens: usize,
+}
+
+/// Response from the OpenAI Embeddings API.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub(crate) struct EmbeddingResponse {
+    /// The object type (always "list").
+    pub object: Option<String>,
+    /// The list of embedding vectors.
+    pub data: Vec<Embedding>,
+    /// The model used.
+    pub model: Option<String>,
+    /// Usage statistics.
+    pub usage: Option<EmbeddingUsage>,
+}

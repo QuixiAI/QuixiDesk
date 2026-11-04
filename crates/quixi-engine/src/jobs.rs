@@ -383,9 +383,77 @@ impl JobRegistry {
         cancelled: &AtomicBool,
         sandbox_policy: Option<&quixi_platform::sandbox::SandboxPolicy>,
     ) -> Result<(String, bool, Option<String>), String> {
+        self.run_bash_with_timeout_promotion_and_progress(
+            owner,
+            label,
+            cwd,
+            command,
+            data_dir,
+            foreground_timeout,
+            cancelled,
+            sandbox_policy,
+            |_, _| {},
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_bash_with_timeout_promotion_and_progress<P>(
+        &self,
+        owner: &str,
+        label: &str,
+        cwd: &Path,
+        command: &str,
+        data_dir: &Path,
+        foreground_timeout: Duration,
+        cancelled: &AtomicBool,
+        sandbox_policy: Option<&quixi_platform::sandbox::SandboxPolicy>,
+        mut on_progress: P,
+    ) -> Result<(String, bool, Option<String>), String>
+    where
+        P: FnMut(&str, u64),
+    {
         let view = self.start_bash(owner, label, cwd, command, data_dir, sandbox_policy)?;
         let job_id = view.id.clone();
-        match self.read_consuming(owner, &job_id, Some(foreground_timeout), cancelled) {
+        let started = Instant::now();
+        let mut last_progress = Instant::now();
+        let mut last_seen_len = 0usize;
+
+        while started.elapsed() < foreground_timeout {
+            if cancelled.load(Ordering::SeqCst) {
+                let _ = self.kill(owner, &job_id, Some("Cancelled during foreground wait"));
+                return Err("Task stopped while waiting on command.".into());
+            }
+            let (settled, latest_line, cur_len) = {
+                let map = self.jobs.lock();
+                if let Some(j) = map.get(&job_id) {
+                    let done = !matches!(j.status.as_str(), "running" | "stopping");
+                    let tail = j
+                        .buf
+                        .lines()
+                        .rev()
+                        .map(str::trim)
+                        .find(|l| !l.is_empty())
+                        .map(str::to_owned);
+                    (done, tail, j.buf.len())
+                } else {
+                    (true, None, 0)
+                }
+            };
+            if last_progress.elapsed() >= Duration::from_millis(320) && cur_len != last_seen_len {
+                last_seen_len = cur_len;
+                last_progress = Instant::now();
+                if let Some(ref line) = latest_line {
+                    let preview: String = line.chars().take(160).collect();
+                    on_progress(&preview, started.elapsed().as_millis() as u64);
+                }
+            }
+            if settled {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(45));
+        }
+
+        match self.read_consuming(owner, &job_id, None, cancelled) {
             Err(err) => {
                 let _ = self.kill(owner, &job_id, Some("Cancelled during foreground wait"));
                 Err(err)

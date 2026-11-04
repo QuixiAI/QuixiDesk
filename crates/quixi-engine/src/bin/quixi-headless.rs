@@ -293,6 +293,7 @@ fn main() {
                     eprint!("{t}");
                 }
             }
+            StreamChunk::ToolCallPreparing { .. } => {}
         },
         |envelope| {
             // Tool activity goes to stderr so the answer streams cleanly on stdout. The engine
