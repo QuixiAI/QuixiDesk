@@ -292,7 +292,7 @@
         render: ({ navigationButton, state, navigate }) =>
           navigationButton(
             "Plugins",
-            "spark",
+            "grid",
             () => navigate("plugins"),
             state.page === "plugins" ? "active" : "",
           ),
@@ -566,6 +566,7 @@
               ...filtered.map((bundle) => {
                 const bundleToggle = el("input", {
                   type: "checkbox",
+                  class: "cordis-switch",
                   checked: Boolean(bundle.enabled),
                   disabled: Boolean(bundle.locked),
                   "aria-label": `Enable bundle ${bundle.title}`,
@@ -595,6 +596,7 @@
                   ...(bundle.rows || []).map((row) => {
                     const rowToggle = el("input", {
                       type: "checkbox",
+                      class: "cordis-switch",
                       checked: Boolean(row.enabled),
                       disabled: Boolean(row.locked || !bundle.enabled),
                       "aria-label": `Enable plugin ${row.title}`,
@@ -806,11 +808,11 @@
               title: "Reasoning effort level",
             },
             ...[
-              ["off", "Effort: Off"],
-              ["low", "Effort: Low"],
-              ["medium", "Effort: Medium"],
-              ["high", "Effort: High"],
-              ["max", "Effort: Max"],
+              ["off", "Off"],
+              ["low", "Low"],
+              ["medium", "Medium"],
+              ["high", "High"],
+              ["max", "Max"],
             ].map(([val, label]) =>
               el("option", { value: val, ...(currentEffort === val ? { selected: true } : {}) }, label),
             ),
@@ -841,10 +843,10 @@
               title: "Declarative Agent Preset (`Standard`, `PTC`, `Minimal`, `Creator`)",
             },
             ...[
-              ["standard", "Preset: Standard"],
-              ["ptc", "Preset: PTC (RunCode)"],
-              ["minimal", "Preset: Minimal"],
-              ["creator", "Preset: Creator"],
+              ["standard", "Standard"],
+              ["ptc", "PTC"],
+              ["minimal", "Minimal"],
+              ["creator", "Creator"],
             ].map(([val, label]) =>
               el("option", { value: val, ...(activePreset === val ? { selected: true } : {}) }, label),
             ),
@@ -991,6 +993,8 @@
           return {
             activeView,
             workDetailsMode,
+            inlineControls: tabs,
+            trailingControl: activeView === "chat" ? wdSelect : null,
             bar: el("div", { class: "cordis-view-bar" }, tabs, activeView === "chat" ? wdSelect : el("span")),
             renderAlternate: () =>
               activeView === "trajectory"
@@ -1002,17 +1006,58 @@
         },
       });
 
+      function synthesizeStepsFromMessages(messages, defaultModel) {
+        const out = [];
+        let turnIdx = -1;
+        let stepIdx = 0;
+        for (const m of messages || []) {
+          const blocks = Array.isArray(m.message?.content)
+            ? m.message.content
+            : Array.isArray(m.content)
+              ? m.content
+              : [];
+          if (m.type === "user" && blocks.some((b) => b.type === "text")) {
+            turnIdx += 1;
+            stepIdx = 0;
+          } else if (m.type === "assistant") {
+            const tools = blocks.filter((b) => b.type === "tool_use");
+            const texts = blocks.filter((b) => b.type === "text").map((b) => b.text || "").join("\n");
+            if (!tools.length && !texts.trim()) continue;
+            const usage = m.message?.usage || m.usage || {};
+            out.push({
+              turnIndex: Math.max(0, turnIdx),
+              stepIndex: stepIdx++,
+              model: m.message?.model || defaultModel || "model",
+              ttftMs: usage.ttft_ms || 0,
+              modelMs: usage.duration_ms || 0,
+              toolMs: 0,
+              inputTokens: usage.input_tokens || 0,
+              outputTokens: usage.output_tokens || Math.max(1, Math.round(texts.length / 4)),
+              cacheReadTokens: usage.cache_read_input_tokens || 0,
+              cacheWriteTokens: usage.cache_creation_input_tokens || 0,
+              reasoningTokens: usage.reasoning_tokens || 0,
+              contextTokens: usage.input_tokens || 0,
+              toolNames: tools.map((t) => t.name),
+              toolInputs: tools.map((t) => ({ name: t.name, input: t.input })),
+              ptcSubcalls: [],
+            });
+          }
+        }
+        return out;
+      }
+
       function renderTrajectoryView(app, s) {
         const { el, empty } = app;
         const collab = app.state.collab.get(s.sessionId);
-        const steps = collab?.stepTelemetry || [];
         const messages =
           s._kind === "code" ? app.state.transcripts.get(s.sessionId) || [] : s.bufferedMessages || [];
+        const rawSteps = collab?.stepTelemetry || [];
+        const steps = rawSteps.length ? rawSteps : synthesizeStepsFromMessages(messages, s.model);
 
-        if (!steps.length && !messages.length) {
+        if (!steps.length) {
           return el(
             "div",
-            { class: "cordis-alt-view" },
+            { class: "cordis-alt-view", "aria-label": "Trajectory view" },
             empty("No trajectory steps yet", "Send a prompt to inspect step timing, tool calls, and nested PTC subcalls."),
           );
         }
@@ -1105,11 +1150,14 @@
       function renderStatisticsView(app, s) {
         const { el, empty } = app;
         const collab = app.state.collab.get(s.sessionId);
-        const steps = collab?.stepTelemetry || [];
+        const messages =
+          s._kind === "code" ? app.state.transcripts.get(s.sessionId) || [] : s.bufferedMessages || [];
+        const rawSteps = collab?.stepTelemetry || [];
+        const steps = rawSteps.length ? rawSteps : synthesizeStepsFromMessages(messages, s.model);
         if (!steps.length) {
           return el(
             "div",
-            { class: "cordis-alt-view" },
+            { class: "cordis-alt-view", "aria-label": "Statistics view" },
             empty("No step statistics recorded yet", "Run a turn to inspect context occupancy, cache hit %, TTFT, and tok/s."),
           );
         }

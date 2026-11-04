@@ -1,34 +1,39 @@
 /* Copyright (c) 2026 QuixiAI. MIT license. Original QuixiDesk interface. */
 :root {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", "Segoe UI", sans-serif;
   color-scheme: dark;
-  --bg: #191c20;
-  --panel: #202429;
-  --raised: #2a3036;
-  --sidebar: #15181c;
-  --line: #343a41;
-  --text: #edf0f2;
-  --muted: #a2aab3;
-  --accent: #8bd5bd;
-  --ink: #142c25;
-  --danger: #f29a9d;
-  --shadow: 0 24px 80px #0006, 0 2px 8px #0003;
+  --bg: #0f1116;
+  --panel: #171a22;
+  --raised: #202531;
+  --sidebar: #13161d;
+  --line: rgba(255, 255, 255, 0.075);
+  --line-strong: rgba(255, 255, 255, 0.14);
+  --text: #f1f4f9;
+  --muted: #8b94a5;
+  --accent: #4c8bf5;
+  --ink: #ffffff;
+  --danger: #f87171;
+  --shadow: 0 24px 72px rgba(0, 0, 0, 0.52), 0 2px 10px rgba(0, 0, 0, 0.28);
   font-size: 14px;
   -webkit-font-smoothing: antialiased;
 }
 :root[data-theme="light"] {
   color-scheme: light;
-  --bg: #fcfcfa;
-  --panel: #ffffff;
-  --raised: #f0f2ef;
-  --sidebar: #f2f3f0;
-  --line: #e0e4df;
-  --text: #252d2b;
-  --muted: #68736e;
-  --accent: #27765e;
+  --bg: #ffffff;
+  --panel: #f8fafc;
+  --raised: #eef2f7;
+  --sidebar: #f3f5f9;
+  --line: rgba(15, 23, 42, 0.08);
+  --line-strong: rgba(15, 23, 42, 0.15);
+  --text: #0f172a;
+  --muted: #64748b;
+  --accent: #2563eb;
   --ink: #ffffff;
-  --danger: #b5454e;
-  --shadow: 0 24px 80px #1d342519, 0 2px 8px #1d34250d;
+  --danger: #dc2626;
+  --shadow: 0 20px 60px rgba(15, 23, 42, 0.12), 0 2px 8px rgba(15, 23, 42, 0.06);
+}
+[hidden] {
+  display: none !important;
 }
 * {
   box-sizing: border-box;
@@ -207,20 +212,20 @@ summary {
 }
 .shell {
   display: grid;
-  grid-template-columns: 228px minmax(0, 1fr);
+  grid-template-columns: 224px minmax(0, 1fr);
   height: 100dvh;
   overflow: hidden;
 }
 .shell.collapsed {
-  grid-template-columns: 68px minmax(0, 1fr);
+  grid-template-columns: 60px minmax(0, 1fr);
 }
 .sidebar {
   background: var(--sidebar);
   border-right: 1px solid var(--line);
   display: flex;
   flex-direction: column;
-  gap: 22px;
-  padding: 20px 12px 12px;
+  gap: 14px;
+  padding: 16px 10px 10px;
   min-width: 0;
   overflow: hidden;
 }
@@ -228,23 +233,24 @@ summary {
   display: flex;
   gap: 9px;
   align-items: center;
-  padding: 0 9px;
-  height: 36px;
-  font-weight: 650;
-  font-size: 16px;
-  letter-spacing: -0.5px;
+  padding: 0 8px;
+  height: 32px;
+  font-weight: 600;
+  font-size: 14.5px;
+  letter-spacing: -0.3px;
 }
 .brand img {
-  width: 27px;
-  height: 27px;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
 }
 .sidebar nav {
   display: grid;
-  gap: 3px;
+  gap: 1px;
 }
 .sidebar nav button {
   display: flex;
-  gap: 10px;
+  gap: 9px;
   align-items: center;
   justify-content: flex-start;
   text-align: left;
@@ -252,45 +258,59 @@ summary {
   background: transparent;
   width: 100%;
   white-space: nowrap;
-  padding: 8px 10px;
+  padding: 6px 10px;
+  min-height: 30px;
+  border-radius: 8px;
   color: var(--muted);
   font-size: 13px;
   font-weight: 450;
 }
 .sidebar nav button.active {
-  background: color-mix(in srgb, var(--accent), transparent 91%);
-  color: var(--text);
-}
-.sidebar .new-task {
-  margin: 0 0 10px;
-  justify-content: flex-start;
   background: var(--raised);
   color: var(--text);
+  font-weight: 500;
+}
+.sidebar .new-task {
+  margin: 0 0 6px;
+  justify-content: flex-start;
+  background: color-mix(in srgb, var(--accent) 14%, var(--panel));
+  color: var(--text);
   font-weight: 550;
-  border-color: color-mix(in srgb, var(--line), transparent 35%);
+  border-color: color-mix(in srgb, var(--accent) 28%, transparent);
 }
 .sidebar .section-label {
   font-size: 10px;
+  font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 1.1px;
+  letter-spacing: 0.9px;
   color: var(--muted);
-  padding: 0 10px;
-  margin: 0 0 8px;
+  opacity: 0.72;
+  padding: 4px 10px 0;
+  margin: 0 0 4px;
 }
 .recent {
   flex: 1;
   overflow: auto;
   min-height: 0;
+  scrollbar-width: thin;
 }
 .recent-row {
   display: flex;
-  gap: 2px;
+  gap: 1px;
   align-items: center;
-  margin: 3px 0;
+  margin: 1px 0;
   border-radius: 8px;
+  position: relative;
+}
+.recent-row:hover {
+  background: color-mix(in srgb, var(--raised) 65%, transparent);
 }
 .recent-row.current {
   background: var(--raised);
+}
+.recent-row.current > .session-link {
+  color: var(--text);
+  font-weight: 500;
 }
 .recent-row > .session-link {
   overflow: hidden;
@@ -298,29 +318,35 @@ summary {
   white-space: nowrap;
   text-align: left;
   justify-content: flex-start;
-  padding: 8px 10px;
+  padding: 6px 10px;
   background: transparent;
   border: 0;
   flex: 1;
   min-width: 0;
-  font-size: 12px;
-  font-weight: 400;
-  color: var(--muted);
+  font-size: 12.5px;
+  font-weight: 420;
+  color: color-mix(in srgb, var(--text) 78%, var(--muted));
   display: block;
 }
 .recent-row > .icon,
 .recent-row > .more {
-  opacity: 0.55;
-  padding: 7px;
+  opacity: 0;
+  width: 24px;
+  height: 24px;
+  min-width: 24px;
+  min-height: 24px;
+  padding: 4px;
   background: transparent;
   border: 0;
+  color: var(--muted);
+  transition: opacity 120ms ease;
 }
 .recent-row > .icon { flex-shrink: 0; }
 .recent-row:hover > .icon,
 .recent-row:focus-within > .icon,
 .recent-row:hover > .more,
 .recent-row:focus-within > .more {
-  opacity: 1;
+  opacity: 0.85;
 }
 .running-dot {
   width: 6px;
@@ -366,49 +392,67 @@ summary {
   overflow: hidden;
 }
 .topbar {
-  height: 56px;
+  height: 44px;
   display: flex;
   align-items: center;
   gap: 8px;
-  border-bottom: 1px solid color-mix(in srgb, var(--line), transparent 40%);
-  padding: 0 24px;
+  border-bottom: 1px solid var(--line);
+  padding: 0 18px;
   flex-shrink: 0;
   -webkit-app-region: drag;
 }
 .topbar .crumb {
   font-size: 13px;
-  color: var(--muted);
+  color: var(--text);
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
   flex: 1;
 }
 .topbar .crumb strong {
-  color: var(--muted);
-  font-weight: 450;
+  color: var(--text);
+  font-weight: 550;
 }
 .topbar button {
   font-size: 12px;
+  min-height: 28px;
+  padding: 4px 10px;
+}
+.topbar button.icon {
+  width: 28px;
+  height: 28px;
+  min-width: 28px;
+  min-height: 28px;
+  padding: 5px;
+}
+.topbar-pill {
+  background: var(--panel);
+  border: 1px solid var(--line) !important;
+  border-radius: 999px;
 }
 .page {
   flex: 1;
   min-height: 0;
   overflow: auto;
-  padding: 36px clamp(26px, 4vw, 64px) 60px;
+  padding: 26px clamp(24px, 3.5vw, 48px) 48px;
   scrollbar-gutter: stable;
 }
 .page-header {
   display: flex;
-  gap: 20px;
+  gap: 16px;
   align-items: center;
   justify-content: space-between;
-  margin: 0 0 30px;
+  margin: 0 0 20px;
+}
+.page-header h1 {
+  font-size: 22px;
+  letter-spacing: -0.4px;
 }
 .page-header p {
   color: var(--muted);
-  margin: 9px 0 0;
-  font-size: 13px;
-  line-height: 1.5;
+  margin: 4px 0 0;
+  font-size: 12.5px;
+  line-height: 1.45;
 }
 .chat-layout {
   flex: 1;
@@ -421,12 +465,13 @@ summary {
   min-width: 0;
   display: flex;
   flex-direction: column;
+  container-type: inline-size;
 }
 .conversation {
   flex: 1;
   overflow: auto;
   scroll-behavior: auto;
-  padding: 28px max(26px, calc((100% - 740px) / 2));
+  padding: 28px max(52px, calc((100% - 740px) / 2));
   min-height: 0;
   scrollbar-gutter: stable;
 }
@@ -479,59 +524,84 @@ summary {
   margin-top: 2px;
 }
 .composer-wrap {
-  padding: 12px max(24px, calc((100% - 764px) / 2)) 16px;
+  padding: 8px max(20px, calc((100% - 796px) / 2)) 12px;
 }
 .composer {
-  border: 1px solid color-mix(in srgb, var(--muted), transparent 60%);
+  border: 1px solid var(--line-strong, var(--line));
   background: var(--panel);
-  border-radius: 16px;
-  padding: 10px 12px;
-  box-shadow: 0 3px 12px #0000000a;
+  border-radius: 18px;
+  padding: 10px 12px 9px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.18);
+  transition: border-color 140ms ease, box-shadow 140ms ease;
 }
 .composer:focus-within {
-  border-color: color-mix(in srgb, var(--accent), var(--line) 45%);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent), transparent 94%);
+  border-color: color-mix(in srgb, var(--accent) 65%, var(--line));
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.22), 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent);
 }
 .composer textarea {
   resize: none;
-  min-height: 70px;
-  max-height: 210px;
-  height: 82px;
+  min-height: 54px;
+  max-height: 200px;
+  height: 62px;
   background: transparent;
   border: 0;
-  padding: 8px 8px 12px;
+  padding: 4px 6px 10px;
   font-size: 14px;
-  line-height: 1.6;
+  line-height: 1.55;
 }
 .composer textarea:focus-visible {
   outline: none;
 }
 .composer-tools {
   display: flex;
-  gap: 6px;
+  gap: 4px;
   align-items: center;
   min-width: 0;
+  flex-wrap: nowrap;
 }
 /* Author button display rules must not override the composer running-state gate. */
 .composer-tools button[hidden] {
   display: none;
 }
+.composer-tools select {
+  padding-right: 22px;
+  background-position: right 6px center;
+}
 .composer-tools .spacer {
-  flex: 1;
+  flex: 1 1 0px;
+  min-width: 0;
 }
 .composer-tools button,
 .composer-tools select {
-  font-size: 11px;
+  font-size: 11.5px;
   width: auto;
-  padding: 6px 8px;
-  border-radius: 7px;
+  flex-shrink: 0;
+  height: 28px;
+  min-height: 28px;
+  padding: 0 8px;
+  border-radius: 8px;
+  white-space: nowrap;
+}
+.composer-tools button.icon {
+  width: 28px;
+  min-width: 28px;
+  padding: 0;
+}
+.composer-subbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 6px;
+  padding: 0 6px;
+  min-height: 20px;
 }
 .composer-note {
-  font-size: 10px;
+  font-size: 10.5px;
   color: var(--muted);
-  text-align: center;
-  margin: 11px 0 0;
-  opacity: 0.8;
+  margin: 0;
+  opacity: 0.72;
+  white-space: nowrap;
 }
 .chips {
   display: flex;
@@ -865,39 +935,39 @@ summary {
 dialog {
   color: var(--text);
   background: var(--panel);
-  border: 1px solid color-mix(in srgb, var(--muted), transparent 65%);
-  border-radius: 15px;
+  border: 1px solid var(--line-strong, var(--line));
+  border-radius: 16px;
   padding: 0;
   box-shadow: var(--shadow);
   width: min(540px, calc(100vw - 40px));
-  max-height: 88dvh;
-  overflow: auto;
+  max-height: min(86dvh, calc(100vh - 44px));
+  overflow-y: auto;
 }
 dialog.wide {
-  width: min(900px, calc(100vw - 40px));
+  width: min(880px, calc(100vw - 40px));
 }
 dialog::backdrop {
-  background: #090d124f;
-  backdrop-filter: blur(5px);
+  background: rgba(6, 9, 15, 0.56);
+  backdrop-filter: blur(8px);
 }
 .dialog-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 17px 22px;
+  padding: 14px 20px;
   border-bottom: 1px solid var(--line);
+  background: var(--panel);
   position: sticky;
   top: 0;
-  background: var(--panel);
-  z-index: 1;
+  z-index: 3;
 }
 .dialog-head h2 {
   margin: 0;
-  font-size: 16px;
+  font-size: 15.5px;
   font-weight: 600;
 }
 .dialog-body {
-  padding: 22px;
+  padding: 16px 20px 18px;
 }
 .dialog-body > .cards {
   grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
@@ -1028,12 +1098,14 @@ dialog::backdrop {
 }
 #toasts {
   position: fixed;
-  right: 22px;
-  bottom: 20px;
+  top: 52px;
+  left: 50%;
+  transform: translateX(-50%);
   display: grid;
   gap: 8px;
   z-index: 2147483646;
   max-width: 420px;
+  pointer-events: none;
 }
 .toast {
   background: var(--raised);
@@ -1083,12 +1155,19 @@ dialog::backdrop {
 .session-heading {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 10px 24px;
-  border-bottom: 1px solid color-mix(in srgb, var(--line), transparent 55%);
+  gap: 6px;
+  padding: 6px 18px;
+  min-height: 40px;
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--panel) 55%, var(--bg));
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.session-heading::-webkit-scrollbar {
+  display: none;
 }
 .session-heading h2 {
-  font-size: 15px;
+  font-size: 14px;
   margin: 0;
   flex: 1;
   overflow: hidden;
@@ -1096,8 +1175,18 @@ dialog::backdrop {
   text-overflow: ellipsis;
 }
 .session-heading button {
-  font-size: 11px;
-  padding: 5px 8px;
+  font-size: 11.5px;
+  padding: 4px 8px;
+  min-height: 26px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.session-heading button.icon {
+  width: 26px;
+  height: 26px;
+  min-width: 26px;
+  min-height: 26px;
+  padding: 4px;
 }
 .kbd {
   font-size: 10px;
@@ -1139,11 +1228,21 @@ dialog::backdrop {
 .file-button {
   display: flex;
   align-items: center;
+  justify-content: flex-start;
   gap: 8px;
   width: 100%;
   text-align: left;
-  margin-bottom: 6px;
-  font-size: 12px;
+  margin-bottom: 2px;
+  padding: 6px 10px;
+  min-height: 30px;
+  font-size: 12.5px;
+  background: transparent;
+  border-color: transparent;
+  border-radius: 8px;
+}
+.file-button:hover {
+  background: var(--raised);
+  border-color: var(--line);
 }
 .tab-row {
   display: flex;
@@ -1187,11 +1286,11 @@ dialog::backdrop {
   padding: 5px 8px;
 }
 body[data-platform="macos"] .sidebar {
-  padding-top: 47px;
+  padding-top: 38px;
 }
 body[data-platform="macos"] .topbar {
-  height: 56px;
-  padding-top: 3px;
+  height: 44px;
+  padding-top: 2px;
 }
 @media (max-width: 1000px) {
   .page {
@@ -1389,25 +1488,41 @@ label {
   flex: 1;
   display: flex;
   flex-direction: column;
+  justify-content: center;
   overflow: auto;
-  padding: clamp(44px, 11vh, 116px) 30px 40px;
+  padding: 28px 30px 36px;
 }
 .is-new > .conversation {
   flex: none;
   padding: 0;
   overflow: visible;
-  width: min(700px, 100%);
+  width: min(784px, 100%);
   margin: 0 auto;
   scrollbar-gutter: auto;
 }
+.is-new .welcome {
+  text-align: center;
+  margin: 0 auto;
+}
 .is-new > .composer-wrap {
-  width: min(700px, 100%);
+  width: min(784px, 100%);
   padding: 0;
-  margin: 28px auto 0;
+  margin: 22px auto 0;
 }
 .is-new > .suggestions {
-  width: min(700px, 100%);
-  margin: 24px auto 0;
+  width: min(784px, 100%);
+  margin: 18px auto 0;
+}
+.suggestions button {
+  background: var(--panel);
+  border-color: var(--line);
+  border-radius: 12px;
+  min-height: 74px;
+  padding: 13px 14px;
+}
+.suggestions button:hover {
+  background: var(--raised);
+  border-color: var(--line-strong, var(--line));
 }
 .model-control {
   min-width: 0;
@@ -1445,7 +1560,14 @@ label {
   color: var(--muted);
 }
 .composer-tools select {
-  max-width: 130px;
+  max-width: 92px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.composer-tools button[aria-label="Inspect Agent Preset"] {
+  padding: 0 5px;
+  min-width: 22px;
+  opacity: 0.7;
 }
 .composer-tools .workspace-switch {
   gap: 5px;
@@ -1454,7 +1576,11 @@ label {
   white-space: nowrap;
 }
 #send-button {
-  min-height: 31px;
+  min-height: 28px;
+  height: 28px;
+  padding: 0 12px;
+  border-radius: 999px;
+  font-weight: 600;
 }
 .context-label {
   display: flex;
@@ -2159,7 +2285,22 @@ dialog:focus {
 .mcp-context-toolbar { display: flex; align-items: center; gap: 10px; margin-top: 16px; }
 .mcp-context-toolbar input { flex: 1; width: 0; min-width: 120px; }
 .mcp-context-toolbar button { flex: 0 0 auto; }
-.dialog-actions { display: flex; justify-content: flex-end; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 20px; }
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 18px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+  position: sticky;
+  bottom: -18px;
+  background: var(--panel);
+  padding-bottom: 14px;
+  margin-bottom: -14px;
+  z-index: 2;
+}
 
 /* Keep oversized plain-text responses readable without horizontal overflow. */
 .plain-response { white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -2261,11 +2402,17 @@ dialog:focus {
 .compaction-banner > summary { display: flex; align-items: center; gap: 6px; cursor: pointer; font-weight: 500; }
 
 .turn-outline-rail {
-  display: flex; gap: 4px; flex-wrap: wrap; align-items: center;
-  padding: 4px 0 10px; position: sticky; top: 0; z-index: 4;
-  background: linear-gradient(var(--bg) 75%, transparent);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  align-items: center;
+  position: sticky;
+  top: 12px;
+  float: right;
+  margin-right: -42px;
+  z-index: 4;
 }
-.turn-jump { font-size: 11px; min-height: 24px; padding: 2px 8px; border-radius: 999px; }
+.turn-jump { font-size: 10.5px; min-height: 22px; height: 22px; padding: 0 7px; border-radius: 999px; }
 
 .workspace-dock { display: flex; flex-direction: column; gap: 10px; width: min(400px, 100%); }
 .dock-tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); padding-bottom: 8px; flex-wrap: wrap; }

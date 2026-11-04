@@ -42,9 +42,9 @@
     projects: "M3 6h7l2 3h9v11H3zM3 6V4h7l2 2",
     artifacts: "M4 3h12l4 4v14H4zM8 12h8M8 16h5",
     schedule: "M12 7v5l4 2M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0",
-    tools: "M5 4l15 15M16 4l4 4L8 20H4v-4z",
+    tools: "M4 6h16M4 12h10M4 18h16M17 10v4",
     settings: "M4 7h16M4 17h16M8 4v6M16 14v6",
-    sidebar: "M3 4h18v16H3zM8 4v16",
+    sidebar: "M3 4h18v16H3zM9 4v16",
     arrow: "M5 12h14M13 6l6 6-6 6",
     stop: "M6 6h12v12H6z",
     browser: "M3 4h18v16H3zM3 9h18M7 6h.01M10 6h.01",
@@ -57,7 +57,9 @@
     star: "M12 3l3 6 7 1-5 5 1 7-6-3-6 3 1-7-5-5 7-1z",
     code: "M8 6l-6 6 6 6M16 6l6 6-6 6",
     refresh: "M20 8a9 9 0 1 0 1 7M20 3v6h-6",
-    spark: "M12 3v18M3 12h18M6 6l12 12M18 6L6 18",
+    spark: "M12 3l2.2 6.8L21 12l-6.8 2.2L12 21l-2.2-6.8L3 12l6.8-2.2z",
+    bot: "M12 3v3M5 8h14a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2zM9 13h.01M15 13h.01M9 16h6",
+    grid: "M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z",
   };
   function icon(name, size = 18) {
     const node = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -510,15 +512,16 @@
           }[state.page] ||
           window.QuixiSlots?.entries("main.page")?.find((e) => e.key === state.page)?.label ||
           "Workspace";
+    const showBack = state.page === "chat" || state.page === "project";
     const top = el(
       "header",
       { class: "topbar" },
-      ib("Back", "back", () => history.back()),
+      showBack ? ib("Back", "back", () => history.back()) : null,
       el("div", { class: "crumb" }, el("strong", {}, crumb)),
       button(
         `Providers${state.providers?.configuredCount ? " · " + state.providers.configuredCount : ""}`,
         () => providerDirectory(),
-        "quiet",
+        "quiet topbar-pill",
       ),
       ib("Toggle QuixiDesk Browser", "browser", () => toggleBrowser()),
     );
@@ -676,17 +679,24 @@
   function chatPage(host) {
     const s = session();
     const main = el("section", { class: "chat-main" + (s ? "" : " is-new") });
-    if (s)
+    const viewSpec = s
+      ? (window.QuixiSlots?.renderList("conversation.views", cordisAppBridge) || [])[0]
+      : null;
+    if (s) {
+      const findBtn = ib("Find in conversation", "search", () => openConversationFind());
+      const ctxBtn = button("Context", () => contextDrawer(), "quiet");
+      ctxBtn.setAttribute("aria-label", "Files & context");
       main.append(
         el(
           "div",
           { class: "session-heading" },
           el("h2", { class: "visually-hidden" }, s.title || "Untitled task"),
+          viewSpec?.inlineControls || null,
           el(
             "span",
             { class: "context-label" },
-            icon("folder", 14),
-            currentFolder().split(/[\\/]/).filter(Boolean).pop() || "No folder selected",
+            icon("folder", 13),
+            currentFolder().split(/[\\/]/).filter(Boolean).pop() || "No folder",
           ),
           project() ? button(project().name, () => navigate("project", project().id), "quiet project-chip", "projects") : null,
           s.forkedFrom ? button("Original conversation",()=>navigate("chat",s.forkedFrom.sessionId),"quiet") : null,
@@ -696,13 +706,15 @@
             { id: "session-heading-extras-host", class: "row" },
             ...(window.QuixiSlots?.renderList("session.heading.extras", cordisAppBridge) || []),
           ),
+          viewSpec?.trailingControl || null,
           currentFolder() ? button("Open in…", () => openInDialog(s), "quiet", "folder") : null,
-          button("Find in conversation", () => openConversationFind(), "quiet", "search"),
-          button("Files & context", () => contextDrawer(), "quiet"),
+          findBtn,
+          ctxBtn,
           ib("Delete conversation", "trash", () => deleteSession(s)),
           ib("Task actions", "more", () => sessionMenu(s)),
         ),
       );
+    }
     const conversation = el("div", {
       class: "conversation",
       id: "conversation",
@@ -768,10 +780,7 @@
           ),
         ),
       );
-    const viewSpec = s
-      ? (window.QuixiSlots?.renderList("conversation.views", cordisAppBridge) || [])[0]
-      : null;
-    if (viewSpec?.bar) main.append(viewSpec.bar);
+    if (viewSpec?.bar && !viewSpec.inlineControls) main.append(viewSpec.bar);
     if (viewSpec && viewSpec.activeView && viewSpec.activeView !== "chat") {
       const altBody = viewSpec.renderAlternate?.();
       if (altBody) main.append(altBody);
@@ -1079,11 +1088,15 @@
       el("div", {id:"pending-messages", "aria-label":"Pending messages"}, ...pendingMessageRows(s)),
       el(
         "div",
-        { id: "composer-footer-host" },
-        ...(window.QuixiSlots?.renderList("composer.footer", cordisAppBridge) || []),
+        { class: "composer-subbar" },
+        el(
+          "div",
+          { id: "composer-footer-host" },
+          ...(window.QuixiSlots?.renderList("composer.footer", cordisAppBridge) || []),
+        ),
+        el("p", { class: "composer-note", id:"composer-note" },
+          running(s) ? "Enter to queue · Cmd/Ctrl+Enter to steer · Esc Esc to stop" : "Enter to send · Shift+Enter for a new line"),
       ),
-      el("p", { class: "composer-note", id:"composer-note" },
-        running(s) ? "Enter to queue · Cmd/Ctrl+Enter to steer · Esc Esc to stop" : "Enter to send · Shift+Enter for a new line"),
     );
   }
   function renderChips() {
