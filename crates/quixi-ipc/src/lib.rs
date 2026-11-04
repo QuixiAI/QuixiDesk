@@ -803,6 +803,11 @@ impl EipcRouter {
                 let msg_uuid = args.get(4).and_then(|v| v.as_str());
                 self.engine.send_chat_message(sid,&json!({"text":msg,"messageUuid":msg_uuid})).unwrap_or_else(|error|json!({"error":error}))
             }
+            ("LocalAgentModeSessions", "refreshSessionTitle")
+            | ("LocalSessions", "refreshSessionTitle") => {
+                let sid = args.first().and_then(|v| v.as_str()).unwrap_or("");
+                self.engine.refresh_session_title(sid)
+            }
             ("LocalAgentModeSessions", "updateSession") => {
                 let sid = args.first().and_then(|v| v.as_str()).unwrap_or("");
                 if !sid.is_empty() {
@@ -814,6 +819,7 @@ impl EipcRouter {
                                 found = true;
                                 if let Some(t) = opts.get("title").and_then(|v| v.as_str()) {
                                     sess.title = t.to_string();
+                                    self.engine.collaboration.set_title_pinned(sid, true);
                                 }
                                 if let Some(st) = opts.get("isStarred").and_then(|v| v.as_bool()) {
                                     sess.is_starred = st;
@@ -1479,6 +1485,7 @@ impl EipcRouter {
                         if let Some(sess) = self.engine.code_sessions.write().get_mut(sid) {
                             if let Some(t) = opts.get("title").and_then(|v| v.as_str()) {
                                 sess.title = t.to_string();
+                                self.engine.collaboration.set_title_pinned(sid, true);
                             }
                             if let Some(st) = opts.get("isStarred").and_then(|v| v.as_bool()) {
                                 sess.is_starred = st;

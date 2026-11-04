@@ -145,6 +145,12 @@ async function fixture({
     if (member === "compactSession") {
       return { compacted: true, shadowedMessages: 4, tokensBefore: 9000, tokensAfter: 2200, savedTokens: 6800 };
     }
+    if (member === "refreshSessionTitle") {
+      const target = sessions.find((s) => s.sessionId === args[0]);
+      if (!target) return { error: "Session not found" };
+      target.title = "Sidebar Titles";
+      return structuredClone(target);
+    }
     if (member === "manageGoal") {
       collabState ||= { todos: [], planMode: { active: false }, questions: [], deliverables: [], team: { enabled: false, tasks: [] }, contextMeter: {} };
       if (args[1] === "pause" && collabState.goal) { collabState.goal.phase = "paused"; collabState.goal.activation = "disarmed"; }
@@ -1871,6 +1877,32 @@ test("plan review card, timed continued question, context meter, and deliverable
     f.close();
   }
 });
+
+test("new sessions derive crisp 1-3 word titles and Task actions can regenerate titles", async () => {
+  const f = await fixture();
+  try {
+    f.type(
+      "#prompt",
+      "Please read handoff.md and continue our work on docs/proposals/bridge-the-impl-gap.md",
+    );
+    await f.click("Send");
+    const startCall = f.calls.find((c) => c.member === "start");
+    assert.ok(startCall);
+    assert.equal(startCall.args[0].title, "Bridge Impl Gap");
+    assert.equal(startCall.args[0].autoTitle, true);
+    assert.match(f.w.document.querySelector("#recents").textContent, /Bridge Impl Gap/);
+    assert.doesNotMatch(f.w.document.querySelector("#recents").textContent, /Please read handoff/);
+
+    await f.click("Task actions");
+    await f.click("Generate title");
+    await wait();
+    assert.ok(f.calls.some((c) => c.member === "refreshSessionTitle" && c.args[0] === "fixture-new"));
+    assert.match(f.w.document.querySelector("#recents").textContent, /Sidebar Titles/);
+  } finally {
+    f.close();
+  }
+});
+
 
 test("Smart Auto safety note, Markdown conversation export, and DeepSeek Messages API selector work", async () => {
   const f = await fixture({

@@ -151,6 +151,10 @@ pub struct SessionCollabState {
     pub team: TeamBoardState,
     #[serde(default)]
     pub context_meter: ContextMeterState,
+    #[serde(default)]
+    pub title_pinned: bool,
+    #[serde(default)]
+    pub title_generated: bool,
 }
 
 pub struct SessionCollaborationStore {
@@ -213,6 +217,26 @@ impl SessionCollaborationStore {
 
     pub fn is_plan_active(&self, session_id: &str) -> bool {
         self.get(session_id).plan_mode.active
+    }
+
+    pub fn is_title_pinned(&self, session_id: &str) -> bool {
+        self.get(session_id).title_pinned
+    }
+
+    pub fn set_title_pinned(&self, session_id: &str, pinned: bool) {
+        self.mutate(session_id, |st| {
+            st.title_pinned = pinned;
+        });
+    }
+
+    pub fn is_title_generated(&self, session_id: &str) -> bool {
+        self.get(session_id).title_generated
+    }
+
+    pub fn set_title_generated(&self, session_id: &str, generated: bool) {
+        self.mutate(session_id, |st| {
+            st.title_generated = generated;
+        });
     }
 
     pub fn set_plan_mode(&self, session_id: &str, active: bool) -> SessionCollabState {

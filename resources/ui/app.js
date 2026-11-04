@@ -1219,7 +1219,8 @@
       let s = session();
       if (!s) {
         const opts = {
-          title: Array.from(text || attached[0]?.name || "New task").slice(0, 80).join(""),
+          title: conciseSessionTitle(text || attached[0]?.name || ""),
+          autoTitle: true,
           permissionMode: state.permission,
           spaceId: state.project,
           userSelectedFolders: currentFolder() ? [currentFolder()] : [],
@@ -1340,6 +1341,132 @@
     const input = document.getElementById("prompt");
     if (input) input.placeholder = active ? "Add a follow-up…" : "Write your prompt to QuixiDesk";
   }
+  const TITLE_STOP_WORDS = new Set([
+    "a","an","the","of","to","in","on","at","for","with","from","by","about","into","onto","as",
+    "is","are","was","were","be","been","being","it","its","this","that","these","those","my","our",
+    "your","their","me","us","we","i","you","they","them","not","no","good","bad","like","should",
+    "would","could","can","will","may","might","must","just","really","very","some","any","all",
+    "how","what","why","when","where","who","which","here","there","have","has","had","do","does",
+    "did","and","or","but","so","if","then","than","also","too","now","still","please","let","lets",
+    "make","easier","possible","sure","help","want","need","continue","work","working","explore",
+    "exploring","read","reading","look","looking","check","checking","inspect","take","see","using",
+    "used","use","via","new","task","session",
+  ]);
+  const TITLE_BOILERPLATE = new Set([
+    "handoff","readme","agents","todo","todos","notes","plan","changelog","license","makefile",
+    "cargo","package","tsconfig","index","lib","main","mod","app","src","crates","packages","docs",
+    "proposals","test","tests","bin","bins","dist","out","blob","tree","master","pull","issues",
+    "commits","commit","users","home",
+  ]);
+  const TITLE_CANONICAL = {
+    mcp:"MCP",pty:"PTY",ptys:"PTYs",lsp:"LSP",ui:"UI",ux:"UX",ipc:"IPC",eipc:"EIPC",sse:"SSE",
+    cli:"CLI",api:"API",apis:"APIs",llm:"LLM",llms:"LLMs",dag:"DAG",dags:"DAGs",ast:"AST",sdk:"SDK",
+    sql:"SQL",ssh:"SSH",tls:"TLS",http:"HTTP",https:"HTTPS",json:"JSON",html:"HTML",css:"CSS",
+    svg:"SVG",pdf:"PDF",cpu:"CPU",gpu:"GPU",pr:"PR",prs:"PRs",ci:"CI",os:"OS",macos:"macOS",
+    ios:"iOS",ipados:"iPadOS",webkit:"WebKit",wkwebview:"WKWebView",github:"GitHub",gitlab:"GitLab",
+    openai:"OpenAI",deepseek:"DeepSeek",quixidesk:"QuixiDesk",quixi:"Quixi",javascript:"JavaScript",
+    typescript:"TypeScript",
+  };
+  function titleWordCase(raw) {
+    const t = String(raw || "").replace(/^[^a-zA-Z0-9+#]+|[^a-zA-Z0-9+#]+$/g, "");
+    if (!t) return "";
+    const lower = t.toLowerCase();
+    if (TITLE_CANONICAL[lower]) return TITLE_CANONICAL[lower];
+    if (/[A-Z]/.test(t.slice(1)) || (t.length >= 2 && t.length <= 5 && /^[A-Z0-9]+$/.test(t))) return t;
+    return t.charAt(0).toUpperCase() + t.slice(1).toLowerCase();
+  }
+  function conciseSessionTitle(raw) {
+    const cleaned = String(raw || "")
+      .replace(/```[\s\S]*?```/g, " ")
+      .replace(/<pasted_content[\s\S]*?<\/pasted_content>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!cleaned) return "New Task";
+    const slugWords = (seg) => {
+      const base = seg.split("/").pop().replace(/\.[a-z0-9]{1,5}$/i, "");
+      if (!base || TITLE_BOILERPLATE.has(base.toLowerCase())) return [];
+      return base
+        .split(/[-_.]+/)
+        .filter((p) => p && !TITLE_STOP_WORDS.has(p.toLowerCase()) && !TITLE_BOILERPLATE.has(p.toLowerCase()))
+        .map(titleWordCase)
+        .filter(Boolean)
+        .slice(0, 3);
+    };
+    let pathWords = [];
+    for (const tok of cleaned.split(/\s+/)) {
+      const stripped = tok.replace(/^["'`([\s]+|["'`)\],;:.]+$/g, "");
+      if (/^https?:\/\//i.test(stripped)) {
+        const segs = stripped.replace(/^https?:\/\//i, "").split(/[?#]/)[0].split("/").filter(Boolean);
+        for (let i = segs.length - 1; i >= 1; i--) {
+          if (/^\d+$/.test(segs[i])) continue;
+          const w = slugWords(segs[i]);
+          if (w.length) { pathWords = w; break; }
+        }
+      } else if (stripped.includes("/") || /\.(rs|ts|tsx|js|cjs|mjs|py|go|md|toml|json|yaml|yml|css|html|sh)$/i.test(stripped)) {
+        const segs = stripped.replace(/^~\//, "").split("/").filter((s) => s && s !== "." && s !== "..");
+        for (let i = segs.length - 1; i >= 0; i--) {
+          const w = slugWords(segs[i]);
+          if (w.length) { pathWords = w; break; }
+        }
+      }
+      if (pathWords.length) break;
+    }
+    let clause = cleaned.replace(/\([^)]*\)|\[[^\]]*\]/g, " ").split(/(?:\.\s+|[!?\n])/)[0].trim();
+    const prefixes = [
+      "please read handoff.md and continue our work on ",
+      "please read handoff.md and ",
+      "read handoff.md and continue our work on ",
+      "continue our work on ",
+      "continue working on ",
+      "make it easier to ",
+      "make it possible to ",
+      "i would like to ","i'd like to ","i want to ","i need to ","we need to ",
+      "can you please ","could you please ","help me ","can you ","could you ","would you ",
+      "please explore ","please read ","please check ","please ","let's ","lets ",
+    ];
+    let matched = true;
+    while (matched) {
+      matched = false;
+      const low = clause.toLowerCase();
+      for (const p of prefixes) {
+        if (low.startsWith(p)) { clause = clause.slice(p.length).trim(); matched = true; break; }
+      }
+    }
+    const ofMatch = clause.match(/\b([a-zA-Z][a-zA-Z0-9-]{2,})\s+of\s+(?:the\s+|a\s+|an\s+|our\s+|my\s+)?([a-zA-Z][a-zA-Z0-9-]{2,})\b/i);
+    if (ofMatch && !TITLE_STOP_WORDS.has(ofMatch[1].toLowerCase()) && !TITLE_STOP_WORDS.has(ofMatch[2].toLowerCase())) {
+      const subj = ofMatch[2].replace(/ies$/i, "y").replace(/([^suoi])s$/i, "$1");
+      return `${titleWordCase(subj)} ${titleWordCase(ofMatch[1])}`;
+    }
+    const topicWords = [];
+    for (const rawTok of clause.split(/[\s,;]+/)) {
+      const tok = rawTok.replace(/^["'`([\s]+|["'`)\].,;:]+$/g, "");
+      if (!tok || /^https?:\/\//i.test(tok) || tok.includes("/") || !/[a-zA-Z]/.test(tok)) continue;
+      const baseCheck = tok.replace(/\.[a-z0-9]{1,4}$/i, "").toLowerCase();
+      if (TITLE_BOILERPLATE.has(baseCheck)) continue;
+      for (const sub of tok.replace(/^[^a-zA-Z0-9]+|[^a-zA-Z0-9]+$/g, "").split(/[-_]+/)) {
+        const low = sub.toLowerCase();
+        if (sub.length <= 1 || TITLE_STOP_WORDS.has(low) || TITLE_BOILERPLATE.has(low)) continue;
+        const c = titleWordCase(sub);
+        if (c && !topicWords.some((x) => x.toLowerCase() === c.toLowerCase())) topicWords.push(c);
+        if (topicWords.length >= 3) break;
+      }
+      if (topicWords.length >= 3) break;
+    }
+    if (pathWords.length >= 2 && topicWords.length <= 1) {
+      return [...pathWords, ...topicWords.filter((w) => !pathWords.some((p) => p.toLowerCase() === w.toLowerCase()))].slice(0, 3).join(" ");
+    }
+    if (pathWords.length && topicWords.length) {
+      const merged = pathWords.slice(0, 2);
+      for (const w of topicWords) {
+        if (merged.length >= 3) break;
+        if (!merged.some((p) => p.toLowerCase() === w.toLowerCase())) merged.push(w);
+      }
+      return merged.join(" ");
+    }
+    if (pathWords.length) return pathWords.slice(0, 3).join(" ");
+    if (topicWords.length) return topicWords.slice(0, 3).join(" ");
+    return clause.split(/\s+/).map(titleWordCase).filter(Boolean).slice(0, 3).join(" ") || "New Task";
+  }
   async function refreshSession(id) {
     let old = state.sessions.find((s) => s.sessionId === id);
     if (!old) { await loadSessions(); old = state.sessions.find((s) => s.sessionId === id); }
@@ -1364,6 +1491,10 @@
           id,
           (await rpc("LocalSessions", "getTranscript", [id])) || [],
         );
+      if (state.id === id) {
+        const h2 = document.querySelector(".session-heading h2");
+        if (h2) h2.textContent = old.title || "Untitled task";
+      }
     }
     renderRecents();
   }
@@ -2536,6 +2667,14 @@
               el("pre", {class:"code-preview"}, JSON.stringify(context, null, 2)),
             ], {wide:true});
           } catch (error) { toast(error.message); }
+        }),
+        button("Generate title", async () => {
+          d.close();
+          const updated = await rpc(service(s), "refreshSessionTitle", [s.sessionId]);
+          if (updated?.error) { toast(updated.error, true); return; }
+          await loadSessions();
+          render();
+          if (updated?.title) toast(`Renamed to "${updated.title}".`);
         }),
         button("Rename", () => {
           d.close();

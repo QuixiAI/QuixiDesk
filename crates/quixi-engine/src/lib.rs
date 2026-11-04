@@ -12,6 +12,7 @@ pub mod jobs;
 pub mod code_tools;
 pub mod collaboration;
 pub mod workflows;
+pub mod session_titles;
 pub mod agent_tools;
 pub mod providers;
 mod local_ui;
@@ -316,6 +317,7 @@ impl QuixiEngine {
 
         engine.load_persisted_sessions();
         engine.load_session_recovery();
+        engine.upgrade_legacy_session_titles();
         engine.load_local_artifacts();
         engine.load_subagents();
         engine.start_scheduler();
@@ -3586,16 +3588,25 @@ impl QuixiEngine {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        let title = opts
+        let auto_title = opts
+            .get("autoTitle")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let explicit_title = opts
             .get("title")
             .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        if explicit_title.is_some() && !auto_title {
+            self.collaboration.set_title_pinned(&session_id, true);
+        }
+        let title = explicit_title
             .map(|s| s.to_string())
             .unwrap_or_else(|| {
-                if message.is_empty() {
+                if message.trim().is_empty() {
                     "QuixiDesk Session".to_string()
                 } else {
-                    message.chars().take(48).collect()
+                    session_titles::smart_fallback_title(&message)
                 }
             });
         let requested_model = opts.get("model").and_then(|v| v.as_str());
@@ -3661,6 +3672,7 @@ impl QuixiEngine {
 
         if !message.is_empty() {
             self.send_agent_message_with_uuid(&session_id, &message, message_uuid.as_deref());
+            self.auto_title_session_on_first_prompt(&session_id, &message);
         }
 
         session_id
@@ -3750,8 +3762,11 @@ impl QuixiEngine {
                     .provider_manager
                     .resolve_connected_model(Some(&sess.model));
                 session_model = sess.model.clone();
-                if sess.title == "QuixiDesk Session" && !prompt.is_empty() {
-                    sess.title = prompt.chars().take(48).collect();
+                if sess.title == "QuixiDesk Session"
+                    && !prompt.trim().is_empty()
+                    && !self.collaboration.is_title_pinned(session_id)
+                {
+                    sess.title = session_titles::smart_fallback_title(prompt);
                 }
                 sess.buffered_messages.push(user_msg.clone());
                 cwd = sess.cwd.clone();
@@ -4182,16 +4197,25 @@ impl QuixiEngine {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        let title = opts
+        let auto_title = opts
+            .get("autoTitle")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let explicit_title = opts
             .get("title")
             .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        if explicit_title.is_some() && !auto_title {
+            self.collaboration.set_title_pinned(&session_id, true);
+        }
+        let title = explicit_title
             .map(|s| s.to_string())
             .unwrap_or_else(|| {
-                if prompt.is_empty() {
+                if prompt.trim().is_empty() {
                     "QuixiDesk Code Session".to_string()
                 } else {
-                    prompt.chars().take(48).collect()
+                    session_titles::smart_fallback_title(&prompt)
                 }
             });
         let permission_mode = opts
@@ -4256,6 +4280,7 @@ impl QuixiEngine {
 
         if !prompt.is_empty() {
             self.send_code_message_with_uuid(&session_id, &prompt, message_uuid.as_deref());
+            self.auto_title_session_on_first_prompt(&session_id, &prompt);
         }
 
         session_id
@@ -4308,8 +4333,9 @@ impl QuixiEngine {
                 .resolve_connected_model(Some(&sess.model));
             if (sess.title == "QuixiDesk Code Session" || sess.title.trim().is_empty())
                 && !prompt.trim().is_empty()
+                && !self.collaboration.is_title_pinned(session_id)
             {
-                sess.title = prompt.chars().take(48).collect();
+                sess.title = session_titles::smart_fallback_title(prompt);
             }
             session_model = sess.model.clone();
             cwd = sess.cwd.clone();

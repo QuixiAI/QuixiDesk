@@ -126,8 +126,12 @@ impl QuixiEngine {
             return Ok(json!({"dispatched":true,"queued":true,"delivery":delivery,"messageUuid":uuid}));
         }
         drop(pending);
+        let is_first_prompt = !prior.iter().any(|m| m["type"].as_str() == Some("user"));
         if agent.is_some() { self.send_agent_message_content(session_id,text,Some(&uuid),content); }
         else {self.send_code_message_content(session_id,text,Some(&uuid),content);}
+        if is_first_prompt && !text.trim().is_empty() {
+            self.auto_title_session_on_first_prompt(session_id, text);
+        }
         Ok(json!({"dispatched":true,"messageUuid":uuid}))
     }
 
