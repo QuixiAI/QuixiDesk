@@ -308,6 +308,11 @@ impl EipcRouter {
                     json!("Safari")
                 }
             }
+            ("DesktopInfo", "showLogsInFileManager") => self.engine.reveal_diagnostic_logs(),
+            ("DesktopInfo", "readDiagnosticLogs") => {
+                let max_lines = args.first().and_then(Value::as_u64).unwrap_or(120) as usize;
+                self.engine.read_diagnostic_logs(max_lines)
+            }
             ("DesktopInfo", "getSystemInfo") => {
                 #[cfg(target_os = "linux")]
                 {

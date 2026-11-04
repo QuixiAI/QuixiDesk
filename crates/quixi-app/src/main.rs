@@ -731,16 +731,75 @@ fn serve_static_or_spa(resources_dir: &Path, req_path: &str) -> Response<Cow<'st
     }
 }
 
+const MAX_APP_LOG_BYTES: u64 = 10 * 1024 * 1024;
+
+#[derive(Clone)]
+struct RotatingLogTee {
+    file: Arc<parking_lot::Mutex<Option<fs::File>>>,
+}
+
+impl RotatingLogTee {
+    fn open(logs_dir: &Path) -> Self {
+        let _ = fs::create_dir_all(logs_dir);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(logs_dir, fs::Permissions::from_mode(0o700));
+        }
+        let log_path = logs_dir.join("quixi-desk.log");
+        if let Ok(meta) = fs::metadata(&log_path) {
+            if meta.len() >= MAX_APP_LOG_BYTES {
+                let _ = fs::rename(&log_path, logs_dir.join("quixi-desk.log.1"));
+            }
+        }
+        let mut opts = fs::OpenOptions::new();
+        opts.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let file = opts.open(&log_path).ok();
+        Self {
+            file: Arc::new(parking_lot::Mutex::new(file)),
+        }
+    }
+}
+
+struct TeeGuard {
+    file: Arc<parking_lot::Mutex<Option<fs::File>>>,
+}
+
+impl std::io::Write for TeeGuard {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let _ = std::io::stderr().write_all(buf);
+        if let Some(ref mut f) = *self.file.lock() {
+            let _ = f.write_all(buf);
+        }
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        let _ = std::io::stderr().flush();
+        if let Some(ref mut f) = *self.file.lock() {
+            let _ = f.flush();
+        }
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for RotatingLogTee {
+    type Writer = TeeGuard;
+    fn make_writer(&'a self) -> Self::Writer {
+        TeeGuard {
+            file: Arc::clone(&self.file),
+        }
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     if std::env::args().nth(1).as_deref() == Some("--mcp-transport-worker") {
         return quixi_mcp::transport_worker_main();
     }
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
 
     // Support multi-call invocation when QuixiDesk binary is invoked as a helper
     if let Some(arg1) = std::env::args().nth(1) {
@@ -773,8 +832,35 @@ fn main() -> anyhow::Result<()> {
         let profile = quixi_proto::paths::test_profile().unwrap();
         for sub in ["workspace", "tmp", "home/Documents", "home/Downloads", "home/Desktop"] { fs::create_dir_all(profile.join(sub))?; }
     }
+
+    let logs_dir = quixi_proto::paths::logs_dir();
+    let log_tee = RotatingLogTee::open(&logs_dir);
+    tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_target(true)
+        .with_writer(log_tee)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
+
+    let default_panic = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        tracing::error!(panic = %info, "Uncaught panic in QuixiDesk");
+        default_panic(info);
+    }));
+
     let resources_dir = locate_resources_dir();
-    tracing::info!("QuixiDesk booting with resources_dir: {:?}", resources_dir);
+    tracing::info!(
+        pid = std::process::id(),
+        version = env!("CARGO_PKG_VERSION"),
+        exe = ?std::env::current_exe().ok(),
+        data_dir = ?quixi_proto::paths::data_dir(),
+        logs_dir = ?logs_dir,
+        resources_dir = ?resources_dir,
+        "QuixiDesk desktop process started"
+    );
 
     // Start background Tokio runtime for async engine operations
     let tokio_rt = tokio::runtime::Builder::new_multi_thread()

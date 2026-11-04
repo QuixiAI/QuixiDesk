@@ -1144,4 +1144,17 @@ fn openrouter_gemini_preserves_reasoning_details_dedupes_call_ids_degrades_unsig
     server_retry.join().unwrap();
     let final_msgs = &engine.agent_sessions.read()[&sid].buffered_messages;
     assert!(!final_msgs.iter().any(|m| m["type"] == "turn_error"), "resolved turn_error must be removed");
+
+    // 3. Verify structured persistent `provider-diagnostics.jsonl` & `read_diagnostic_logs`:
+    let diag = engine.read_diagnostic_logs(50);
+    let diag_lines = diag["providerDiagnosticsTail"].as_array().unwrap();
+    assert!(!diag_lines.is_empty(), "provider-diagnostics.jsonl must record provider turn telemetry");
+    assert!(
+        diag_lines.iter().any(|l| l.as_str().unwrap_or("").contains("provider_turn_ok")),
+        "provider-diagnostics.jsonl must include provider_turn_ok entries"
+    );
+    assert!(
+        !diag_lines.iter().any(|l| l.as_str().unwrap_or("").contains("sk-replay-fixture")),
+        "API keys must never appear in diagnostic logs"
+    );
 }

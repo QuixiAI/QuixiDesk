@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
@@ -3348,10 +3348,17 @@ impl ProviderManager {
             extra_headers.insert("X-Title".to_string(), "QuixiDesk".to_string());
         }
 
+        let data_dir_for_diag = self
+            .config_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(quixi_proto::paths::data_dir);
+
         // Route native Google Gemini API (`api_format == "google"` or `generativelanguage.googleapis.com` without `/openai`)
         // or OpenAI-family / DeepSeek / OpenRouter / xAI / Groq / Mistral / TogetherAI / Fireworks / Moonshot / ZhipuAI
         // through `lazy-hq/aisdk` (`v0.5.2`) `LanguageModel::stream_text`!
         Some(complete_turn_via_aisdk(
+            &data_dir_for_diag,
             &provider_id,
             &provider_name,
             &model_id,
@@ -3361,6 +3368,114 @@ impl ProviderManager {
             extra_headers,
             &mut on_chunk,
         ))
+    }
+}
+
+const MAX_PROVIDER_DIAG_BYTES: u64 = 5 * 1024 * 1024;
+
+pub fn redact_diagnostic_text(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len().min(4096));
+    for token in raw.chars().take(4096).collect::<String>().split_whitespace() {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        if token.starts_with("sk-") || token.starts_with("rk-") || token.starts_with("AIza") || token.starts_with("ghp_") {
+            out.push_str("[REDACTED_KEY]");
+        } else {
+            out.push_str(token);
+        }
+    }
+    // Strip OpenRouter `"user_id":"..."` account identifiers if present:
+    if let Some(idx) = out.find("\"user_id\":\"") {
+        let start = idx + "\"user_id\":\"".len();
+        if let Some(end_rel) = out[start..].find('"') {
+            out.replace_range(start..start + end_rel, "redacted");
+        }
+    }
+    out
+}
+
+fn summarize_wire_messages_for_diag(wire_payload: &Value) -> Value {
+    let Some(msgs) = wire_payload.get("messages").and_then(Value::as_array) else {
+        return json!([]);
+    };
+    let tail_start = msgs.len().saturating_sub(8);
+    let rows: Vec<Value> = msgs[tail_start..]
+        .iter()
+        .enumerate()
+        .map(|(offset, m)| {
+            let role = m.get("role").and_then(Value::as_str).unwrap_or("unknown");
+            let tc_ids: Vec<&str> = m
+                .get("tool_calls")
+                .and_then(Value::as_array)
+                .map(|a| a.iter().filter_map(|tc| tc.get("id").and_then(Value::as_str)).collect())
+                .unwrap_or_default();
+            let rd_types: Vec<&str> = m
+                .get("reasoning_details")
+                .and_then(Value::as_array)
+                .map(|a| a.iter().filter_map(|r| r.get("type").and_then(Value::as_str)).collect())
+                .unwrap_or_default();
+            let has_extra = m
+                .get("tool_calls")
+                .and_then(Value::as_array)
+                .is_some_and(|a| a.iter().any(|tc| tc.get("extra_content").is_some_and(|v| !v.is_null())));
+            json!({
+                "idx": tail_start + offset,
+                "role": role,
+                "toolCallIds": tc_ids,
+                "toolCallId": m.get("tool_call_id"),
+                "hasReasoningContent": m.get("reasoning_content").is_some(),
+                "reasoningDetailTypes": rd_types,
+                "hasExtraContent": has_extra,
+            })
+        })
+        .collect();
+    json!(rows)
+}
+
+pub fn append_provider_diagnostic(data_dir: &Path, mut record: Value) {
+    static DIAG_LOCK: std::sync::OnceLock<parking_lot::Mutex<()>> = std::sync::OnceLock::new();
+    let lock = DIAG_LOCK.get_or_init(|| parking_lot::Mutex::new(()));
+    let _guard = lock.lock();
+    let logs_dir = data_dir.join("logs");
+    if fs::create_dir_all(&logs_dir).is_err() {
+        return;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&logs_dir, fs::Permissions::from_mode(0o700));
+    }
+    if let Some(obj) = record.as_object_mut() {
+        obj.entry("timestamp")
+            .or_insert_with(|| json!(chrono::Utc::now().to_rfc3339()));
+        obj.entry("pid").or_insert_with(|| json!(std::process::id()));
+        obj.entry("version")
+            .or_insert_with(|| json!(env!("CARGO_PKG_VERSION")));
+        if let Ok(exe) = std::env::current_exe() {
+            obj.entry("exe")
+                .or_insert_with(|| json!(exe.to_string_lossy()));
+        }
+    }
+    let path = logs_dir.join("provider-diagnostics.jsonl");
+    if let Ok(meta) = fs::metadata(&path) {
+        if meta.len() >= MAX_PROVIDER_DIAG_BYTES {
+            let _ = fs::rename(&path, logs_dir.join("provider-diagnostics.jsonl.1"));
+        }
+    }
+    let mut opts = fs::OpenOptions::new();
+    opts.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    if let Ok(mut f) = opts.open(&path) {
+        if let Ok(mut line) = serde_json::to_string(&record) {
+            line.push('\n');
+            use std::io::Write;
+            let _ = f.write_all(line.as_bytes());
+        }
     }
 }
 
@@ -3484,6 +3599,7 @@ pub(crate) fn sanitize_gemini_unsigned_tool_history(wire_messages: &mut Vec<Valu
 
 #[allow(clippy::too_many_arguments)]
 fn complete_turn_via_aisdk<F: FnMut(StreamChunk)>(
+    data_dir: &Path,
     provider_id: &str,
     provider_name: &str,
     model_id: &str,
@@ -3683,31 +3799,106 @@ fn complete_turn_via_aisdk<F: FnMut(StreamChunk)>(
         Ok(())
     });
 
+    let started = std::time::Instant::now();
+    let msg_count = wire_payload
+        .get("messages")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    let tool_count = wire_payload
+        .get("tools")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    let wire_tail = summarize_wire_messages_for_diag(wire_payload);
+
     match stream_outcome {
-        Ok(()) => ProviderToolTurn {
-            response_items: Vec::new(),
-            text,
-            thinking,
-            reasoning_details: (!reasoning_details.is_empty()).then_some(Value::Array(reasoning_details)),
-            tool_calls: finalized_calls,
-            provider_name: provider_name.to_owned(),
-            model_id: model_id.to_owned(),
-            stream_error: None,
-            retry_after_ms: None,
-            usage: usage_out,
-        },
-        Err((error, retry_after_ms)) => ProviderToolTurn {
-            response_items: Vec::new(),
-            text: String::new(),
-            thinking: String::new(),
-            reasoning_details: None,
-            tool_calls: Vec::new(),
-            provider_name: provider_name.to_owned(),
-            model_id: model_id.to_owned(),
-            stream_error: Some(error),
-            retry_after_ms,
-            usage: None,
-        },
+        Ok(()) => {
+            let duration_ms = started.elapsed().as_millis() as u64;
+            let tc_names: Vec<&str> = finalized_calls.iter().map(|c| c.name.as_str()).collect();
+            let tc_ids: Vec<&str> = finalized_calls.iter().map(|c| c.id.as_str()).collect();
+            tracing::info!(
+                provider = %provider_id,
+                model = %model_id,
+                duration_ms,
+                messages = msg_count,
+                tools = tool_count,
+                reasoning_details = reasoning_details.len(),
+                tool_calls = finalized_calls.len(),
+                "provider turn completed"
+            );
+            append_provider_diagnostic(
+                data_dir,
+                json!({
+                    "event": "provider_turn_ok",
+                    "provider": provider_id,
+                    "providerName": provider_name,
+                    "model": model_id,
+                    "baseUrl": base_url,
+                    "durationMs": duration_ms,
+                    "messageCount": msg_count,
+                    "toolCount": tool_count,
+                    "textChars": text.len(),
+                    "thinkingChars": thinking.len(),
+                    "reasoningDetailsCount": reasoning_details.len(),
+                    "toolCallNames": tc_names,
+                    "toolCallIds": tc_ids,
+                }),
+            );
+            ProviderToolTurn {
+                response_items: Vec::new(),
+                text,
+                thinking,
+                reasoning_details: (!reasoning_details.is_empty()).then_some(Value::Array(reasoning_details)),
+                tool_calls: finalized_calls,
+                provider_name: provider_name.to_owned(),
+                model_id: model_id.to_owned(),
+                stream_error: None,
+                retry_after_ms: None,
+                usage: usage_out,
+            }
+        }
+        Err((error, retry_after_ms)) => {
+            let duration_ms = started.elapsed().as_millis() as u64;
+            let clean_err = redact_diagnostic_text(&error);
+            tracing::error!(
+                provider = %provider_id,
+                model = %model_id,
+                base_url = %base_url,
+                duration_ms,
+                messages = msg_count,
+                tools = tool_count,
+                error = %clean_err,
+                wire_tail = %wire_tail,
+                "provider turn failed"
+            );
+            append_provider_diagnostic(
+                data_dir,
+                json!({
+                    "event": "provider_turn_error",
+                    "provider": provider_id,
+                    "providerName": provider_name,
+                    "model": model_id,
+                    "baseUrl": base_url,
+                    "durationMs": duration_ms,
+                    "messageCount": msg_count,
+                    "toolCount": tool_count,
+                    "retryAfterMs": retry_after_ms,
+                    "error": clean_err,
+                    "wireTail": wire_tail,
+                }),
+            );
+            ProviderToolTurn {
+                response_items: Vec::new(),
+                text: String::new(),
+                thinking: String::new(),
+                reasoning_details: None,
+                tool_calls: Vec::new(),
+                provider_name: provider_name.to_owned(),
+                model_id: model_id.to_owned(),
+                stream_error: Some(error),
+                retry_after_ms,
+                usage: None,
+            }
+        }
     }
 }
 
