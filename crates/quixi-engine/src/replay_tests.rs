@@ -525,3 +525,108 @@ fn ralph_fresh_agent_loop_smart_auto_reviewer_and_job_settlement_notices_work() 
     let exported = engine.export_session_markdown(&sid);
     assert!(exported["markdown"].as_str().unwrap().contains(&sid));
 }
+
+#[test]
+fn postmortem_regressions_64kb_agents_md_posix_bash_heredoc_and_cumulative_telemetry() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().join("with_like_repo");
+    fs::create_dir_all(&ws).unwrap();
+
+    // 1. 64 KB AGENTS.md fits whole without losing the bottom section:
+    let body_64k = format!("{}\nBOTTOM_GATE_RULE_MARKER", "a".repeat(64_000));
+    fs::write(ws.join("AGENTS.md"), &body_64k).unwrap();
+    let loaded = prompt_context::workspace_instructions(ws.to_str().unwrap());
+    assert!(loaded.contains("BOTTOM_GATE_RULE_MARKER"));
+    assert!(!loaded.contains("[TRUNCATED:"));
+
+    // Over 96 KB gets an explicit truncation notice with line offset:
+    let body_110k = format!("{}\nBEYOND_CAP", "line_of_rules\n".repeat(8_000));
+    fs::write(ws.join("AGENTS.md"), &body_110k).unwrap();
+    let loaded_big = prompt_context::workspace_instructions(ws.to_str().unwrap());
+    assert!(loaded_big.contains("[TRUNCATED: showing first 96000"));
+
+    // 2. Bash tool executes POSIX bash heredoc (`<< 'EOF'`) + `$?` regardless of login $SHELL:
+    let (heredoc_out, heredoc_err) = agent_tools::execute(
+        "Bash",
+        &json!({"command": "cat << 'EOF'\nPOSIX_HEREDOC_OK\nEOF\necho status=$?"}),
+        ws.to_str().unwrap(),
+        "auto",
+        &quixi_mcp::McpHost::new(),
+    );
+    assert!(!heredoc_err, "{heredoc_out}");
+    assert!(heredoc_out.contains("POSIX_HEREDOC_OK"));
+    assert!(heredoc_out.contains("status=0"));
+
+    // 3. Overflow/auto-compaction emits durable `compaction_checkpoint` via `on_message`,
+    //    and multi-round usage accumulates across rounds instead of overwriting with last round!
+    let (engine, eng_dir) = fixture_engine();
+    let work = eng_dir.path().join("work");
+    fs::create_dir_all(&work).unwrap();
+    let sid = engine.start_agent_session(&json!({
+        "cwd": work.to_string_lossy(),
+        "userSelectedFolders": [work.to_string_lossy()],
+        "permissionMode": "auto",
+        "model": "custom-model"
+    }));
+    {
+        let mut sessions = engine.agent_sessions.write();
+        let s = sessions.get_mut(&sid).unwrap();
+        for i in 0..6 {
+            s.buffered_messages.push(json!({
+                "type": if i % 2 == 0 { "user" } else { "assistant" },
+                "uuid": format!("m-{i}"),
+                "message": { "content": [{ "type": "text", "text": format!("Turn {i}") }] }
+            }));
+        }
+    }
+
+    let server = spawn_replay_server(
+        &engine,
+        "custom",
+        "custom-model",
+        vec![
+            ReplayStep::http_err(
+                "400 Bad Request",
+                json!({"error": {"code": "context_length_exceeded", "message": "context window exceeded"}}),
+            ),
+            ReplayStep::ok(vec![json!({
+                "choices": [{"delta": {"content": "## Primary Request and Intent\n- Durable checkpoint"}, "finish_reason": "stop"}]
+            })]),
+            ReplayStep::ok(vec![json!({
+                "choices": [{
+                    "delta": {
+                        "tool_calls": [{"index": 0, "id": "c1", "type": "function", "function": {"name": "ListDirectory", "arguments": "{}"}}]
+                    },
+                    "finish_reason": "tool_calls"
+                }],
+                "usage": { "prompt_tokens": 500, "completion_tokens": 50 }
+            })]),
+            ReplayStep::ok(vec![json!({
+                "choices": [{"delta": {"content": "Done."}, "finish_reason": "stop"}],
+                "usage": { "prompt_tokens": 600, "completion_tokens": 30 }
+            })]),
+        ],
+    );
+
+    let mut emitted = Vec::new();
+    let _ = engine.generate_reply_with_tools_streaming(
+        "Continue work",
+        work.to_str().unwrap(),
+        &[],
+        Some("custom-model"),
+        "auto",
+        &sid,
+        &AtomicBool::new(false),
+        |_| {},
+        |m| emitted.push(m),
+    );
+    server.join().unwrap();
+
+    // Durable compaction_checkpoint was emitted to session storage:
+    assert!(emitted.iter().any(|m| m["type"] == "compaction_checkpoint"));
+    // Cumulative usage summed 500 + 600 = 1100 input_tokens and 50 + 30 = 80 output_tokens across 2 rounds:
+    let tel = engine.last_turn_usage.read().get(&sid).cloned().unwrap();
+    assert_eq!(tel.rounds_used, 3);
+    assert_eq!(tel.usage.input_tokens, 1100);
+    assert_eq!(tel.usage.output_tokens, 80);
+}

@@ -2309,7 +2309,9 @@
               ? "You"
               : message.message?.stop_reason === "user_stop"
                 ? "QuixiDesk · Stopped"
-                : "QuixiDesk",
+                : message.message?.stop_reason === "max_rounds"
+                  ? "QuixiDesk · Round cap reached"
+                  : "QuixiDesk",
           ),
           bodyHost,
           attachedFiles.length ? el("div",{class:"transcript-attachments"},...attachedFiles.map(f=>el("div",{class:"chip"},f.preview?el("img",{src:f.preview,alt:f.name,class:"transcript-image"}):icon("file",14),f.name))) : null,

@@ -43,6 +43,15 @@ use std::process::Command;
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use uuid::Uuid;
 
+#[derive(Debug, Clone, Default)]
+pub(crate) struct TurnRunTelemetry {
+    pub usage: providers::ProviderTokenUsage,
+    pub latest_context_tokens: u64,
+    pub rounds_used: usize,
+    pub hit_max_rounds: bool,
+    pub compactions_count: u32,
+}
+
 pub type EventCallback = Arc<dyn Fn(&str, Value) + Send + Sync>;
 
 pub struct QuixiEngine {
@@ -95,7 +104,7 @@ pub struct QuixiEngine {
             ),
         >,
     >,
-    last_turn_usage: RwLock<HashMap<String, providers::ProviderTokenUsage>>,
+    last_turn_usage: RwLock<HashMap<String, TurnRunTelemetry>>,
 }
 
 impl QuixiEngine {
@@ -2838,7 +2847,7 @@ impl QuixiEngine {
         F: FnMut(StreamChunk),
         G: FnMut(Value),
     {
-        const MAX_ROUNDS: usize = 100;
+        const MAX_ROUNDS: usize = 250;
 
         let resolved_model = self.provider_manager.resolve_connected_model(model_override);
         let session_effort = self
@@ -2903,9 +2912,16 @@ impl QuixiEngine {
         let mut tool_results = agent_tools::ToolResults::default();
         let mut defer_direct_mcp = false;
         let mut accum_usage = providers::ProviderTokenUsage::default();
+        let mut latest_context_tokens = 0u64;
         let mut saw_provider_usage = false;
+        let mut rounds_used = 0usize;
+        let mut hit_max_rounds = false;
+        let mut compactions_count = 0u32;
+        let mut ever_mutated_in_turn = false;
+        let mut non_mutating_rounds = 0usize;
 
         for round in 0..MAX_ROUNDS {
+            rounds_used = round + 1;
             if cancelled.load(Ordering::SeqCst) {
                 self.active_turn_changes.lock().remove(session_id);
                 return (String::new(), final_model);
@@ -2969,8 +2985,19 @@ impl QuixiEngine {
                 tools.as_array().unwrap().iter().map(|t| t["function"]["name"].clone()).collect(),
                 task_context.artifact_reason,
             ));
-            match self.compact_context(&mut messages,&resolved_model,prompt,cancelled) {
-                Ok(compacted) if compacted && !session_id.trim().is_empty() => {
+            match self.compact_context_with_checkpoint(&mut messages,&resolved_model,prompt,cancelled) {
+                Ok((compacted, checkpoint_opt)) if compacted && !session_id.trim().is_empty() => {
+                    compactions_count += 1;
+                    if let Some((summary, shadowed)) = checkpoint_opt {
+                        on_message(json!({
+                            "type": "compaction_checkpoint",
+                            "uuid": Uuid::new_v4().to_string(),
+                            "session_id": session_id,
+                            "timestamp": Utc::now().to_rfc3339(),
+                            "summary": summary,
+                            "shadowedMessages": shadowed,
+                        }));
+                    }
                     let proj = context::estimated_tokens(&messages) as u64;
                     let win = self.model_context_window(&resolved_model) as u64;
                     self.collaboration.update_context_meter(session_id, None, None, None, None, None, proj, win, true);
@@ -3036,13 +3063,16 @@ impl QuixiEngine {
             final_model = turn.model_id.clone();
             if let Some(ref u) = turn.usage {
                 saw_provider_usage = true;
-                accum_usage.input_tokens = u.input_tokens;
+                // Accumulate true cumulative billing tokens across every round in the turn,
+                // while tracking `latest_context_tokens` separately for live context occupancy.
+                accum_usage.input_tokens += u.input_tokens;
                 accum_usage.output_tokens += u.output_tokens;
-                accum_usage.cache_read_tokens = u.cache_read_tokens;
-                accum_usage.cache_write_tokens = u.cache_write_tokens;
+                accum_usage.cache_read_tokens += u.cache_read_tokens;
+                accum_usage.cache_write_tokens += u.cache_write_tokens;
                 accum_usage.reasoning_tokens += u.reasoning_tokens;
+                latest_context_tokens =
+                    u.input_tokens + u.cache_read_tokens + u.cache_write_tokens + u.output_tokens;
                 if !session_id.trim().is_empty() {
-                    let proj = u.input_tokens + u.cache_read_tokens + u.cache_write_tokens + u.output_tokens;
                     let win = self.model_context_window(&final_model) as u64;
                     self.collaboration.update_context_meter(
                         session_id,
@@ -3051,7 +3081,7 @@ impl QuixiEngine {
                         Some(u.cache_read_tokens),
                         Some(u.cache_write_tokens),
                         Some(accum_usage.reasoning_tokens),
-                        proj,
+                        latest_context_tokens,
                         win,
                         false,
                     );
@@ -3070,10 +3100,21 @@ impl QuixiEngine {
                         || lower.contains("context window"))
                 {
                     overflow_retries += 1;
-                    if self
+                    if let Ok((_, checkpoint_opt)) = self
                         .force_overflow_compaction(&mut messages, &resolved_model, None, prompt, cancelled)
-                        .is_ok()
                     {
+                        if let Some((summary, shadowed)) = checkpoint_opt {
+                            if !session_id.trim().is_empty() {
+                                on_message(json!({
+                                    "type": "compaction_checkpoint",
+                                    "uuid": Uuid::new_v4().to_string(),
+                                    "session_id": session_id,
+                                    "timestamp": Utc::now().to_rfc3339(),
+                                    "summary": summary,
+                                    "shadowedMessages": shadowed,
+                                }));
+                            }
+                        }
                         continue;
                     }
                 }
@@ -3360,7 +3401,11 @@ impl QuixiEngine {
                 }
             }
             if mutated_files {
+                ever_mutated_in_turn = true;
+                non_mutating_rounds = 0;
                 repeat_guard.reset_on_mutation();
+            } else {
+                non_mutating_rounds += 1;
             }
             let result_msg = json!({
                 "type": "user",
@@ -3395,14 +3440,42 @@ impl QuixiEngine {
                     "content": nudge
                 }));
             }
+            // Analysis-paralysis / uncommitted-drift guard: nudge when 15 or 30 consecutive
+            // read/probe rounds pass after making edits without committing or advancing deliverables.
+            if ever_mutated_in_turn && matches!(non_mutating_rounds, 15 | 30) {
+                messages.push(json!({
+                    "role": "user",
+                    "content": format!(
+                        "[Harness progress check: {non_mutating_rounds} consecutive read/probe rounds have run since your last file edit without committing or advancing the deliverable. Converge now: run the project verification gate, commit/checkpoint verified work, or report the concrete blocker instead of over-auditing.]"
+                    )
+                }));
+            }
+            // Round-budget visibility at 60%, 80%, and 90% of MAX_ROUNDS:
+            let next_round = round + 1;
+            if next_round == (MAX_ROUNDS * 3 / 5)
+                || next_round == (MAX_ROUNDS * 4 / 5)
+                || next_round == (MAX_ROUNDS * 9 / 10)
+            {
+                let remaining = MAX_ROUNDS - next_round;
+                messages.push(json!({
+                    "role": "user",
+                    "content": format!(
+                        "[Harness round budget: {next_round}/{MAX_ROUNDS} tool rounds used ({remaining} remaining in this turn). Finish verifying and commit/checkpoint your current unit of work cleanly; do not start a brand-new multi-step sweep before checkpointing.]"
+                    )
+                }));
+            }
 
             if round + 1 == MAX_ROUNDS {
-                // Ask for a short wrap-up without tools so the turn never ends silently.
+                hit_max_rounds = true;
+                // Ask for a factual checkpoint wrap-up including all commits/edits since turn start.
                 let mut closing = messages.clone();
                 closing.push(json!({
                     "role": "user",
-                    "content": "Stop calling tools. Summarize in at most 5 sentences what you actually did (concrete results), and list anything still open."
+                    "content": format!("Turn safety cap ({MAX_ROUNDS} rounds) reached. Summarize in at most 5 sentences ALL concrete commits and file edits completed across the entire turn (not just the last few rounds), current working-tree state, and the exact next command to run on `continue`.")
                 }));
+                let limit_banner = format!(
+                    "\n\n---\n*[Paused after reaching the {MAX_ROUNDS}-round per-turn safety cap. Send `continue` (or create a `/goal`) to resume directly from the current workspace state.]*"
+                );
                 if let Some(turn) = self.provider_manager.complete_turn_with_tools_for_provider_and_effort(
                     &closing,
                     &json!([]),
@@ -3411,9 +3484,20 @@ impl QuixiEngine {
                     session_effort.as_deref(),
                     &mut on_chunk,
                 ) {
-                    if !turn.text.trim().is_empty() {
-                        final_text = turn.text;
+                    if let Some(ref u) = turn.usage {
+                        accum_usage.input_tokens += u.input_tokens;
+                        accum_usage.output_tokens += u.output_tokens;
+                        accum_usage.cache_read_tokens += u.cache_read_tokens;
+                        accum_usage.cache_write_tokens += u.cache_write_tokens;
+                        accum_usage.reasoning_tokens += u.reasoning_tokens;
                     }
+                    if !turn.text.trim().is_empty() {
+                        on_chunk(StreamChunk::Text(limit_banner.clone()));
+                        final_text = format!("{}{}", turn.text, limit_banner);
+                    }
+                } else {
+                    on_chunk(StreamChunk::Text(limit_banner.clone()));
+                    final_text.push_str(&limit_banner);
                 }
             }
         }
@@ -3422,36 +3506,45 @@ impl QuixiEngine {
             final_text = "See the tool results above for what completed and any errors.".to_string();
         }
         if !session_id.trim().is_empty() {
+            let est_ctx = context::estimated_tokens(&messages) as u64;
             let final_usage = if saw_provider_usage {
                 accum_usage
             } else {
                 providers::ProviderTokenUsage {
-                    input_tokens: context::estimated_tokens(&messages) as u64,
+                    input_tokens: est_ctx,
                     output_tokens: (final_text.len() / 4).max(1) as u64,
                     cache_read_tokens: 0,
                     cache_write_tokens: 0,
                     reasoning_tokens: 0,
                 }
             };
-            let proj = final_usage.input_tokens
-                + final_usage.cache_read_tokens
-                + final_usage.cache_write_tokens
-                + final_usage.output_tokens;
+            let proj = if latest_context_tokens > 0 {
+                latest_context_tokens
+            } else {
+                est_ctx + final_usage.output_tokens
+            };
             let win = self.model_context_window(&final_model) as u64;
             self.collaboration.update_context_meter(
                 session_id,
-                Some(final_usage.input_tokens),
+                if saw_provider_usage { None } else { Some(est_ctx) },
                 Some(final_usage.output_tokens),
-                Some(final_usage.cache_read_tokens),
-                Some(final_usage.cache_write_tokens),
+                None,
+                None,
                 Some(final_usage.reasoning_tokens),
                 proj,
                 win,
                 false,
             );
-            self.last_turn_usage
-                .write()
-                .insert(session_id.to_owned(), final_usage);
+            self.last_turn_usage.write().insert(
+                session_id.to_owned(),
+                TurnRunTelemetry {
+                    usage: final_usage,
+                    latest_context_tokens: proj,
+                    rounds_used,
+                    hit_max_rounds,
+                    compactions_count,
+                },
+            );
         }
 
         (final_text, final_model)
@@ -3909,7 +4002,9 @@ impl QuixiEngine {
 
             let duration_ms = (Utc::now().timestamp_millis() - turn_start_ms).max(1) as u64;
             let reply_iso = Utc::now().to_rfc3339();
-            let turn_usage = eng.last_turn_usage.write().remove(&sid).unwrap_or_default();
+            let telemetry = eng.last_turn_usage.write().remove(&sid).unwrap_or_default();
+            let turn_usage = telemetry.usage;
+            let stop_reason = if telemetry.hit_max_rounds { "max_rounds" } else { "end_turn" };
             let usage_json = json!({
                 "input_tokens": turn_usage.input_tokens,
                 "output_tokens": turn_usage.output_tokens,
@@ -3929,17 +4024,21 @@ impl QuixiEngine {
                     "role": "assistant",
                     "model": final_model,
                     "content": [{ "type": "text", "text": reply }],
-                    "stop_reason": "end_turn",
+                    "stop_reason": stop_reason,
                     "usage": usage_json.clone()
                 }
             });
             let result_msg = json!({
                 "type": "result",
-                "subtype": "success",
+                "subtype": if telemetry.hit_max_rounds { "max_rounds" } else { "success" },
                 "is_error": false,
                 "duration_ms": duration_ms,
                 "duration_api_ms": duration_ms,
                 "num_turns": 1,
+                "rounds_used": telemetry.rounds_used,
+                "max_rounds_reached": telemetry.hit_max_rounds,
+                "compactions": telemetry.compactions_count,
+                "latest_context_tokens": telemetry.latest_context_tokens,
                 "result": reply,
                 "session_id": sid,
                 "total_cost_usd": 0.0,
@@ -4425,7 +4524,9 @@ impl QuixiEngine {
             );
 
             let duration_ms = (Utc::now().timestamp_millis() - turn_start_ms).max(1) as u64;
-            let turn_usage = eng.last_turn_usage.write().remove(&sid).unwrap_or_default();
+            let telemetry = eng.last_turn_usage.write().remove(&sid).unwrap_or_default();
+            let turn_usage = telemetry.usage;
+            let stop_reason = if telemetry.hit_max_rounds { "max_rounds" } else { "end_turn" };
             let usage_json = json!({
                 "input_tokens": turn_usage.input_tokens,
                 "output_tokens": turn_usage.output_tokens,
@@ -4445,17 +4546,21 @@ impl QuixiEngine {
                     "role": "assistant",
                     "model": final_model,
                     "content": [{ "type": "text", "text": reply }],
-                    "stop_reason": "end_turn",
+                    "stop_reason": stop_reason,
                     "usage": usage_json.clone()
                 }
             });
             let result_msg = json!({
                 "type": "result",
-                "subtype": "success",
+                "subtype": if telemetry.hit_max_rounds { "max_rounds" } else { "success" },
                 "is_error": false,
                 "duration_ms": duration_ms,
                 "duration_api_ms": duration_ms,
                 "num_turns": 1,
+                "rounds_used": telemetry.rounds_used,
+                "max_rounds_reached": telemetry.hit_max_rounds,
+                "compactions": telemetry.compactions_count,
+                "latest_context_tokens": telemetry.latest_context_tokens,
                 "result": reply,
                 "session_id": sid,
                 "total_cost_usd": 0.0,

@@ -185,7 +185,7 @@ impl JobRegistry {
         let _ = File::create(&spill_path);
         use std::fs::File;
 
-        let shell = quixi_workspace::ShellHostEngine::default_shell();
+        let shell = quixi_workspace::ShellHostEngine::posix_bash_shell();
         let base_args: Vec<String> = if cfg!(target_os = "windows") {
             vec!["/D".into(), "/S".into(), "/C".into(), command.into()]
         } else {

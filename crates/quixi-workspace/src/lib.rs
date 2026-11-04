@@ -461,6 +461,25 @@ impl ShellHostEngine {
         }) }
     }
 
+    /// Returns a genuine POSIX `bash`/`sh` executable for the `Bash` agent tool,
+    /// avoiding syntax/glob failures when the user's interactive login `$SHELL` is `fish`/`nu`/`csh`.
+    pub fn posix_bash_shell() -> String {
+        #[cfg(target_os = "windows")]
+        {
+            std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".into())
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            if Path::new("/bin/bash").is_file() {
+                "/bin/bash".into()
+            } else if Path::new("/usr/bin/bash").is_file() {
+                "/usr/bin/bash".into()
+            } else {
+                "/bin/sh".into()
+            }
+        }
+    }
+
     pub fn new() -> Self {
         Self {
             ptys: Arc::new(Mutex::new(HashMap::new())),
@@ -608,6 +627,18 @@ impl ShellHostEngine {
         return map;
         #[cfg(not(target_os = "windows"))]
         {
+            #[cfg(target_os = "macos")]
+            if !map.contains_key("SDKROOT") {
+                for sdk in [
+                    "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+                    "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk",
+                ] {
+                    if Path::new(sdk).is_dir() {
+                        map.insert("SDKROOT".to_string(), sdk.to_string());
+                        break;
+                    }
+                }
+            }
             let current_path = map.get("PATH").cloned().unwrap_or_default();
             let mut extra_paths = vec![
                 "/opt/homebrew/bin".to_string(),
@@ -773,7 +804,7 @@ impl ShellHostEngine {
     ) -> Result<Value> {
         use std::{io::Read, process::Stdio, sync::{atomic::Ordering, mpsc}, time::{Duration, Instant}};
         if cancelled.load(Ordering::SeqCst) { anyhow::bail!("Command cancelled before starting"); }
-        let shell = Self::default_shell();
+        let shell = Self::posix_bash_shell();
         let base_args: Vec<String> = if cfg!(target_os = "windows") {
             vec!["/D".into(), "/S".into(), "/C".into(), command.into()]
         } else {
