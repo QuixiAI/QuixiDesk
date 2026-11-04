@@ -1,3 +1,6 @@
+pub mod changes;
+pub mod pty;
+
 use anyhow::Result;
 use ignore::WalkBuilder;
 use rayon::prelude::*;
@@ -253,65 +256,151 @@ impl GitPoolEngine {
         commits
     }
 
+    fn numstat_map(cwd: &Path) -> HashMap<String, (usize, usize, bool)> {
+        let mut stats = HashMap::new();
+        if let Ok(out) = Command::new("git")
+            .args(["diff", "--numstat", "HEAD"])
+            .current_dir(cwd)
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .output()
+        {
+            if out.status.success() {
+                for line in String::from_utf8_lossy(&out.stdout).lines() {
+                    let parts: Vec<&str> = line.splitn(3, '\t').collect();
+                    if parts.len() == 3 {
+                        let binary = parts[0] == "-" || parts[1] == "-";
+                        let add = parts[0].parse::<usize>().unwrap_or(0);
+                        let del = parts[1].parse::<usize>().unwrap_or(0);
+                        stats.insert(parts[2].trim().to_string(), (add, del, binary));
+                    }
+                }
+            }
+        }
+        stats
+    }
+
+    fn ahead_behind(cwd: &Path) -> (usize, usize) {
+        Command::new("git")
+            .args(["rev-list", "--left-right", "--count", "@{upstream}...HEAD"])
+            .current_dir(cwd)
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| {
+                let s = String::from_utf8_lossy(&o.stdout);
+                let mut it = s.split_whitespace();
+                let behind = it.next()?.parse::<usize>().ok()?;
+                let ahead = it.next()?.parse::<usize>().ok()?;
+                Some((ahead, behind))
+            })
+            .unwrap_or((0, 0))
+    }
+
+    fn untracked_line_count(cwd: &Path, rel: &str) -> usize {
+        let p = cwd.join(rel);
+        if let Ok(meta) = fs::symlink_metadata(&p) {
+            if meta.is_file() && meta.len() <= 1_048_576 {
+                if let Ok(text) = fs::read_to_string(&p) {
+                    return text.lines().count().max(usize::from(!text.is_empty()));
+                }
+            }
+        }
+        0
+    }
+
     pub fn get_git_diff_structured(cwd: &Path) -> Value {
         let state = Self::inspect_repo(cwd);
+        let root = state
+            .root_path
+            .as_deref()
+            .map(Path::new)
+            .unwrap_or(cwd);
+        let numstats = Self::numstat_map(root);
+        let (ahead_by, behind_by) = Self::ahead_behind(root);
         let branch = state.branch.unwrap_or_else(|| "main".to_string());
         let head = state.head_sha.unwrap_or_default();
         let mut files = Vec::new();
-        for f in state.modified_files.iter().chain(state.untracked_files.iter()) {
+        for f in &state.modified_files {
+            let (add, del, binary) = numstats.get(f).copied().unwrap_or((0, 0, false));
             files.push(json!({
                 "path": f,
                 "status": "modified",
-                "additions": 1,
+                "additions": add,
+                "deletions": del,
+                "binary": binary,
+            }));
+        }
+        for f in &state.untracked_files {
+            let add = Self::untracked_line_count(root, f);
+            files.push(json!({
+                "path": f,
+                "status": "untracked",
+                "additions": add,
                 "deletions": 0,
             }));
         }
         json!({
-            "base_ref": "main",
+            "base_ref": "HEAD",
             "head_ref": branch,
             "merge_base": head,
             "files": files,
-            "ahead_by": 0,
-            "behind_by": 0,
+            "ahead_by": ahead_by,
+            "behind_by": behind_by,
             "total_commits": 1,
         })
     }
 
     pub fn get_git_diff_stats(cwd: &Path) -> Value {
-        let state = Self::inspect_repo(cwd);
-        let count = state.modified_files.len() + state.untracked_files.len();
+        let wt = Self::get_working_tree_status(cwd);
+        let (ahead_by, behind_by) = Self::ahead_behind(cwd);
+        let count = wt["files"].as_array().map_or(0, Vec::len);
         json!({
-            "additions": count,
-            "deletions": 0,
+            "additions": wt["additions"].as_u64().unwrap_or(0),
+            "deletions": wt["deletions"].as_u64().unwrap_or(0),
             "fileCount": count,
-            "ahead_by": 0,
-            "behind_by": 0,
+            "ahead_by": ahead_by,
+            "behind_by": behind_by,
         })
     }
 
     pub fn get_working_tree_status(cwd: &Path) -> Value {
         let state = Self::inspect_repo(cwd);
+        let root = state
+            .root_path
+            .as_deref()
+            .map(Path::new)
+            .unwrap_or(cwd);
+        let numstats = Self::numstat_map(root);
         let mut files = Vec::new();
+        let mut total_add = 0usize;
+        let mut total_del = 0usize;
         for f in &state.modified_files {
+            let (add, del, binary) = numstats.get(f).copied().unwrap_or((0, 0, false));
+            total_add += add;
+            total_del += del;
             files.push(json!({
                 "path": f,
                 "status": "modified",
-                "additions": 1,
-                "deletions": 0,
+                "additions": add,
+                "deletions": del,
+                "binary": binary,
             }));
         }
         for f in &state.untracked_files {
+            let add = Self::untracked_line_count(root, f);
+            total_add += add;
             files.push(json!({
                 "path": f,
                 "status": "untracked",
-                "additions": 1,
+                "additions": add,
                 "deletions": 0,
             }));
         }
         json!({
             "files": files,
-            "additions": files.len(),
-            "deletions": 0,
+            "additions": total_add,
+            "deletions": total_del,
         })
     }
 
@@ -357,10 +446,11 @@ pub struct PtySessionEntry {
 #[derive(Clone, Default)]
 pub struct ShellHostEngine {
     pub ptys: Arc<Mutex<HashMap<String, PtySessionEntry>>>,
+    pub terminals: pty::TerminalSessionManager,
 }
 
 impl ShellHostEngine {
-    fn default_shell() -> String {
+    pub fn default_shell() -> String {
         #[cfg(target_os = "windows")]
         { std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".into()) }
         #[cfg(not(target_os = "windows"))]
@@ -371,10 +461,120 @@ impl ShellHostEngine {
         }) }
     }
 
+    /// Returns a genuine POSIX `bash`/`sh` executable for the `Bash` agent tool,
+    /// avoiding syntax/glob failures when the user's interactive login `$SHELL` is `fish`/`nu`/`csh`.
+    pub fn posix_bash_shell() -> String {
+        #[cfg(target_os = "windows")]
+        {
+            std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".into())
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            if Path::new("/bin/bash").is_file() {
+                "/bin/bash".into()
+            } else if Path::new("/usr/bin/bash").is_file() {
+                "/usr/bin/bash".into()
+            } else {
+                "/bin/sh".into()
+            }
+        }
+    }
+
     pub fn new() -> Self {
         Self {
             ptys: Arc::new(Mutex::new(HashMap::new())),
+            terminals: pty::TerminalSessionManager::new(),
         }
+    }
+
+    #[cfg(unix)]
+    fn hydrated_login_env() -> &'static HashMap<String, String> {
+        static LOGIN_ENV: std::sync::OnceLock<HashMap<String, String>> = std::sync::OnceLock::new();
+        LOGIN_ENV.get_or_init(|| {
+            use std::os::unix::process::CommandExt;
+            use std::process::Stdio;
+            use std::time::{Duration, Instant};
+
+            let candidates = [Self::default_shell(), "/bin/zsh".into(), "/bin/bash".into(), "/bin/sh".into()];
+            let begin_marker = "__QUIXI_ENV_BEGIN__";
+            let end_marker = "__QUIXI_ENV_END__";
+            let script = format!("printf '%s\\0' '{begin_marker}'; env -0; printf '%s\\0' '{end_marker}'");
+
+            for shell in candidates {
+                if !Path::new(&shell).is_file() {
+                    continue;
+                }
+                let mut cmd = Command::new(&shell);
+                cmd.args(["-ilc", &script])
+                    .env("DISABLE_AUTO_UPDATE", "true")
+                    .env("ZSH_TMUX_AUTOSTARTED", "true")
+                    .env("ZSH_TMUX_AUTOSTART", "false")
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    .process_group(0);
+                let Ok(mut child) = cmd.spawn() else {
+                    continue;
+                };
+                let pid = child.id() as i32;
+                let mut stdout = child.stdout.take().unwrap();
+                let (tx, rx) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    use std::io::Read;
+                    let mut bytes = Vec::new();
+                    let _ = stdout.read_to_end(&mut bytes);
+                    let _ = tx.send(bytes);
+                });
+                let start = Instant::now();
+                let mut finished = false;
+                while start.elapsed() < Duration::from_secs(4) {
+                    if let Ok(Some(_)) = child.try_wait() {
+                        finished = true;
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                if !finished {
+                    unsafe {
+                        libc::kill(-pid, libc::SIGKILL);
+                    }
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    continue;
+                }
+                let Ok(raw) = rx.recv_timeout(Duration::from_millis(500)) else {
+                    continue;
+                };
+                let fields: Vec<&[u8]> = raw.split(|&b| b == 0).collect();
+                let Some(b_idx) = fields.iter().position(|f| *f == begin_marker.as_bytes()) else {
+                    continue;
+                };
+                let Some(e_rel) = fields[b_idx + 1..].iter().position(|f| *f == end_marker.as_bytes()) else {
+                    continue;
+                };
+                let mut map = HashMap::new();
+                for entry in &fields[b_idx + 1..b_idx + 1 + e_rel] {
+                    if let Ok(s) = std::str::from_utf8(entry) {
+                        if let Some((k, v)) = s.split_once('=') {
+                            if !matches!(
+                                k,
+                                "PWD" | "OLDPWD" | "SHLVL" | "_"
+                                    | "DISABLE_AUTO_UPDATE"
+                                    | "ZSH_TMUX_AUTOSTARTED"
+                                    | "ZSH_TMUX_AUTOSTART"
+                            ) && !k.starts_with("QUIXI_")
+                            {
+                                map.insert(k.to_string(), v.to_string());
+                            }
+                        }
+                    }
+                }
+                if !map.is_empty() {
+                    return map;
+                }
+            }
+            HashMap::new()
+        })
     }
 
     pub fn resolve_user_shell_env() -> HashMap<String, String> {
@@ -404,25 +604,56 @@ impl ShellHostEngine {
             ]);
         }
         let mut map: HashMap<String, String> = std::env::vars().collect();
+        #[cfg(unix)]
+        {
+            // Hydrate login-shell variables when launched from a minimal GUI environment (e.g. Finder/Dock).
+            if map.get("PATH").is_none_or(|p| !p.contains("homebrew") && !p.contains(".cargo")) {
+                for (k, v) in Self::hydrated_login_env() {
+                    map.entry(k.clone()).or_insert_with(|| v.clone());
+                }
+                if let Some(login_path) = Self::hydrated_login_env().get("PATH") {
+                    map.insert("PATH".to_string(), login_path.clone());
+                }
+            }
+        }
+        // Scrub internal automation tokens and provider API secrets from agent subprocesses.
+        map.retain(|k, _| {
+            let up = k.to_ascii_uppercase();
+            up != "QUIXI_AUTOMATION_TOKEN"
+                && !up.ends_with("_API_KEY")
+                && !up.ends_with("_SECRET_KEY")
+        });
         #[cfg(target_os = "windows")]
         return map;
         #[cfg(not(target_os = "windows"))]
         {
-        let current_path = map.get("PATH").cloned().unwrap_or_default();
-        let mut extra_paths = vec![
-            "/opt/homebrew/bin".to_string(),
-            "/usr/local/bin".to_string(),
-        ];
-        {
-            let home = quixi_proto::paths::account_home();
-            extra_paths.push(home.join(".cargo/bin").to_string_lossy().to_string());
-            extra_paths.push(home.join(".local/bin").to_string_lossy().to_string());
-        }
-        if !current_path.is_empty() {
-            extra_paths.push(current_path);
-        }
-        map.insert("PATH".to_string(), extra_paths.join(":"));
-        map
+            #[cfg(target_os = "macos")]
+            if !map.contains_key("SDKROOT") {
+                for sdk in [
+                    "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+                    "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk",
+                ] {
+                    if Path::new(sdk).is_dir() {
+                        map.insert("SDKROOT".to_string(), sdk.to_string());
+                        break;
+                    }
+                }
+            }
+            let current_path = map.get("PATH").cloned().unwrap_or_default();
+            let mut extra_paths = vec![
+                "/opt/homebrew/bin".to_string(),
+                "/usr/local/bin".to_string(),
+            ];
+            {
+                let home = quixi_proto::paths::account_home();
+                extra_paths.push(home.join(".cargo/bin").to_string_lossy().to_string());
+                extra_paths.push(home.join(".local/bin").to_string_lossy().to_string());
+            }
+            if !current_path.is_empty() {
+                extra_paths.push(current_path);
+            }
+            map.insert("PATH".to_string(), extra_paths.join(":"));
+            map
         }
     }
 
@@ -456,22 +687,37 @@ impl ShellHostEngine {
 
     pub fn start_pty(&self, key: &str, cwd: &Path) -> Value {
         let shell = Self::default_shell();
+        let env = Self::resolve_user_shell_env();
+        let motd = match self.terminals.open("", Some(key), Some(key), cwd, &shell, &env) {
+            Ok((_, initial)) => initial,
+            Err(_) => format!("QuixiDesk Terminal ({})\r\n$ ", cwd.display()),
+        };
         let entry = PtySessionEntry {
             key: key.to_string(),
             cwd: cwd.to_string_lossy().to_string(),
             shell,
             cols: 120,
             rows: 32,
-            buffer: format!("QuixiDesk Terminal ({})\r\n$ ", cwd.display()),
+            buffer: motd.clone(),
             busy: false,
         };
         if let Ok(mut map) = self.ptys.lock() {
             map.insert(key.to_string(), entry);
         }
-        json!({ "ok": true })
+        json!({ "ok": true, "id": key, "motd": motd })
     }
 
     pub fn write_pty(&self, key: &str, data: &str) {
+        if self.terminals.write_raw("", key, data).is_ok() {
+            if let Ok(delta) = self.terminals.read_delta("", key, 0) {
+                if let Ok(mut map) = self.ptys.lock() {
+                    if let Some(entry) = map.get_mut(key) {
+                        entry.buffer = delta.text;
+                    }
+                }
+            }
+            return;
+        }
         if let Ok(mut map) = self.ptys.lock() {
             if let Some(entry) = map.get_mut(key) {
                 entry.buffer.push_str(data);
@@ -492,7 +738,29 @@ impl ShellHostEngine {
         }
     }
 
+    pub fn read_pty(&self, key: &str, from_offset: usize) -> Value {
+        if let Ok(delta) = self.terminals.read_delta("", key, from_offset) {
+            return serde_json::to_value(delta).unwrap_or_else(|_| json!({}));
+        }
+        if let Ok(map) = self.ptys.lock() {
+            if let Some(entry) = map.get(key) {
+                let total = entry.buffer.len();
+                let start = from_offset.min(total);
+                return json!({
+                    "id": key,
+                    "text": &entry.buffer[start..],
+                    "nextOffset": total,
+                    "totalBytes": total,
+                    "lossy": false,
+                    "status": "running",
+                });
+            }
+        }
+        json!({"error": "Terminal session not found"})
+    }
+
     pub fn resize_pty(&self, key: &str, cols: u16, rows: u16) {
+        self.terminals.resize(key, cols, rows);
         if let Ok(mut map) = self.ptys.lock() {
             if let Some(entry) = map.get_mut(key) {
                 entry.cols = cols;
@@ -502,6 +770,7 @@ impl ShellHostEngine {
     }
 
     pub fn stop_pty(&self, key: &str) {
+        let _ = self.terminals.close("", key);
         if let Ok(mut map) = self.ptys.lock() {
             map.remove(key);
         }
@@ -523,15 +792,46 @@ impl ShellHostEngine {
     }
 
     pub fn run_bash_command_cancellable(cwd: &Path, command: &str, cancelled: &std::sync::atomic::AtomicBool, timeout: std::time::Duration) -> Result<Value> {
+        Self::run_bash_command_with_policy(cwd, command, cancelled, timeout, None)
+    }
+
+    pub fn run_bash_command_with_policy(
+        cwd: &Path,
+        command: &str,
+        cancelled: &std::sync::atomic::AtomicBool,
+        timeout: std::time::Duration,
+        sandbox_policy: Option<&quixi_platform::sandbox::SandboxPolicy>,
+    ) -> Result<Value> {
         use std::{io::Read, process::Stdio, sync::{atomic::Ordering, mpsc}, time::{Duration, Instant}};
         if cancelled.load(Ordering::SeqCst) { anyhow::bail!("Command cancelled before starting"); }
-        let mut cmd = Command::new(Self::default_shell());
+        let shell = Self::posix_bash_shell();
+        let base_args: Vec<String> = if cfg!(target_os = "windows") {
+            vec!["/D".into(), "/S".into(), "/C".into(), command.into()]
+        } else {
+            vec!["-c".into(), command.into()]
+        };
+        let confined = if let Some(policy) = sandbox_policy {
+            Some(quixi_platform::sandbox::ProcessSandbox::confine(&shell, &base_args, policy))
+        } else {
+            None
+        };
+        let (prog, prog_args) = match &confined {
+            Some(c) => (c.program.as_str(), c.args.as_slice()),
+            None => (shell.as_str(), base_args.as_slice()),
+        };
+
+        let mut cmd = Command::new(prog);
         if quixi_proto::paths::test_profile().is_some() { cmd.env_clear(); }
-        #[cfg(target_os = "windows")]
-        cmd.args(["/D", "/S", "/C"]);
         #[cfg(unix)]
-        { use std::os::unix::process::CommandExt; cmd.arg("-c").process_group(0); }
-        let mut child = cmd.arg(command).current_dir(cwd).envs(Self::resolve_user_shell_env())
+        { use std::os::unix::process::CommandExt; cmd.process_group(0); }
+        let mut envs = Self::resolve_user_shell_env();
+        if let Some(Some(ref tmp)) = confined.as_ref().map(|c| &c.temp_dir_override) {
+            let s = tmp.to_string_lossy().into_owned();
+            envs.insert("TMPDIR".into(), s.clone());
+            envs.insert("TMP".into(), s.clone());
+            envs.insert("TEMP".into(), s);
+        }
+        let mut child = cmd.args(prog_args).current_dir(cwd).envs(envs)
             .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
         let pid = child.id();
         let (tx, rx) = mpsc::channel();
@@ -557,7 +857,27 @@ impl ShellHostEngine {
             std::thread::sleep(Duration::from_millis(25));
         }
         let status=status.unwrap();
-        Ok(json!({"stdout":String::from_utf8_lossy(output[0].as_ref().unwrap()),"stderr":String::from_utf8_lossy(output[1].as_ref().unwrap()),"exitCode":status.code().unwrap_or(-1),"ok":status.success()}))
+        let stdout_str = String::from_utf8_lossy(output[0].as_ref().unwrap()).into_owned();
+        let stderr_str = String::from_utf8_lossy(output[1].as_ref().unwrap()).into_owned();
+        let code = status.code().unwrap_or(-1);
+        let sandbox_meta = confined.map(|c| {
+            let outcome = c.classify_stderr(code, &stderr_str);
+            json!({
+                "mode": c.mode,
+                "enforcement": c.enforcement,
+                "outcome": outcome,
+            })
+        });
+        let mut res = json!({
+            "stdout": stdout_str,
+            "stderr": stderr_str,
+            "exitCode": code,
+            "ok": status.success(),
+        });
+        if let Some(sb) = sandbox_meta {
+            res["sandbox"] = sb;
+        }
+        Ok(res)
     }
 }
 

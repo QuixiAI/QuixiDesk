@@ -7,12 +7,18 @@ const MAX_CHILD_ROUNDS: usize = 12;
 const MAX_RECORD_BYTES: usize = 2 * 1024 * 1024;
 
 pub(crate) fn schema() -> Value {
-    json!({"type":"function","function":{"name":"Task","description":"Delegate one bounded part of the current request to a foreground subagent. Supply complete instructions and relevant context explicitly; it does not inherit conversation history. The parent waits for its result. Children default to read-only workspace tools. Set allow_edits only when the user's task requires changes or commands; parent permissions still apply. No background or nested agents. At most four tasks per turn.","parameters":{"type":"object","properties":{"title":{"type":"string","description":"Short user-visible task title."},"prompt":{"type":"string","description":"Self-contained assignment, expected deliverable, relevant facts and paths."},"allow_edits":{"type":"boolean","description":"Enable Write, Edit, Bash and WebFetch under the parent's permission mode. Default false."}},"required":["title","prompt"],"additionalProperties":false}}})
+    json!({"type":"function","function":{"name":"Task","description":"Delegate one bounded part of the current request to a subagent. Supply complete instructions and relevant context explicitly; by default it does not inherit conversation history unless fork_context is true. Multiple read-only Task calls in one response run concurrently. Subagents default to the user's chosen active model unless the user selected a subagent model; if you request a different model, the user will be asked to approve it or pick which model to use. Children default to read-only workspace tools. Set allow_edits only when the user's task requires changes or commands; set worktree to isolate edits in a dedicated Git worktree; pass resume_agent_id to continue an earlier subagent. At most four tasks per turn.","parameters":{"type":"object","properties":{"title":{"type":"string","description":"Short user-visible task title."},"prompt":{"type":"string","description":"Self-contained assignment, expected deliverable, relevant facts and paths."},"allow_edits":{"type":"boolean","description":"Enable Write, Edit, ApplyPatch, Bash and WebFetch under the parent's permission mode. Default false."},"model":{"type":"string","description":"Optional model ID from a configured provider if proposing a smaller/different model. Omit to use the user's chosen model; any unapproved non-parent model requires user confirmation."},"fork_context":{"type":"boolean","description":"Seed the subagent with the parent conversation's prior context for KV-cache sharing (default false)."},"worktree":{"type":"boolean","description":"When allow_edits is true, isolate the subagent in a fresh Git worktree under .agents/worktrees/ (default false)."},"resume_agent_id":{"type":"string","description":"Optional agentId of an earlier subagent in this conversation to send a follow-up assignment to."}},"required":["title","prompt"],"additionalProperties":false}}})
 }
 
 fn permits(name: &str, edits: bool) -> bool {
-    matches!(name, "Read" | "ListDirectory" | "Grep")
-        || edits && matches!(name, "Write" | "Edit" | "Bash" | "WebFetch")
+    matches!(
+        name,
+        "Read" | "ListDirectory" | "Grep" | "Glob" | "Lsp"
+    ) || edits
+        && matches!(
+            name,
+            "Write" | "Edit" | "ApplyPatch" | "Bash" | "WebFetch"
+        )
 }
 fn summary(record: &Value) -> Value {
     let mut v = record.clone();
@@ -176,6 +182,7 @@ impl QuixiEngine {
             })
             .map(summary)
     }
+    #[cfg(test)]
     pub(crate) fn run_subagent(
         &self,
         session: &str,
@@ -186,6 +193,21 @@ impl QuixiEngine {
         parent_model: &str,
         cancelled: &AtomicBool,
     ) -> (String, bool) {
+        self.run_subagent_with_context(session, parent_call, input, cwd, mode, parent_model, &[], cancelled)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn run_subagent_with_context(
+        &self,
+        session: &str,
+        parent_call: &str,
+        input: &Value,
+        cwd: &str,
+        mode: &str,
+        parent_model: &str,
+        parent_history: &[Value],
+        cancelled: &AtomicBool,
+    ) -> (String, bool) {
         let title = input["title"].as_str().unwrap_or("").trim();
         let prompt = input["prompt"].as_str().unwrap_or("").trim();
         if title.is_empty()
@@ -193,23 +215,93 @@ impl QuixiEngine {
             || prompt.is_empty()
             || prompt.len() > 16000
             || input.as_object().is_none_or(|o| {
-                o.keys()
-                    .any(|k| !matches!(k.as_str(), "title" | "prompt" | "allow_edits"))
+                o.keys().any(|k| {
+                    !matches!(
+                        k.as_str(),
+                        "title"
+                            | "prompt"
+                            | "allow_edits"
+                            | "model"
+                            | "fork_context"
+                            | "worktree"
+                            | "resume_agent_id"
+                    )
+                })
             })
             || input.get("allow_edits").is_some_and(|v| !v.is_boolean())
+            || input.get("fork_context").is_some_and(|v| !v.is_boolean())
+            || input.get("worktree").is_some_and(|v| !v.is_boolean())
+            || input.get("resume_agent_id").is_some_and(|v| !v.is_string())
+            || input.get("model").is_some_and(|v| {
+                !v.as_str().is_some_and(|s| s.len() <= 200 && !s.chars().any(char::is_control))
+            })
         {
-            return ("Task requires a title (1–160 bytes), prompt (1–16000 bytes), and optional boolean allow_edits. Background/nested execution is unavailable.".into(),true);
+            return ("Task requires a title (1–160 bytes), prompt (1–16000 bytes), optional boolean allow_edits/fork_context/worktree, optional string model, and optional resume_agent_id.".into(),true);
         }
         if cancelled.load(Ordering::SeqCst) {
             return ("Task stopped before delegation.".into(), true);
         }
         let edits = input["allow_edits"].as_bool().unwrap_or(false);
-        let (model, provider) = self.provider_manager.subagent_selection(parent_model);
-        let id = Uuid::new_v4().to_string();
-        let mut record = json!({"version":1,"agentId":id,"sessionId":session,"parentToolUseId":parent_call,"title":title,"prompt":prompt,"cwd":cwd,"readOnly":!edits,"model":model,"providerId":provider,"status":"running","startedAt":Utc::now().timestamp_millis(),"toolCalls":0,"failedToolCalls":0,"messages":[]});
+        let fork_context = input["fork_context"].as_bool().unwrap_or(false);
+        let use_worktree = edits && input["worktree"].as_bool().unwrap_or(false);
+        let resume_id = input["resume_agent_id"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let requested_model = input["model"].as_str().map(str::trim).unwrap_or("");
+        let (model, provider) = if !requested_model.is_empty() && requested_model != parent_model {
+            let (default_model, default_provider) =
+                self.provider_manager.subagent_selection(parent_model);
+            if default_provider.is_some() && default_model == requested_model {
+                (default_model, default_provider)
+            } else {
+                let matched = self
+                    .provider_manager
+                    .find_subagent_model_provider(requested_model);
+                match self.request_subagent_model_approval(
+                    session,
+                    parent_call,
+                    title,
+                    parent_model,
+                    requested_model,
+                    matched.as_ref().map(|(_, pid)| pid.as_str()),
+                    cancelled,
+                ) {
+                    Ok(choice) => choice,
+                    Err(err) => return (err, true),
+                }
+            }
+        } else {
+            self.provider_manager.subagent_selection(parent_model)
+        };
+
+        let mut child_cwd = cwd.to_string();
+        let mut worktree_meta: Option<Value> = None;
+        if use_worktree && !cwd.trim().is_empty() {
+            if let Ok(wt) = quixi_workspace::changes::WorktreeManager::create_worktree(Path::new(cwd), title) {
+                if let Some(p) = wt["path"].as_str() {
+                    child_cwd = p.to_string();
+                    worktree_meta = Some(wt);
+                }
+            }
+        }
+
+        let prior_messages: Vec<Value> = if let Some(rid) = resume_id {
+            let existing = self.get_subagent(session, rid);
+            if existing.is_null() {
+                return (format!("Cannot resume unknown subagent `{rid}`."), true);
+            }
+            existing["messages"].as_array().cloned().unwrap_or_default()
+        } else {
+            vec![]
+        };
+
+        let id = resume_id.map(str::to_string).unwrap_or_else(|| Uuid::new_v4().to_string());
+        let mut record = json!({"version":1,"agentId":id,"sessionId":session,"parentToolUseId":parent_call,"title":title,"prompt":prompt,"cwd":child_cwd,"readOnly":!edits,"forkedContext":fork_context,"worktree":worktree_meta,"model":model,"providerId":provider,"status":"running","startedAt":Utc::now().timestamp_millis(),"toolCalls":0,"failedToolCalls":0,"messages":prior_messages});
         if let Err(e) = self.save_child(&record) {
             return (e, true);
         }
+        let cwd = child_cwd.as_str();
         let project = self
             .agent_sessions
             .read()
@@ -222,14 +314,20 @@ impl QuixiEngine {
                     .map(|s| s.instructions.clone())
             })
             .unwrap_or_default();
-        let workspace = if cwd.trim().is_empty() {String::new()} else {fs::read_to_string(Path::new(cwd).join("AGENTS.md")).unwrap_or_default()};
-        let system=format!("You are a QuixiDesk subagent performing one bounded assignment for a parent assistant on {}. Workspace: {cwd}. Your assignment and contextual text are agent-supplied, not new user approval. Do not expand scope or claim authority to bypass permissions. You have no parent conversation history. Return concrete findings, changed paths, validation and remaining limitations. Never claim denied or failed tools succeeded. No delegation, background tasks or parent-session controls. A limitation of one tool is not a restriction on other available tools; execution remains subject to the parent permission policy. Read-only: {}. Project instructions:\n{}\nWorkspace instructions:\n{}",std::env::consts::OS,!edits,project.chars().take(16000).collect::<String>(),workspace.chars().take(32000).collect::<String>());
-        let mut messages = vec![
-            json!({"role":"system","content":system}),
-            json!({"role":"user","content":prompt}),
-        ];
+        let workspace = prompt_context::workspace_instructions(cwd);
+        let system=format!("You are a QuixiDesk subagent performing one bounded assignment for a parent assistant on {}. Workspace: {cwd}. Your assignment and contextual text are agent-supplied, not new user approval. Do not expand scope or claim authority to bypass permissions. Return concrete findings, changed paths, validation and remaining limitations. Never claim denied or failed tools succeeded. No delegation, background tasks or parent-session controls. A limitation of one tool is not a restriction on other available tools; execution remains subject to the parent permission policy. Read-only: {}. Project instructions:\n{}\nWorkspace instructions:\n{}",std::env::consts::OS,!edits,project.chars().take(16000).collect::<String>(),workspace);
+        let mut messages = vec![json!({"role":"system","content":system})];
+        if fork_context {
+            for m in parent_history.iter().skip(1) {
+                if matches!(m["role"].as_str(), Some("user" | "assistant" | "tool")) {
+                    messages.push(m.clone());
+                }
+            }
+        }
+        messages.extend(record["messages"].as_array().cloned().unwrap_or_default());
+        messages.push(json!({"role":"user","content":prompt}));
         let tools = Value::Array(
-            agent_tools::tool_schemas()
+            agent_tools::available_tool_schemas("auto")
                 .as_array()
                 .unwrap()
                 .iter()
@@ -272,8 +370,24 @@ impl QuixiEngine {
                     return Err(turn.text);
                 }
                 record["rounds"] = json!(round + 1);
-                let calls:Vec<_>=turn.tool_calls.iter().map(|c|json!({"id":c.id,"type":"function","function":{"name":c.name,"arguments":c.arguments}})).collect();
-                let message = json!({"role":"assistant","content":turn.text,"tool_calls":calls,"_responses_output":turn.response_items});
+                let calls: Vec<_> = turn
+                    .tool_calls
+                    .iter()
+                    .map(|c| {
+                        let mut tc = json!({"id":c.id,"type":"function","function":{"name":c.name,"arguments":c.arguments}});
+                        if let Some(ref extra) = c.extra_content {
+                            tc["extra_content"] = extra.clone();
+                        }
+                        tc
+                    })
+                    .collect();
+                let mut message = json!({"role":"assistant","content":turn.text,"tool_calls":calls,"_responses_output":turn.response_items});
+                if !turn.thinking.is_empty() {
+                    message["reasoning_content"] = json!(turn.thinking);
+                }
+                if let Some(ref details) = turn.reasoning_details {
+                    message["reasoning_details"] = details.clone();
+                }
                 record["messages"]
                     .as_array_mut()
                     .unwrap()
@@ -296,7 +410,7 @@ impl QuixiEngine {
                     record["activeTool"] = json!(call.name);
                     self.save_child(&record)?;
                     if permits(&call.name, edits)
-                        && matches!(call.name.as_str(), "Write" | "Edit" | "Bash")
+                        && matches!(call.name.as_str(), "Write" | "Edit" | "ApplyPatch" | "Bash")
                     {
                         record["workspaceMayHaveChanged"] = json!(true);
                     }
@@ -364,6 +478,7 @@ impl QuixiEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::providers::{ProviderManager, ProviderModelInfo};
     use std::io::{BufRead, Read, Write};
     fn fixture() -> (Arc<QuixiEngine>, String, PathBuf) {
         let dir = std::env::temp_dir().join(format!("quixi-child-test-{}", Uuid::new_v4()));
@@ -386,8 +501,9 @@ mod tests {
             let mut st = e.provider_manager.state.write();
             st.active_provider = "custom".into();
             st.active_model = "child-fixture".into();
-            st.subagent_provider = "custom".into();
-            st.subagent_model = "child-fixture".into();
+            st.subagent_provider.clear();
+            st.subagent_model.clear();
+            st.subagent_model_user_selected = false;
             let p = st.providers.iter_mut().find(|p| p.id == "custom").unwrap();
             p.configured = true;
             p.selected_model = "child-fixture".into();
@@ -724,6 +840,194 @@ mod tests {
             .unwrap();
         assert_eq!(turn.text, "Correct provider");
         worker.join().unwrap();
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn unapproved_legacy_subagent_default_is_ignored_and_cleaned_up() {
+        let dir = std::env::temp_dir().join(format!("quixi-legacy-subagent-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        // Simulate legacy providers.json that persisted anthropic/claude-sonnet-4.6 without user selection.
+        let legacy = json!({
+            "onboardingCompleted": true,
+            "activeProvider": "openrouter",
+            "activeModel": "google/gemini-4-carbon-eap",
+            "subagentProvider": "openrouter",
+            "subagentModel": "anthropic/claude-sonnet-4.6",
+            "providers": [{
+                "id": "openrouter",
+                "configured": true,
+                "apiKeyRaw": "sk-or-test-key",
+                "selectedModel": "google/gemini-4-carbon-eap",
+                "customModels": ["google/gemini-4-carbon-eap"]
+            }]
+        });
+        fs::write(
+            dir.join("providers.json"),
+            serde_json::to_vec_pretty(&legacy).unwrap(),
+        )
+        .unwrap();
+        let pm = ProviderManager::new(&dir);
+        assert_eq!(
+            pm.subagent_selection("google/gemini-4-carbon-eap"),
+            ("google/gemini-4-carbon-eap".into(), None)
+        );
+        let pub_state = pm.get_public_state();
+        assert_eq!(pub_state["subagentModel"], "");
+        assert_eq!(pub_state["subagentProvider"], "");
+        assert_eq!(pub_state["subagentModelUserSelected"], false);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn subagent_requesting_different_model_requires_user_consent_even_in_auto_mode() {
+        let (e, sid, dir) = fixture();
+        let worker = server(
+            &e,
+            vec![
+                json!({"content":"Ran with picked smaller model"}),
+                json!({"content":"Ran again without asking twice"}),
+                json!({"content":"Ran with parent model when user kept parent"}),
+            ],
+        );
+        {
+            let mut st = e.provider_manager.state.write();
+            st.active_model = "google/gemini-4-carbon-eap".into();
+            let p = st.providers.iter_mut().find(|p| p.id == "custom").unwrap();
+            p.selected_model = "google/gemini-4-carbon-eap".into();
+            p.models = vec![
+                ProviderModelInfo {
+                    id: "google/gemini-4-carbon-eap".into(),
+                    label: "Gemini 4 Carbon".into(),
+                    context_window: 128_000,
+                    supports_thinking: true,
+                    supports_vision: true,
+                },
+                ProviderModelInfo {
+                    id: "google/gemini-flash-lite".into(),
+                    label: "Gemini Flash Lite".into(),
+                    context_window: 128_000,
+                    supports_thinking: true,
+                    supports_vision: true,
+                },
+                ProviderModelInfo {
+                    id: "openai/gpt-mini".into(),
+                    label: "GPT Mini".into(),
+                    context_window: 128_000,
+                    supports_thinking: true,
+                    supports_vision: true,
+                },
+            ];
+        }
+
+        // 1. Subagent requests `google/gemini-flash-lite` in `auto` mode -> MUST pause and ask user.
+        // User picks `openai/gpt-mini` and chooses "always use for subagents".
+        let engine = e.clone();
+        let session = sid.clone();
+        let cwd = dir.join("work").to_string_lossy().into_owned();
+        let first = std::thread::spawn(move || {
+            engine.run_subagent(
+                &session,
+                "call-1",
+                &json!({"title":"Summarize file","prompt":"Summarize","model":"google/gemini-flash-lite"}),
+                &cwd,
+                "auto",
+                "google/gemini-4-carbon-eap",
+                &AtomicBool::new(false),
+            )
+        });
+        let req = {
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                let pending = e.pending_tool_approvals(&sid);
+                if !pending.as_array().unwrap().is_empty() {
+                    break pending[0].clone();
+                }
+                assert!(std::time::Instant::now() < until, "expected model consent prompt");
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        assert_eq!(req["kind"], "subagent_model");
+        assert_eq!(req["parentModel"], "google/gemini-4-carbon-eap");
+        assert_eq!(req["requestedModel"], "google/gemini-flash-lite");
+        assert_eq!(
+            e.resolve_tool_approval(
+                &sid,
+                req["requestId"].as_str().unwrap(),
+                "select_always:custom:openai/gpt-mini",
+            )["ok"],
+            true
+        );
+        let (out1, failed1) = first.join().unwrap();
+        assert!(!failed1, "{out1}");
+        let out1_json: Value = serde_json::from_str(&out1).unwrap();
+        assert_eq!(out1_json["model"], "openai/gpt-mini");
+
+        // 2. Subsequent subagent without model override (or requesting the saved model) runs immediately with `openai/gpt-mini`.
+        let (out2, failed2) = e.run_subagent(
+            &sid,
+            "call-2",
+            &json!({"title":"Second summary","prompt":"Summarize again"}),
+            dir.join("work").to_str().unwrap(),
+            "auto",
+            "google/gemini-4-carbon-eap",
+            &AtomicBool::new(false),
+        );
+        assert!(!failed2, "{out2}");
+        let out2_json: Value = serde_json::from_str(&out2).unwrap();
+        assert_eq!(out2_json["model"], "openai/gpt-mini");
+
+        // 3. Clearing subagent model in settings resets back to inheriting active model;
+        // if assistant asks for another model and user clicks "Keep parent model", it runs with parent model.
+        let cleared = e.provider_manager.complete_onboarding(&json!({
+            "subagentProvider": "",
+            "subagentModel": "",
+        }));
+        assert_eq!(cleared["subagentModel"], "");
+        assert_eq!(cleared["subagentModelUserSelected"], false);
+
+        let engine = e.clone();
+        let session = sid.clone();
+        let cwd = dir.join("work").to_string_lossy().into_owned();
+        let third = std::thread::spawn(move || {
+            engine.run_subagent(
+                &session,
+                "call-3",
+                &json!({"title":"Third summary","prompt":"Summarize","model":"google/gemini-flash-lite"}),
+                &cwd,
+                "auto",
+                "google/gemini-4-carbon-eap",
+                &AtomicBool::new(false),
+            )
+        });
+        let req3 = {
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                let pending = e.pending_tool_approvals(&sid);
+                if !pending.as_array().unwrap().is_empty() {
+                    break pending[0].clone();
+                }
+                assert!(std::time::Instant::now() < until, "expected model consent prompt after reset");
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        assert_eq!(
+            e.resolve_tool_approval(
+                &sid,
+                req3["requestId"].as_str().unwrap(),
+                "use_parent_model",
+            )["ok"],
+            true
+        );
+        let (out3, failed3) = third.join().unwrap();
+        assert!(!failed3, "{out3}");
+        let out3_json: Value = serde_json::from_str(&out3).unwrap();
+        assert_eq!(out3_json["model"], "google/gemini-4-carbon-eap");
+
+        let requests = worker.join().unwrap();
+        assert_eq!(requests[0]["model"], "openai/gpt-mini");
+        assert_eq!(requests[1]["model"], "openai/gpt-mini");
+        assert_eq!(requests[2]["model"], "google/gemini-4-carbon-eap");
         fs::remove_dir_all(dir).unwrap();
     }
 }

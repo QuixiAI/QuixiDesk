@@ -57,6 +57,66 @@ pub fn automation_port() -> u16 {
         .unwrap_or(if test_profile().is_some() { 19456 } else { 19455 })
 }
 
+pub fn automation_token_path() -> PathBuf {
+    data_dir().join("automation.token")
+}
+
+/// Optional shared secret protecting loopback automation actions on real desktops.
+/// Disposable `--test-profile` runs leave this unset unless `QUIXI_AUTOMATION_TOKEN` is supplied.
+pub fn automation_token() -> Option<String> {
+    if let Ok(tok) = std::env::var("QUIXI_AUTOMATION_TOKEN") {
+        let trimmed = tok.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    if test_profile().is_some() {
+        return None;
+    }
+    std::fs::read_to_string(automation_token_path())
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Generates or reuses `<data_dir>/automation.token` (`0600` on Unix) for non-test runs.
+pub fn ensure_automation_token() -> Option<String> {
+    if let Some(existing) = automation_token() {
+        return Some(existing);
+    }
+    if test_profile().is_some() {
+        return None;
+    }
+    let path = automation_token_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let token = uuid::Uuid::new_v4().to_string().replace('-', "");
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)
+        {
+            if file.write_all(token.as_bytes()).is_ok() {
+                return Some(token);
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        if std::fs::write(&path, token.as_bytes()).is_ok() {
+            return Some(token);
+        }
+    }
+    None
+}
+
 /// User home directory, honouring `HOME` and falling back to the OS lookup.
 pub fn home_dir() -> PathBuf {
     if let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) {

@@ -587,6 +587,106 @@ impl EipcRouter {
 
             ("LocalAgentModeSessions" | "LocalSessions", "listSubagents") => self.engine.list_subagents(args.first().and_then(Value::as_str).unwrap_or("")),
             ("LocalAgentModeSessions" | "LocalSessions", "getSubagent") => self.engine.get_subagent(args.first().and_then(Value::as_str).unwrap_or(""),args.get(1).and_then(Value::as_str).unwrap_or("")),
+            ("LocalAgentModeSessions" | "LocalSessions", "getCollabState") => {
+                let sid = args.first().and_then(Value::as_str).unwrap_or("");
+                self.engine.collaboration.client_view(sid)
+            }
+            ("LocalAgentModeSessions" | "LocalSessions", "setPlanMode") => {
+                let sid = args.first().and_then(Value::as_str).unwrap_or("");
+                let active = args.get(1).and_then(Value::as_bool).unwrap_or(false);
+                self.engine.collaboration.set_plan_mode(sid, active);
+                self.engine.emit_session_collab_updated(sid);
+                self.engine.collaboration.client_view(sid)
+            }
+            ("LocalAgentModeSessions" | "LocalSessions", "compactSession") => {
+                let sid = args.first().and_then(Value::as_str).unwrap_or("");
+                self.engine.compact_session_now(sid)
+            }
+            ("LocalAgentModeSessions" | "LocalSessions", "manageGoal") => {
+                let sid = args.first().and_then(Value::as_str).unwrap_or("");
+                let action = args.get(1).and_then(Value::as_str).unwrap_or("get");
+                let payload = args.get(2).cloned().unwrap_or_else(|| json!({}));
+                match self.engine.collaboration.manage_goal(sid, action, &payload) {
+                    Ok(v) => {
+                        self.engine.emit_session_collab_updated(sid);
+                        v
+                    }
+                    Err(e) => json!({ "error": e }),
+                }
+            }
+            ("LocalAgentModeSessions" | "LocalSessions", "setTeamMode") => {
+                let sid = args.first().and_then(Value::as_str).unwrap_or("");
+                let enabled = args.get(1).and_then(Value::as_bool).unwrap_or(false);
+                let out = self.engine.collaboration.set_team_enabled(sid, enabled);
+                self.engine.emit_session_collab_updated(sid);
+                out
+            }
+            ("LocalAgentModeSessions" | "LocalSessions", "answerUserQuestion") => {
+                let sid = args.first().and_then(Value::as_str).unwrap_or("");
+                let call_id = args.get(1).and_then(Value::as_str).unwrap_or("");
+                let answers = args
+                    .get(2)
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                self.engine.answer_continued_question(sid, call_id, answers)
+            }
+            ("LocalAgentModeSessions" | "LocalSessions", "listJobs") => {
+                let sid = args.first().and_then(Value::as_str).unwrap_or("");
+                json!(self.engine.jobs.list(sid))
+            }
+            ("LocalAgentModeSessions" | "LocalSessions", "readJobOutput") => {
+                let sid = args.first().and_then(Value::as_str).unwrap_or("");
+                let jid = args.get(1).and_then(Value::as_str).unwrap_or("");
+                let offset = args.get(2).and_then(Value::as_u64).unwrap_or(0) as usize;
+                match self.engine.jobs.read_at(sid, jid, offset) {
+                    Ok(v) => v,
+                    Err(e) => json!({ "error": e }),
+                }
+            }
+            ("LocalAgentModeSessions" | "LocalSessions", "killJob") => {
+                let sid = args.first().and_then(Value::as_str).unwrap_or("");
+                let jid = args.get(1).and_then(Value::as_str).unwrap_or("");
+                let reason = args.get(2).and_then(Value::as_str);
+                match self.engine.jobs.kill(sid, jid, reason) {
+                    Ok(v) => {
+                        self.engine.emit_session_collab_updated(sid);
+                        v
+                    }
+                    Err(e) => json!({ "error": e }),
+                }
+            }
+            ("LocalAgentModeSessions" | "LocalSessions", "searchWorkspaceFiles") => {
+                let cwd = args.first().and_then(Value::as_str).unwrap_or("");
+                let query = args.get(1).and_then(Value::as_str);
+                if cwd.trim().is_empty() || !Path::new(cwd).is_dir() {
+                    json!([])
+                } else {
+                    json!(quixi_workspace::FileIndexEngine::list_files(Path::new(cwd), query, 40))
+                }
+            }
+            ("LocalAgentModeSessions" | "LocalSessions", "listWorkspaceApps") => {
+                QuixiEngine::list_workspace_apps()
+            }
+            ("LocalAgentModeSessions" | "LocalSessions", "openWorkspacePath") => {
+                let cwd = args.first().and_then(Value::as_str).unwrap_or("");
+                let path = args.get(1).and_then(Value::as_str).unwrap_or("");
+                let app = args.get(2).and_then(Value::as_str).filter(|s| !s.is_empty());
+                let reveal = args.get(3).and_then(Value::as_bool).unwrap_or(false);
+                self.engine.open_workspace_path(cwd, path, app, reveal)
+            }
+            ("LocalAgentModeSessions" | "LocalSessions", "getActiveWorkSummary") => {
+                self.engine.active_work_summary()
+            }
+            ("LocalAgentModeSessions" | "LocalSessions", "exportSessionMarkdown") => {
+                let sid = args.first().and_then(Value::as_str).unwrap_or("");
+                self.engine.export_session_markdown(sid)
+            }
+            ("LocalAgentModeSessions" | "LocalSessions", "readShellPty") => {
+                let key = args.first().and_then(Value::as_str).unwrap_or("default");
+                let offset = args.get(1).and_then(Value::as_u64).unwrap_or(0) as usize;
+                self.engine.shell_host.read_pty(key, offset)
+            }
             // --- LocalAgentModeSessions (Cowork, Skills & 3P Chat) ---
             ("LocalAgentModeSessions", "getAll") => {
                 let mut list: Vec<_> = self
@@ -1660,26 +1760,31 @@ impl EipcRouter {
             ("LocalSessions", "getTerminalShells") => {
                 quixi_workspace::ShellHostEngine::get_terminal_shells()
             }
-            ("LocalSessions", "startShellPty") => {
+            ("LocalAgentModeSessions" | "LocalSessions", "startShellPty") => {
                 let key = args.first().and_then(|v| v.as_str()).unwrap_or("default");
+                let requested_cwd = args
+                    .get(1)
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or_else(|| quixi_proto::paths::default_workspace_str());
                 self.engine
                     .shell_host
-                    .start_pty(key, Path::new(quixi_proto::paths::default_workspace_str()))
+                    .start_pty(key, Path::new(requested_cwd))
             }
-            ("LocalSessions", "writeShellPty") => {
+            ("LocalAgentModeSessions" | "LocalSessions", "writeShellPty") => {
                 let key = args.first().and_then(|v| v.as_str()).unwrap_or("default");
                 let data = args.get(1).and_then(|v| v.as_str()).unwrap_or("");
                 self.engine.shell_host.write_pty(key, data);
                 Value::Null
             }
-            ("LocalSessions", "resizeShellPty") => {
+            ("LocalAgentModeSessions" | "LocalSessions", "resizeShellPty") => {
                 let key = args.first().and_then(|v| v.as_str()).unwrap_or("default");
                 let cols = args.get(1).and_then(|v| v.as_u64()).unwrap_or(120) as u16;
                 let rows = args.get(2).and_then(|v| v.as_u64()).unwrap_or(32) as u16;
                 self.engine.shell_host.resize_pty(key, cols, rows);
                 Value::Null
             }
-            ("LocalSessions", "stopShellPty") => {
+            ("LocalAgentModeSessions" | "LocalSessions", "stopShellPty") => {
                 let key = args.first().and_then(|v| v.as_str()).unwrap_or("default");
                 self.engine.shell_host.stop_pty(key);
                 Value::Null

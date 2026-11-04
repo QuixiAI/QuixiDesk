@@ -324,6 +324,7 @@ enum UserEvent {
     ToggleMaximize,
     MinimizeWindow,
     CloseWindow,
+    ForceCloseWindow,
     #[cfg(target_os = "linux")]
     WriteClipboard {
         text: String,
@@ -415,6 +416,7 @@ fn unwrap_webview_eval_json(raw: &str) -> Value {
 
 fn start_automation_http_server(proxy: tao::event_loop::EventLoopProxy<UserEvent>) -> anyhow::Result<()> {
     let addr = format!("127.0.0.1:{}", quixi_proto::paths::automation_port());
+    let expected_token = quixi_proto::paths::ensure_automation_token();
     // Fail startup rather than attach to another process's automation bridge.
     let listener = std::net::TcpListener::bind(&addr)?;
     std::thread::spawn(move || {
@@ -425,6 +427,7 @@ fn start_automation_http_server(proxy: tao::event_loop::EventLoopProxy<UserEvent
 
         for stream in listener.incoming().flatten() {
             let proxy = proxy.clone();
+            let expected_token = expected_token.clone();
             std::thread::spawn(move || {
                 let mut stream = stream;
                 let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
@@ -543,6 +546,23 @@ fn start_automation_http_server(proxy: tao::event_loop::EventLoopProxy<UserEvent
                 }
 
                 if method == "POST" && path.starts_with("/action") {
+                    if let Some(ref required) = expected_token {
+                        let supplied = req_header.lines().find_map(|line| {
+                            let (k, v) = line.split_once(':')?;
+                            k.trim()
+                                .eq_ignore_ascii_case("x-quixi-automation-token")
+                                .then(|| v.trim())
+                        });
+                        if supplied != Some(required.as_str()) {
+                            write_resp(
+                                &mut stream,
+                                "401 Unauthorized",
+                                "application/json",
+                                b"{\"ok\":false,\"error\":\"unauthorized_automation_token\"}",
+                            );
+                            return;
+                        }
+                    }
                     let payload: Value =
                         serde_json::from_slice(body_bytes).unwrap_or_else(|_| serde_json::json!({}));
                     let payload_str =
@@ -970,6 +990,9 @@ fn main() -> anyhow::Result<()> {
                             "close" => {
                                 let _ = protocol_proxy.send_event(UserEvent::CloseWindow);
                             }
+                            "force_close" => {
+                                let _ = protocol_proxy.send_event(UserEvent::ForceCloseWindow);
+                            }
                             _ => {}
                         }
                     }
@@ -1073,6 +1096,13 @@ fn main() -> anyhow::Result<()> {
                 if engine.has_unsaved_conversations() {
                     let state = engine.session_storage_status();
                     let _ = webview.evaluate_script(&format!("window.__quixi_show_storage_status__?.({state});"));
+                } else if quixi_proto::paths::test_profile().is_none()
+                    && engine.active_work_summary()["hasActiveWork"] == true
+                {
+                    let summary = engine.active_work_summary();
+                    let _ = webview.evaluate_script(&format!(
+                        "if (typeof window.__quixi_confirm_quit_active_work__ === 'function') {{ window.__quixi_confirm_quit_active_work__({summary}); }} else {{ fetch('/__eipc__/window-action',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{action:'force_close'}})}}); }}"
+                    ));
                 } else { exit_event_loop(control_flow); }
             }
             Event::UserEvent(user_evt) => match user_evt {
@@ -1124,8 +1154,23 @@ fn main() -> anyhow::Result<()> {
                         tracing::warn!("Close blocked: conversations have no durable save");
                         let state = engine.session_storage_status();
                         let _ = webview.evaluate_script(&format!("window.__quixi_show_storage_status__?.({state});"));
+                    } else if quixi_proto::paths::test_profile().is_none()
+                        && engine.active_work_summary()["hasActiveWork"] == true
+                    {
+                        let summary = engine.active_work_summary();
+                        let _ = webview.evaluate_script(&format!(
+                            "if (typeof window.__quixi_confirm_quit_active_work__ === 'function') {{ window.__quixi_confirm_quit_active_work__({summary}); }} else {{ fetch('/__eipc__/window-action',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{action:'force_close'}})}}); }}"
+                        ));
                     } else {
                         tracing::info!("Closing QuixiDesk with conversations durably saved");
+                        exit_event_loop(control_flow);
+                    }
+                }
+                UserEvent::ForceCloseWindow => {
+                    if engine.has_unsaved_conversations() {
+                        let state = engine.session_storage_status();
+                        let _ = webview.evaluate_script(&format!("window.__quixi_show_storage_status__?.({state});"));
+                    } else {
                         exit_event_loop(control_flow);
                     }
                 }

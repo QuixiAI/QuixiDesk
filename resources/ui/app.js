@@ -26,6 +26,10 @@
     stopped: new Set(),
     approvals: new Map(),
     subagents: new Map(),
+    collab: new Map(),
+    jobs: new Map(),
+    draftPlanMode: false,
+    dockTab: "files",
     collapsed: localStorage.getItem("quixi.sidebar") === "closed",
     settingsTab: "general",
   };
@@ -667,6 +671,8 @@
           ),
           project() ? button(project().name, () => navigate("project", project().id), "quiet project-chip", "projects") : null,
           s.forkedFrom ? button("Original conversation",()=>navigate("chat",s.forkedFrom.sessionId),"quiet") : null,
+          el("span", { id: "session-collab-pills", class: "row" }, contextMeterPill(s), jobsBadge(s)),
+          currentFolder() ? button("Open in…", () => openInDialog(s), "quiet", "folder") : null,
           button("Find in conversation", () => openConversationFind(), "quiet", "search"),
           button("Files & context", () => contextDrawer(), "quiet"),
           ib("Delete conversation", "trash", () => deleteSession(s)),
@@ -779,6 +785,73 @@
       saveDraft();
       return true;
     };
+    const triggersBox = el("div", { id: "composer-triggers", class: "composer-triggers", hidden: true });
+    let triggerGen = 0;
+    async function refreshTriggers() {
+      const val = ta.value;
+      const caret = ta.selectionStart ?? val.length;
+      const before = val.slice(0, caret);
+      const token = ++triggerGen;
+      if (/^\/[a-zA-Z0-9_-]*$/.test(before)) {
+        const q = before.slice(1).toLowerCase();
+        const cmds = [
+          ["/plan", "Toggle Plan Mode (read-only exploration + ExitPlanMode review)"],
+          ["/compact", "Condense older context into a structured checkpoint"],
+          ["/goal ", "Set an autonomous multi-round completion objective"],
+          ["/team", "Toggle shared Team Task DAG board"],
+          ["/export", "Export conversation transcript as Markdown"],
+          ["/model", "Choose active model or provider"],
+        ].filter(([name]) => name.slice(1).trim().startsWith(q));
+        if (!cmds.length) { triggersBox.hidden = true; return; }
+        triggersBox.replaceChildren(...cmds.map(([cmd, desc]) =>
+          button([el("strong", {}, cmd.trim()), el("small", {}, desc)], () => {
+            triggersBox.hidden = true;
+            if (cmd === "/model") { ta.value = ""; saveDraft(); modelPicker(); return; }
+            ta.value = cmd;
+            ta.focus();
+            ta.setSelectionRange(ta.value.length, ta.value.length);
+            saveDraft();
+          }, "trigger-option")));
+        triggersBox.hidden = false;
+        return;
+      }
+      const atMatch = before.match(/(?:^|\s)@([^\s@]*)$/);
+      if (atMatch) {
+        const query = atMatch[1];
+        const items = [];
+        const folder = s?.cwd || currentFolder();
+        if (folder && !query.startsWith("session:")) {
+          const files = (await rpc(s ? service(s) : "LocalAgentModeSessions", "searchWorkspaceFiles", [folder, query])) || [];
+          if (token !== triggerGen) return;
+          for (const f of files.slice(0, 6)) {
+            const rel = f.relativePath || f.name;
+            items.push(["@" + rel, f.isDir ? "Directory" : "Workspace file"]);
+          }
+        }
+        const sq = query.replace(/^session:/, "").toLowerCase();
+        for (const other of state.sessions.filter(x => !x.isArchived && x.sessionId !== s?.sessionId)) {
+          if (!sq || (other.title || "").toLowerCase().includes(sq) || other.sessionId.toLowerCase().includes(sq)) {
+            items.push(["@session:" + other.sessionId, "Reference conversation · " + (other.title || "Untitled")]);
+            if (items.length >= 9) break;
+          }
+        }
+        if (!items.length) { triggersBox.hidden = true; return; }
+        triggersBox.replaceChildren(...items.map(([ref, desc]) =>
+          button([el("strong", {}, ref), el("small", {}, desc)], () => {
+            const startPos = before.lastIndexOf("@");
+            ta.value = val.slice(0, startPos) + ref + " " + val.slice(caret);
+            triggersBox.hidden = true;
+            ta.focus();
+            const nextCaret = startPos + ref.length + 1;
+            ta.setSelectionRange(nextCaret, nextCaret);
+            saveDraft();
+          }, "trigger-option")));
+        triggersBox.hidden = false;
+        return;
+      }
+      triggersBox.hidden = true;
+    }
+
     const ta = el("textarea", {
       id: "prompt",
       "data-draft-key": draftKey(),
@@ -789,7 +862,7 @@
       "aria-label": "Write your prompt to QuixiDesk",
       rows: 3,
       value: getDraft(),
-      onInput: () => { resetHistory(); saveDraft(); },
+      onInput: () => { resetHistory(); saveDraft(); void refreshTriggers(); },
       onPaste: (event) => {
         if (pendingSubmissions.has(draftKey())) return;
         const clipboard = event.clipboardData;
@@ -805,9 +878,15 @@
         saveDraft(); renderChips();
       },
       onKeydown: (e) => {
+        if (e.key === "Escape" && !triggersBox.hidden) {
+          e.preventDefault();
+          triggersBox.hidden = true;
+          return;
+        }
         if (recallPrompt(e)) return;
         if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
           e.preventDefault();
+          triggersBox.hidden = true;
           sendPrompt("queue");
         }
       },
@@ -832,6 +911,7 @@
       [
         ["default", "Manual"],
         ["acceptEdits", "Allow file edits"],
+        ["smartAuto", "Smart Auto"],
         ["auto", "Auto"],
       ],
       s?.permissionMode || state.permission,
@@ -867,12 +947,36 @@
     );
     chooseModel.setAttribute("aria-label", "Choose model");
     chooseModel.title = state.providers?.activeModel || "Choose model";
+    const planActive = s ? Boolean(state.collab.get(s.sessionId)?.planMode?.active) : state.draftPlanMode;
+    const planToggle = button(
+      "Plan",
+      async () => {
+        const cur = session();
+        if (cur) {
+          const next = !Boolean(state.collab.get(cur.sessionId)?.planMode?.active);
+          const updated = await rpc(service(cur), "setPlanMode", [cur.sessionId, next]);
+          if (updated) state.collab.set(cur.sessionId, updated);
+          toast(next ? "Plan Mode enabled — mutations are paused until plan approval." : "Plan Mode disabled.");
+          renderPage();
+        } else {
+          state.draftPlanMode = !state.draftPlanMode;
+          renderPage();
+        }
+      },
+      "quiet plan-toggle" + (planActive ? " active" : ""),
+      "spark",
+    );
+    planToggle.id = "plan-toggle-button";
+    planToggle.setAttribute("aria-pressed", String(planActive));
+    planToggle.title = "Toggle Plan Mode (explore read-only and review plan before edits)";
     return el(
       "div",
       { class: "composer-wrap" },
+      el("div", { id: "collab-bars-host" }, collabComposerBars(s)),
+      triggersBox,
       el(
         "div",
-        { class: "composer" },
+        { class: "composer" + (planActive ? " is-planning" : "") },
         el("div", { class: "chips", id: "attachment-chips" }),
         ta,
         fileInput,
@@ -893,6 +997,7 @@
             "workspace-switch",
           ),
           mode,
+          planToggle,
           el("span", { class: "spacer" }),
           el("span", { class: "model-control" }, chooseModel),
           stop,
@@ -1006,8 +1111,90 @@
   async function sendPrompt(delivery = "queue") {
     const input = document.getElementById("prompt");
     if (!input) return;
-    const text = input.value.trim();
+    let text = input.value.trim();
     if (!text && !state.attachments.length) return;
+    // Handle local slash commands (`/compact`, `/plan`, `/goal`, `/team`, `/model`) before provider dispatch.
+    if (text.startsWith("/") && !state.attachments.length) {
+      const [cmd, ...restTokens] = text.split(/\s+/);
+      const argText = restTokens.join(" ").trim();
+      const cur = session();
+      if (cmd === "/model") {
+        input.value = "";
+        saveDraft();
+        modelPicker();
+        return;
+      }
+      if (cmd === "/export") {
+        if (!cur) { toast("Open a conversation first to export it.", true); return; }
+        input.value = "";
+        saveDraft();
+        await exportConversationDialog(cur);
+        return;
+      }
+      if (cmd === "/compact") {
+        if (!cur) { toast("Open a conversation first to compact its context.", true); return; }
+        input.value = "";
+        saveDraft();
+        const res = await rpc(service(cur), "compactSession", [cur.sessionId]);
+        if (res?.error) { toast(res.error, true); return; }
+        await refreshSession(cur.sessionId);
+        renderPage();
+        toast(res?.compacted ? `Compacted ${res.shadowedMessages} messages (saved ~${res.savedTokens} tokens).` : (res?.message || "Already compact."));
+        return;
+      }
+      if (cmd === "/team") {
+        if (!cur) { toast("Start a conversation first to toggle Team mode.", true); return; }
+        const curEnabled = Boolean(state.collab.get(cur.sessionId)?.team?.enabled);
+        const next = argText === "off" ? false : argText === "on" ? true : !curEnabled;
+        await rpc(service(cur), "setTeamMode", [cur.sessionId, next]);
+        input.value = "";
+        saveDraft();
+        await refreshSession(cur.sessionId);
+        renderPage();
+        toast(next ? "Agent Team task board enabled." : "Agent Team task board disabled.");
+        return;
+      }
+      if (cmd === "/goal") {
+        if (!cur) { toast("Start a conversation first, or write your goal after starting.", true); return; }
+        if (!argText || argText === "clear") {
+          await rpc(service(cur), "manageGoal", [cur.sessionId, "clear", {}]);
+          input.value = "";
+          saveDraft();
+          await refreshSession(cur.sessionId);
+          renderPage();
+          toast("Cleared session goal.");
+          return;
+        }
+        const created = await rpc(service(cur), "manageGoal", [cur.sessionId, "create", { objective: argText }]);
+        if (created?.error) { toast(created.error, true); return; }
+        text = argText;
+      }
+      if (cmd === "/plan") {
+        const turnOff = argText.toLowerCase() === "off";
+        if (cur) {
+          const next = turnOff ? false : !argText ? !Boolean(state.collab.get(cur.sessionId)?.planMode?.active) : true;
+          const updated = await rpc(service(cur), "setPlanMode", [cur.sessionId, next]);
+          if (updated) state.collab.set(cur.sessionId, updated);
+          if (!argText || turnOff) {
+            input.value = "";
+            saveDraft();
+            renderPage();
+            toast(next ? "Plan Mode enabled." : "Plan Mode disabled.");
+            return;
+          }
+          text = argText;
+        } else {
+          state.draftPlanMode = !turnOff;
+          if (!argText || turnOff) {
+            input.value = "";
+            saveDraft();
+            renderPage();
+            return;
+          }
+          text = argText;
+        }
+      }
+    }
     if (!state.providers?.hasConfiguredProvider) {
       providerDirectory();
       toast("Connect a provider before sending a task.");
@@ -1042,6 +1229,11 @@
         if(!s?.sessionId)throw new Error(s?.error||"Conversation could not be created.");
         s._kind = "task";
         state.sessions.unshift(s);
+        if (state.draftPlanMode) {
+          state.draftPlanMode = false;
+          const updated = await rpc("LocalAgentModeSessions", "setPlanMode", [s.sessionId, true]);
+          if (updated) state.collab.set(s.sessionId, updated);
+        }
       }
       state.stopped.delete(s.sessionId);
       const uuid = crypto.randomUUID();
@@ -1128,6 +1320,23 @@
     const note = document.getElementById("composer-note");
     if (note) note.textContent = active ? "Enter to queue · Shift+Enter for a new line" : "Enter to send · Shift+Enter for a new line";
     document.getElementById("pending-messages")?.replaceChildren(...pendingMessageRows(session()));
+    const curSession = session();
+    const pillsHost = document.getElementById("session-collab-pills");
+    if (pillsHost && curSession) {
+      pillsHost.replaceChildren(...[contextMeterPill(curSession), jobsBadge(curSession)].filter(Boolean));
+    }
+    const barsHost = document.getElementById("collab-bars-host");
+    if (barsHost) {
+      const bars = collabComposerBars(curSession);
+      barsHost.replaceChildren(...(bars ? [bars] : []));
+    }
+    const planBtn = document.getElementById("plan-toggle-button");
+    if (planBtn) {
+      const isPlan = curSession ? Boolean(state.collab.get(curSession.sessionId)?.planMode?.active) : state.draftPlanMode;
+      planBtn.className = "quiet plan-toggle" + (isPlan ? " active" : "");
+      planBtn.setAttribute("aria-pressed", String(isPlan));
+      document.querySelector(".composer")?.classList.toggle("is-planning", isPlan);
+    }
     const input = document.getElementById("prompt");
     if (input) input.placeholder = active ? "Add a follow-up…" : "Write your prompt to QuixiDesk";
   }
@@ -1146,6 +1355,10 @@
       );
       const children = await rpc(service(old), "listSubagents", [id]);
       state.subagents.set(id, Array.isArray(children) ? children : []);
+      const collab = await rpc(service(old), "getCollabState", [id]);
+      if (collab && typeof collab === "object") state.collab.set(id, collab);
+      const jobs = await rpc(service(old), "listJobs", [id]);
+      if (Array.isArray(jobs)) state.jobs.set(id, jobs);
       if (old._kind === "code")
         state.transcripts.set(
           id,
@@ -1153,6 +1366,282 @@
         );
     }
     renderRecents();
+  }
+  function formatTokens(n) {
+    n = Number(n || 0);
+    if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
+    if (n >= 1_000) return (n / 1_000).toFixed(1) + "k";
+    return String(n);
+  }
+  function contextMeterPill(s) {
+    const m = state.collab.get(s.sessionId)?.contextMeter;
+    if (!m || (!m.projectedTokens && !m.pressureTokens)) return null;
+    const used = m.projectedTokens || m.pressureTokens || 0;
+    const win = m.contextWindow || 128000;
+    const pct = Math.min(100, Math.round((used / Math.max(1, win)) * 100));
+    const totalIn = (m.inputTokens || 0) + (m.cacheReadTokens || 0) + (m.cacheWriteTokens || 0);
+    const cachePct = totalIn > 0 && m.cacheReadTokens > 0 ? Math.round((m.cacheReadTokens / totalIn) * 100) : 0;
+    const label = `${formatTokens(used)} / ${formatTokens(win)}${cachePct ? ` · ${cachePct}% cached` : ""}`;
+    return button(label, () => {
+      const d = dialog("Context & token usage", [
+        el("p", { class: "hint" }, `Context occupancy: ${pct}% of ${win.toLocaleString()} tokens`),
+        el("div", { class: "meter-track" }, el("div", { class: "meter-fill", style: `width:${pct}%` })),
+        el("div", { class: "stats-grid" },
+          el("div", {}, el("small", {}, "Uncached input"), el("strong", {}, (m.inputTokens || 0).toLocaleString())),
+          el("div", {}, el("small", {}, "Cache hits"), el("strong", {}, (m.cacheReadTokens || 0).toLocaleString())),
+          el("div", {}, el("small", {}, "Output tokens"), el("strong", {}, (m.outputTokens || 0).toLocaleString())),
+          el("div", {}, el("small", {}, "Compactions"), el("strong", {}, String(m.compactions || 0))),
+        ),
+        el("div", { class: "dialog-actions" },
+          button("Compact context now", async () => {
+            const res = await rpc(service(s), "compactSession", [s.sessionId]);
+            if (res?.error) throw new Error(res.error);
+            d.close();
+            await refreshSession(s.sessionId);
+            renderPage();
+            toast(res?.compacted ? `Saved ~${res.savedTokens} tokens.` : (res?.message || "Already compact."));
+          }, "primary"),
+          button("Close", () => d.close(), "quiet"),
+        ),
+      ]);
+    }, "quiet context-meter-pill" + (pct >= 75 ? " high" : ""));
+  }
+  function jobsBadge(s) {
+    const list = state.jobs.get(s.sessionId) || [];
+    if (!list.length) return null;
+    const activeCount = list.filter(j => ["running", "stopping"].includes(j.status)).length;
+    return button(
+      activeCount ? `Jobs · ${activeCount} running` : `Jobs · ${list.length}`,
+      () => openJobsDialog(s),
+      "quiet jobs-pill" + (activeCount ? " active" : ""),
+      "tools",
+    );
+  }
+  async function openJobsDialog(s) {
+    const list = (await rpc(service(s), "listJobs", [s.sessionId])) || [];
+    state.jobs.set(s.sessionId, list);
+    const body = el("div", { class: "jobs-list" });
+    for (const j of list) {
+      const outPre = el("pre", { class: "code-preview job-output", hidden: true }, "Loading…");
+      const viewBtn = button("Output", async () => {
+        outPre.hidden = !outPre.hidden;
+        if (!outPre.hidden) {
+          const r = await rpc(service(s), "readJobOutput", [s.sessionId, j.id, 0]);
+          outPre.textContent = r?.text || "(no output yet)";
+        }
+      }, "quiet");
+      const killBtn = ["running", "stopping"].includes(j.status)
+        ? button("Stop job", async () => {
+            const r = await rpc(service(s), "killJob", [s.sessionId, j.id, "Stopped by user"]);
+            if (r?.error) throw new Error(r.error);
+            toast("Requested job stop.");
+            d.close();
+            await refreshSession(s.sessionId);
+            renderPage();
+          }, "quiet danger")
+        : null;
+      body.append(
+        el("div", { class: "job-card" },
+          el("div", { class: "row" },
+            el("div", { class: "grow" },
+              el("strong", {}, j.label || j.id),
+              el("p", { class: "hint" }, [j.id, j.status, j.detail].filter(Boolean).join(" · ")),
+            ),
+            viewBtn,
+            killBtn,
+          ),
+          outPre,
+        ),
+      );
+    }
+    if (!list.length) body.append(el("p", { class: "muted" }, "No background jobs in this conversation."));
+    const d = dialog("Background jobs", body, { wide: true });
+  }
+  async function openInDialog(s) {
+    const folder = s?.cwd || currentFolder();
+    if (!folder) return;
+    const apps = (await rpc(service(s), "listWorkspaceApps", [])) || [{ id: "finder", name: "File Manager" }];
+    const d = dialog("Open workspace in…", [
+      el("p", { class: "path" }, folder),
+      el("div", { class: "list" },
+        ...apps.map(a => button(a.name, async () => {
+          const r = await rpc(service(s), "openWorkspacePath", [folder, "", a.id, false]);
+          if (r?.error) throw new Error(r.error);
+          d.close();
+        }, "quiet", "folder")),
+      ),
+    ]);
+  }
+  function collabComposerBars(s) {
+    if (!s) return null;
+    const collab = state.collab.get(s.sessionId);
+    if (!collab) return null;
+    const bars = [];
+    const goal = collab.goal;
+    if (goal && typeof goal === "object" && goal.id) {
+      const act = async (action) => {
+        const r = await rpc(service(s), "manageGoal", [s.sessionId, action, { revision: goal.revision }]);
+        if (r?.error) throw new Error(r.error);
+        await refreshSession(s.sessionId);
+        renderPage();
+      };
+      bars.push(el("div", { class: "goal-bar", "aria-label": "Session goal" },
+        icon("spark", 14),
+        el("div", { class: "grow" },
+          el("strong", {}, `Goal (${goal.phase}${goal.activation === "armed" ? " · armed" : ""}) · Round ${goal.roundsStarted || 0}/${goal.maxGoalRounds || 25}`),
+          el("span", { class: "goal-text" }, goal.objective),
+          goal.blockedMessage ? el("small", { class: "error-text" }, " · " + goal.blockedMessage) : null,
+        ),
+        goal.phase === "active" && goal.activation === "armed"
+          ? button("Pause", () => act("pause"), "quiet")
+          : goal.phase !== "complete"
+            ? button("Resume", () => act("resume"), "quiet")
+            : null,
+        goal.phase !== "complete" ? button("Complete", () => act("complete"), "quiet") : null,
+        button("Clear", () => act("clear"), "quiet"),
+      ));
+    }
+    const todos = collab.todos || [];
+    if (todos.length) {
+      const done = todos.filter(t => t.status === "completed").length;
+      const active = todos.find(t => t.status === "in_progress");
+      bars.push(el("details", { class: "todo-bar", "data-disclosure": "composer-todos" },
+        el("summary", {},
+          icon("check", 13),
+          el("strong", {}, `Tasks ${done}/${todos.length}`),
+          active ? el("span", { class: "todo-active" }, " · " + active.content) : null,
+        ),
+        el("ul", { class: "todo-list" },
+          ...todos.map(t => el("li", { class: "todo-item " + t.status },
+            el("span", { class: "todo-badge" }, t.status === "completed" ? "✓" : t.status === "in_progress" ? "▸" : "○"),
+            t.content,
+          )),
+        ),
+      ));
+    }
+    return bars.length ? el("div", { class: "collab-bars" }, ...bars) : null;
+  }
+  const secretMaskPattern = /\b(sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9-]{16,}|AIza[0-9A-Za-z_-]{30,})\b/g;
+  function maskSecretsForDisplay(text) {
+    if (!secretMaskPattern.test(text)) return { masked: text, hadSecrets: false };
+    secretMaskPattern.lastIndex = 0;
+    const masked = text.replace(secretMaskPattern, (m) => m.slice(0, 5) + "••••••••" + m.slice(-3));
+    return { masked, hadSecrets: true };
+  }
+  function quoteIntoComposer(texts) {
+    const prompt = document.getElementById("prompt");
+    if (!prompt) return;
+    const sel = String(window.getSelection?.()?.toString() || "").trim();
+    const snippet = (sel && texts.includes(sel) ? sel : texts.split("\n").slice(0, 6).join("\n")).trim();
+    if (!snippet) return;
+    const quoted = snippet.split("\n").map(l => `> ${l}`).join("\n") + "\n\n";
+    prompt.value = (prompt.value ? prompt.value.trimEnd() + "\n\n" : "") + quoted;
+    saveDraft();
+    prompt.focus();
+    prompt.setSelectionRange(prompt.value.length, prompt.value.length);
+  }
+  function deliverablesCard(rec, s) {
+    const changes = rec.workspaceChanges;
+    const presented = rec.presentedFiles || [];
+    if (!changes?.files?.length && !presented.length) return null;
+    const folder = s?.cwd || currentFolder();
+    return el("section", { class: "deliverables-card", "aria-label": "Turn deliverables" },
+      changes?.files?.length ? el("details", { class: "changed-files-group" },
+        el("summary", {},
+          icon("code", 14),
+          el("strong", {}, `${changes.totalFiles || changes.files.length} changed file${(changes.totalFiles || changes.files.length) === 1 ? "" : "s"}`),
+          el("span", { class: "diff-stat-add" }, `+${changes.added || 0}`),
+          el("span", { class: "diff-stat-del" }, `-${changes.deleted || 0}`),
+        ),
+        el("div", { class: "changed-files-list" },
+          ...changes.files.map(f => el("details", { class: "changed-file-item" },
+            el("summary", {},
+              el("span", { class: "changed-file-path" }, f.display || f.path),
+              el("small", { class: "changed-file-status" }, f.binary ? "binary" : f.oversized ? "oversized" : `${f.status} · +${f.added} -${f.deleted}`),
+              folder ? button("Reveal", (ev) => {
+                ev.stopPropagation();
+                return rpc(service(s), "openWorkspacePath", [folder, f.path, "", true]);
+              }, "quiet") : null,
+            ),
+            f.hunks?.length
+              ? el("div", { class: "diff-hunks" },
+                  ...f.hunks.map(h => el("pre", { class: "diff-hunk" },
+                    `@@ -${h.oldStart},${h.oldLines} +${h.newStart},${h.newLines} @@\n` +
+                    (h.lines || []).join("\n"),
+                  )),
+                )
+              : el("p", { class: "hint" }, f.binary ? "Binary file changed." : "No inline diff hunks."),
+          )),
+        ),
+      ) : null,
+      presented.length ? el("div", { class: "presented-files" },
+        ...presented.map(p => el("div", { class: "presented-file-chip" },
+          icon("file", 14),
+          el("div", { class: "grow" },
+            el("strong", {}, p.path),
+            p.description ? el("small", {}, " — " + p.description) : null,
+          ),
+          folder ? button("Open", () => rpc(service(s), "openWorkspacePath", [folder, p.path, "", false]), "quiet") : null,
+        )),
+      ) : null,
+    );
+  }
+  function questionFormBody(questions, onSubmit, onDismiss) {
+    const selections = new Map();
+    const customs = new Map();
+    const wrap = el("div", { class: "question-fields" });
+    for (const q of questions || []) {
+      const qid = q.id || q.question;
+      selections.set(qid, new Set());
+      const multi = Boolean(q.multi_select || q.multiSelect);
+      const opts = el("div", { class: "question-options" });
+      for (const opt of q.options || []) {
+        const input = el("input", {
+          type: multi ? "checkbox" : "radio",
+          name: `ask-${qid}`,
+          onChange: () => {
+            const set = selections.get(qid);
+            if (!multi) set.clear();
+            if (input.checked) set.add(opt.label);
+            else set.delete(opt.label);
+          },
+        });
+        opts.append(el("label", { class: "question-option" },
+          input,
+          el("span", {},
+            el("strong", {}, opt.label),
+            opt.description ? el("small", {}, " — " + opt.description) : null,
+          ),
+        ));
+      }
+      const other = el("input", {
+        placeholder: "Other / custom answer…",
+        "aria-label": `Custom answer for ${q.question}`,
+        onInput: () => customs.set(qid, other.value.trim()),
+      });
+      wrap.append(el("fieldset", { class: "question-group" },
+        q.header ? el("legend", {}, q.header) : null,
+        el("p", { class: "question-prompt" }, q.question),
+        q.detail ? el("p", { class: "hint" }, q.detail) : null,
+        opts,
+        other,
+      ));
+    }
+    const actions = el("div", { class: "permission-actions" },
+      button("Submit answer", () => {
+        const answers = (questions || []).map(q => {
+          const qid = q.id || q.question;
+          const custom = customs.get(qid) || "";
+          const multi = Boolean(q.multi_select || q.multiSelect);
+          const selected = (!multi && custom) ? [] : [...(selections.get(qid) || [])];
+          return { id: qid, selected, ...(custom ? { custom } : {}) };
+        });
+        return onSubmit(answers);
+      }, "primary"),
+      onDismiss ? button("Dismiss", onDismiss, "quiet") : null,
+    );
+    wrap.append(actions);
+    return wrap;
   }
   async function openTranscript() {
     await refreshSession(state.id);
@@ -1337,12 +1826,178 @@
     return box;
   }
   function permissionCard(request, s) {
+    if (request.kind === "plan_review") {
+      const feedback = el("textarea", {
+        rows: 2,
+        placeholder: "Optional revision notes if you want changes before implementation…",
+        "aria-label": "Plan revision feedback",
+      });
+      const card = el(
+        "section",
+        { class: "permission-card plan-review-card", "aria-label": "Plan review requested" },
+        el("p", { class: "hint" }, "Plan Mode · Review before any files are changed"),
+        el("h3", {}, "Approve implementation plan?"),
+        el("div", { class: "plan-review-body" }, plainBody(request.plan || request.input?.plan || "")),
+        field("Revision feedback (optional)", feedback),
+      );
+      const decide = async (decision) => {
+        const controls = [...card.querySelectorAll("button, textarea")];
+        controls.forEach((b) => (b.disabled = true));
+        try {
+          const r = await rpc(service(s), "resolveToolPermission", [
+            s.sessionId,
+            request.requestId,
+            decision,
+          ]);
+          if (r?.error) throw new Error(r.error);
+          await refreshSession(s.sessionId);
+          renderPage();
+        } finally {
+          controls.forEach((b) => (b.disabled = false));
+        }
+      };
+      card.append(
+        el("div", { class: "permission-actions" },
+          button("Approve & implement", () => decide("approve"), "primary"),
+          button("Keep planning", () => decide("revise:" + (feedback.value.trim() || "Revise the plan.")), "quiet"),
+          button("Dismiss", () => decide("deny"), "quiet"),
+        ),
+      );
+      return card;
+    }
+    if (request.kind === "ask_user") {
+      const card = el(
+        "section",
+        { class: "permission-card ask-user-card", "aria-label": "Question from assistant" },
+        el("p", { class: "hint" }, request.timeoutSeconds
+          ? `Assistant question · Timed wait (${request.timeoutSeconds}s; stays open if unanswered)`
+          : "Assistant question"),
+        el("h3", {}, "Your input is requested"),
+      );
+      const decide = async (decision) => {
+        const controls = [...card.querySelectorAll("button, input")];
+        controls.forEach((b) => (b.disabled = true));
+        try {
+          const r = await rpc(service(s), "resolveToolPermission", [
+            s.sessionId,
+            request.requestId,
+            decision,
+          ]);
+          if (r?.error) throw new Error(r.error);
+          await refreshSession(s.sessionId);
+          renderTranscript();
+          updateSendButton();
+        } finally {
+          controls.forEach((b) => (b.disabled = false));
+        }
+      };
+      card.append(questionFormBody(
+        request.questions || [],
+        (answers) => decide("answer:" + JSON.stringify({ answers })),
+        () => decide("deny"),
+      ));
+      return card;
+    }
+    if (request.kind === "subagent_model") {
+      const options = request.availableModels || [];
+      const defaultKey =
+        request.requestedProvider && request.requestedModel
+          ? `${request.requestedProvider}:${request.requestedModel}`
+          : options[0]
+            ? `${options[0].providerId}:${options[0].model}`
+            : "";
+      let chosen = defaultKey;
+      const picker = options.length
+        ? select(
+            options.map((m) => [
+              `${m.providerId}:${m.model}`,
+              `${m.label || m.model} (${m.providerName || m.providerId})`,
+            ]),
+            chosen,
+            (v) => {
+              chosen = v;
+            },
+            { "aria-label": "Subagent model" },
+          )
+        : null;
+      const card = el(
+        "section",
+        { class: "permission-card", "aria-label": "Subagent model requested" },
+        el(
+          "p",
+          { class: "hint" },
+          "Subagent: " + (request.title || "Delegated task"),
+        ),
+        el("h3", {}, "Choose model for subagent?"),
+        el(
+          "p",
+          {},
+          request.requestedProvider
+            ? `The assistant asked to run this subagent with ${request.requestedModel} instead of your active model (${request.parentModel}).`
+            : `The assistant requested ${request.requestedModel}, which is not available on your configured providers. Pick a model below or keep using ${request.parentModel}.`,
+        ),
+        picker
+          ? field(
+              "Smaller or alternate model",
+              picker,
+              "Only models you approve are ever used for subagents.",
+            )
+          : null,
+      );
+      const decide = async (decision) => {
+        const controls = [...card.querySelectorAll("button, select")];
+        controls.forEach((b) => (b.disabled = true));
+        try {
+          const r = await rpc(service(s), "resolveToolPermission", [
+            s.sessionId,
+            request.requestId,
+            decision,
+          ]);
+          if (r?.error) throw new Error(r.error);
+          if (decision.startsWith("select_always:") || decision === "allow_always")
+            await loadProviders();
+          await refreshSession(s.sessionId);
+          renderTranscript();
+          updateSendButton();
+        } finally {
+          controls.forEach((b) => (b.disabled = false));
+        }
+      };
+      card.append(
+        el(
+          "div",
+          { class: "permission-actions" },
+          picker
+            ? button(
+                "Use once",
+                () => decide(`select_once:${chosen}`),
+                "quiet",
+              )
+            : null,
+          picker
+            ? button(
+                "Always use for subagents",
+                () => decide(`select_always:${chosen}`),
+                "primary",
+              )
+            : null,
+          button(
+            `Keep ${request.parentModel}`,
+            () => decide("use_parent_model"),
+            picker ? "quiet" : "primary",
+          ),
+          button("Deny task", () => decide("deny"), "quiet"),
+        ),
+      );
+      return card;
+    }
     const edit = ["Write", "Edit"].includes(request.toolName) && !request.outsideWorkspace;
     const input = request.input || {};
     const card = el(
       "section",
       { class: "permission-card", "aria-label": "Permission requested" },
       request.subagent ? el("p", {class:"hint"}, "Subagent: " + request.subagent.title + " · Approval applies to this conversation") : null,
+      request.aiReviewNote ? el("p", {class:"hint"}, "Smart Auto safety note: " + request.aiReviewNote) : null,
       el("h3", {}, request.outsideWorkspace ? "Allow access outside this workspace?" : edit ? "Allow file changes?" : "Allow this action?"),
       el(
         "p",
@@ -1475,8 +2130,36 @@
             : basename);
       else if (call?.name === "Grep")
         title = "Search " + (input.query || "workspace");
+      else if (call?.name === "Glob")
+        title = "Find files " + (input.pattern || "");
+      else if (call?.name === "ApplyPatch")
+        title = "Apply patch";
+      else if (call?.name === "Lsp")
+        title = `LSP ${input.operation || "query"} · ${basename}`;
+      else if (call?.name === "TodoWrite")
+        title = `Update task checklist (${(input.todos || []).length})`;
+      else if (call?.name === "ExitPlanMode")
+        title = "Submit plan for review";
+      else if (call?.name === "AskUserQuestion")
+        title = "Ask user question";
+      else if (call?.name === "Present")
+        title = `Deliver ${(input.files || []).length} file(s)`;
+      else if (call?.name === "CreateWorktree")
+        title = `Create worktree ${input.name || ""}`;
+      else if (call?.name === "WorkingDirectory")
+        title = input.action === "set" ? `Change directory → ${input.path || ""}` : "Check working directory";
+      else if (call?.name === "SessionSearch")
+        title = `Search past sessions · ${input.query || ""}`;
+      else if (call?.name === "Ralph")
+        title = `Ralph fresh-agent loop (${input.max_rounds || 5} rounds max)`;
+      else if (call?.name === "Workflow")
+        title = `Workflow · ${input.name || "pipeline"}`;
+      else if (call?.name?.startsWith("Terminal"))
+        title = `${call.name} ${input.terminal_id || input.name || ""}`.trim();
+      else if (call?.name?.startsWith("Job"))
+        title = `${call.name} ${input.job_id || ""}`.trim();
       else if (call?.name === "Bash")
-        title = input.description || "Run command";
+        title = input.description || (input.run_in_background ? "Run background command" : "Run command");
       else if (["Write", "Edit"].includes(call?.name))
         title = call.name + " " + basename;
       else if (call?.name === "McpCall")
@@ -1555,11 +2238,24 @@
       ),
     );
     const groups = [];
+    const turnAnchors = [];
+    const deliverablesByAssistant = new Map();
+    const collabData = state.collab.get(s.sessionId);
+    for (const d of collabData?.deliverables || []) {
+      if (d.assistantUuid) deliverablesByAssistant.set(d.assistantUuid, d);
+    }
     let group = null,
       turnKey = "initial";
     for (const [messageIndex, message] of messages.entries()) {
       if (message.type === "result" || message.type === "stream_event")
         continue;
+      if (message.type === "compaction_checkpoint") {
+        result.push(el("details", { class: "compaction-banner" },
+          el("summary", {}, icon("spark", 13), `Context checkpoint · Condensed ${message.shadowedMessages || "earlier"} messages`),
+          plainBody(message.summary || ""),
+        ));
+        continue;
+      }
       const id = message.uuid;
       if (id && seen.has(id)) continue;
       if (id) seen.add(id);
@@ -1567,6 +2263,10 @@
       const texts = blocks
         .filter((b) => b.type === "text" && !b.attachment)
         .map((b) => b.text || "")
+        .join("\n");
+      const savedThinking = blocks
+        .filter((b) => b.type === "thinking")
+        .map((b) => b.thinking || b.text || "")
         .join("\n");
       const role = message.type === "user" ? "user" : "assistant";
       const tools = blocks.filter(
@@ -1577,10 +2277,31 @@
         turnKey = id || "message-" + messageIndex;
       }
       const attachedFiles=window.QuixiChat.transcriptAttachments(message);
+      if (savedThinking && role === "assistant") {
+        const thKey = "thinking-" + (id || messageIndex);
+        result.push(el("details", { class: "thinking", "data-disclosure": thKey, open: opened.has(thKey) },
+          el("summary", {}, "Thinking"),
+          savedThinking,
+        ));
+      }
       if (texts || attachedFiles.length) {
+        const maskedInfo = role === "user" ? maskSecretsForDisplay(texts) : { masked: texts, hadSecrets: false };
+        let showingRaw = false;
+        const bodyHost = el("div", { class: "message-body-host" }, plainBody(maskedInfo.masked));
+        const revealBtn = maskedInfo.hadSecrets
+          ? button("Reveal secret", () => {
+              showingRaw = !showingRaw;
+              revealBtn.textContent = showingRaw ? "Mask secret" : "Reveal secret";
+              bodyHost.replaceChildren(plainBody(showingRaw ? texts : maskedInfo.masked));
+            }, "quiet")
+          : null;
+        const anchorId = role === "user" ? `turn-anchor-${turnAnchors.length + 1}` : null;
+        if (anchorId) {
+          turnAnchors.push({ id: anchorId, index: turnAnchors.length + 1, label: (maskedInfo.masked || "Turn").split("\n")[0].slice(0, 42) });
+        }
         const article = el(
           "article",
-          { class: "message " + role },
+          { class: "message " + role, ...(anchorId ? { id: anchorId } : {}) },
           el(
             "div",
             { class: "role" },
@@ -1588,9 +2309,11 @@
               ? "You"
               : message.message?.stop_reason === "user_stop"
                 ? "QuixiDesk · Stopped"
-                : "QuixiDesk",
+                : message.message?.stop_reason === "max_rounds"
+                  ? "QuixiDesk · Round cap reached"
+                  : "QuixiDesk",
           ),
-          plainBody(texts),
+          bodyHost,
           attachedFiles.length ? el("div",{class:"transcript-attachments"},...attachedFiles.map(f=>el("div",{class:"chip"},f.preview?el("img",{src:f.preview,alt:f.name,class:"transcript-image"}):icon("file",14),f.name))) : null,
           el(
             "div",
@@ -1603,12 +2326,18 @@
               },
               "quiet",
             ),
+            role === "assistant" && texts ? button("Quote", () => quoteIntoComposer(texts), "quiet") : null,
+            revealBtn,
             role === "assistant" ? capabilityUI.readAloudControl(texts) : null,
             role === "user" && id ? button("Edit",()=>editMessage(s,message),"quiet") : null,
             id ? button("Retry",()=>forkMessage(s,message),"quiet") : null,
           ),
         );
         result.push(article);
+        if (role === "assistant" && id && deliverablesByAssistant.has(id)) {
+          const card = deliverablesCard(deliverablesByAssistant.get(id), s);
+          if (card) result.push(card);
+        }
       }
       for (const [toolIndex, tool] of tools.entries()) {
         if (!group) {
@@ -1689,6 +2418,28 @@
     }
     for (const request of state.approvals.get(s.sessionId) || [])
       result.push(permissionCard(request, s));
+    for (const cq of (collabData?.questions || []).filter(q => q.state === "continued")) {
+      const card = el("section", { class: "permission-card ask-user-card continued", "aria-label": "Pending question" },
+        el("p", { class: "hint" }, "Continued question · Send a late reply anytime"),
+        el("h3", {}, "Pending question"),
+        questionFormBody(cq.questions || [], async (answers) => {
+          const r = await rpc(service(s), "answerUserQuestion", [s.sessionId, cq.callId, answers]);
+          if (r?.error) throw new Error(r.error);
+          await refreshSession(s.sessionId);
+          renderTranscript();
+          updateSendButton();
+          toast("Sent answer to conversation.");
+        }, null),
+      );
+      result.push(card);
+    }
+    if (turnAnchors.length >= 2) {
+      result.unshift(el("nav", { class: "turn-outline-rail", "aria-label": "Turn outline" },
+        ...turnAnchors.map(t => button(`T${t.index}`, () => {
+          document.getElementById(t.id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+        }, "quiet turn-jump", null)),
+      ));
+    }
     if (state.stopped.has(s.sessionId) && !running(s))
       result.push(
         el(
@@ -1748,6 +2499,22 @@
         toast("Project deleted. Conversations and files kept.");
       });
   }
+  async function exportConversationDialog(s) {
+    const exported = await rpc(service(s), "exportSessionMarkdown", [s.sessionId]);
+    if (exported?.error) throw new Error(exported.error);
+    const md = exported?.markdown || "";
+    const d = dialog("Export conversation", [
+      el("p", { class: "hint" }, "Portable Markdown transcript for sharing or archiving."),
+      el("pre", { class: "code-preview" }, md),
+      el("div", { class: "dialog-actions" },
+        button("Copy Markdown", async () => {
+          await copy(md);
+          toast("Markdown copied to clipboard.");
+        }, "primary"),
+        button("Close", () => d.close(), "quiet"),
+      ),
+    ], { wide: true });
+  }
   async function sessionMenu(s) {
     s = state.sessions.find((current) => current.sessionId === s.sessionId) || s;
     const d = dialog("Task actions", [
@@ -1755,6 +2522,10 @@
       el(
         "div",
         { class: "field-stack" },
+        button("Export Markdown", async () => {
+          d.close();
+          await exportConversationDialog(s);
+        }),
         button("Prompt diagnostics", async () => {
           try {
             const response = await fetch(`/api/quixi/prompt-context/${encodeURIComponent(s.sessionId)}`);
@@ -2704,10 +3475,70 @@
       );
       capabilityUI.renderDesktopStatus(content);
     } else if (state.settingsTab === "providers") {
+      const subagentOptions = [["", "Same as active chat model"]];
+      for (const p of (state.providers?.providers || []).filter((p) => p.configured)) {
+        if (
+          p.apiFormat === "openai" ||
+          p.apiFormat === "anthropic" ||
+          (p.id === "openai" && p.authMode === "oauth")
+        ) {
+          const seen = new Set();
+          for (const m of p.models || []) {
+            if (!seen.has(m.id)) {
+              seen.add(m.id);
+              subagentOptions.push([
+                `${p.id}:${m.id}`,
+                `${m.label || m.id} (${p.name || p.id})`,
+              ]);
+            }
+          }
+          if (p.selectedModel && !seen.has(p.selectedModel)) {
+            subagentOptions.push([
+              `${p.id}:${p.selectedModel}`,
+              `${p.selectedModel} (${p.name || p.id})`,
+            ]);
+          }
+        }
+      }
+      const currentSubagent =
+        state.providers?.subagentModelUserSelected &&
+        state.providers?.subagentProvider &&
+        state.providers?.subagentModel
+          ? `${state.providers.subagentProvider}:${state.providers.subagentModel}`
+          : "";
       content.append(
         el("h2", {}, "Model providers"),
         el("p", {}, `${state.providers?.configuredCount || 0} configured`),
         button("Manage providers", () => providerDirectory(), "primary"),
+        el("hr"),
+        field(
+          "Subagent model",
+          select(
+            subagentOptions,
+            currentSubagent,
+            async (v) => {
+              const [subagentProvider, ...rest] = v ? v.split(":") : ["", ""];
+              const subagentModel = rest.join(":");
+              const r = await api("/api/quixi/providers/complete-onboarding", {
+                subagentProvider: subagentModel ? subagentProvider : "",
+                subagentModel: subagentModel || "",
+              });
+              if (r?.error) {
+                toast(r.error, true);
+                return;
+              }
+              await loadProviders();
+              renderPage();
+              toast(
+                subagentModel
+                  ? `Subagent model set to ${subagentModel}.`
+                  : "Subagents will use your active chat model.",
+              );
+            },
+            { "aria-label": "Subagent model preference" },
+          ),
+          "By default, subagents always use your active chat model. If an assistant asks to run a subagent with another model, QuixiDesk asks you first.",
+        ),
       );
     } else if (state.settingsTab === "privacy") {
       content.append(
@@ -2994,7 +3825,7 @@
       field("Endpoint", base),
       el("p", { class: "hint" }, "Models are loaded from the provider when you save. Choose a model in the chat dropdown; unadvertised models can also be added there."),
     );
-    if (p.id === "custom") content.append(field("API format", format));
+    if (p.id === "custom" || p.id === "deepseek") content.append(field("API format", format));
     const payload = () => ({
       providerId: p.id,
       ...(key.value ? { apiKey: key.value } : {}),
@@ -3418,70 +4249,180 @@
     if (data.type === "quixi-browser-navigate" && typeof data.url === "string")
       browserAction("navigate", { url: data.url });
   });
-  async function contextDrawer() {
+  async function contextDrawer(initialTab) {
     const host = document.getElementById("page-host");
     host.querySelector(".drawer")?.remove();
     const s = session();
     if (!s) return;
+    if (initialTab) state.dockTab = initialTab;
     const folder = s.cwd || currentFolder();
-    const files = await rpc("LocalSessions", "listDirectoryAtCwd", [folder]);
+    const tabContent = el("div", { class: "dock-body" });
+    const tabsBar = el("div", { class: "dock-tabs", role: "tablist" });
+    let termTimer = null;
+    const stopTermPoll = () => { if (termTimer) { clearInterval(termTimer); termTimer = null; } };
     const drawer = el(
       "aside",
-      { class: "drawer" },
+      { class: "drawer workspace-dock" },
       el(
         "div",
         { class: "row" },
         el("h3", { class: "grow" }, "Files & context"),
-        ib("Close context", "close", () => drawer.remove()),
+        ib("Close context", "close", () => { stopTermPoll(); drawer.remove(); }),
       ),
-      el("p", { class: "path" }, folder),
-      project()?.instructions
-        ? el(
-            "details",
-            {},
-            el("summary", {}, "Project instructions"),
-            el("pre", {}, project().instructions),
-          )
-        : null,
+      tabsBar,
+      tabContent,
     );
-    for (const f of files || [])
-      drawer.append(
-        button(
-          [icon(f.isDir || f.isDirectory ? "folder" : "file", 14), f.name],
-          async () => {
-            if (f.isDir || f.isDirectory) {
-              const items = await rpc("LocalSessions", "listDirectoryAtCwd", [
-                f.path,
-              ]);
-              dialog(
-                f.name,
-                items.map((x) => el("p", { class: "path" }, x.path)),
-              );
-              return;
-            }
-            const r = await api("/api/quixi/workspace/read", { path: f.path });
-            dialog(
-              f.name,
-              el(
-                "pre",
-                { class: "code-preview" },
-                ...r.contents
-                  .split("\n")
-                  .map((line) =>
-                    el("span", { class: "code-line" }, line || " "),
-                  ),
-              ),
-              { wide: true },
-            );
-          },
-          "file-button",
+
+    async function renderDockTab() {
+      stopTermPoll();
+      tabsBar.replaceChildren(
+        ...[["files", "Files"], ["changes", "Changes"], ["terminal", "Terminal"], ["tasks", "Tasks"]].map(([id, label]) =>
+          button(label, () => { state.dockTab = id; void renderDockTab(); }, "quiet dock-tab" + (state.dockTab === id ? " active" : "")),
         ),
       );
-    if (!files?.length)
-      drawer.append(
-        el("p", { class: "muted" }, "This folder has no visible entries."),
-      );
+      if (state.dockTab === "changes") {
+        const wt = folder ? await rpc("LocalSessions", "getWorkingTreeStatus", [folder]) : null;
+        const collab = state.collab.get(s.sessionId);
+        const box = el("div", { class: "dock-section" },
+          el("p", { class: "path" }, folder || "No folder selected"),
+          wt?.files?.length
+            ? el("div", {},
+                el("p", { class: "hint" }, `Working tree: ${wt.files.length} changed (+${wt.additions || 0} -${wt.deletions || 0})`),
+                ...wt.files.map(f => el("div", { class: "dock-change-row" },
+                  el("span", { class: "grow" }, f.path),
+                  el("small", {}, `${f.status} · +${f.additions || 0} -${f.deletions || 0}`),
+                )),
+              )
+            : el("p", { class: "muted" }, "Working tree is clean."),
+        );
+        if (collab?.deliverables?.length) {
+          box.append(el("h4", {}, "Recent turn deliverables"));
+          for (const rec of collab.deliverables.slice().reverse().slice(0, 5)) {
+            const c = deliverablesCard(rec, s);
+            if (c) box.append(c);
+          }
+        }
+        tabContent.replaceChildren(box);
+        return;
+      }
+      if (state.dockTab === "terminal") {
+        if (!folder) {
+          tabContent.replaceChildren(el("p", { class: "muted" }, "Choose a workspace folder to open an interactive terminal."));
+          return;
+        }
+        const ptyKey = "dock-" + s.sessionId;
+        await rpc(service(s), "startShellPty", [ptyKey, folder]);
+        const screen = el("pre", { class: "code-preview dock-terminal-screen" }, "Connecting…");
+        const refreshScreen = async () => {
+          if (!drawer.isConnected || state.dockTab !== "terminal") { stopTermPoll(); return; }
+          const snap = await rpc(service(s), "readShellPty", [ptyKey, 0]);
+          if (snap?.text !== undefined) {
+            screen.textContent = snap.text || "$ ";
+            screen.scrollTop = screen.scrollHeight;
+          }
+        };
+        const cmdInput = el("input", {
+          placeholder: "Run command in persistent PTY…",
+          "aria-label": "Terminal command",
+        });
+        const form = el("form", {
+          class: "dock-terminal-form",
+          onSubmit: async (e) => {
+            e.preventDefault();
+            const line = cmdInput.value;
+            cmdInput.value = "";
+            await rpc(service(s), "writeShellPty", [ptyKey, line + "\n"]);
+            setTimeout(refreshScreen, 90);
+          },
+        }, cmdInput, el("button", { type: "submit" }, "Send"));
+        const controls = el("div", { class: "row" },
+          el("span", { class: "path grow" }, folder),
+          button("Reset", async () => {
+            await rpc(service(s), "stopShellPty", [ptyKey]);
+            await rpc(service(s), "startShellPty", [ptyKey, folder]);
+            await refreshScreen();
+          }, "quiet"),
+        );
+        tabContent.replaceChildren(controls, screen, form);
+        await refreshScreen();
+        termTimer = setInterval(refreshScreen, 900);
+        return;
+      }
+      if (state.dockTab === "tasks") {
+        const collab = state.collab.get(s.sessionId) || {};
+        const teamEnabled = Boolean(collab.team?.enabled);
+        const teamTasks = collab.team?.tasks || [];
+        const todos = collab.todos || [];
+        const box = el("div", { class: "dock-section" },
+          el("div", { class: "row" },
+            el("strong", { class: "grow" }, "Agent Team task board"),
+            button(teamEnabled ? "Disable Team" : "Enable Team", async () => {
+              await rpc(service(s), "setTeamMode", [s.sessionId, !teamEnabled]);
+              await refreshSession(s.sessionId);
+              await renderDockTab();
+            }, "quiet"),
+          ),
+          teamTasks.length
+            ? el("div", { class: "team-task-list" },
+                ...teamTasks.map(t => el("div", { class: "team-task-card" },
+                  el("strong", {}, `${t.id}: ${t.subject}`),
+                  el("p", { class: "hint" }, [t.status, t.ready ? "ready" : null, t.blockedBy?.length ? `blocked by ${t.blockedBy.join(", ")}` : null].filter(Boolean).join(" · ")),
+                  ...(t.writeScopeWarnings || []).map(w => el("p", { class: "error-text" }, w)),
+                )),
+              )
+            : el("p", { class: "muted" }, teamEnabled ? "No team tasks created yet." : "Enable Team mode for multi-agent shared task DAGs."),
+          el("hr"),
+          el("strong", {}, "Checklist"),
+          todos.length
+            ? el("ul", { class: "todo-list" }, ...todos.map(t => el("li", { class: "todo-item " + t.status }, `${t.status === "completed" ? "✓" : t.status === "in_progress" ? "▸" : "○"} ${t.content}`)))
+            : el("p", { class: "muted" }, "No checklist items recorded yet."),
+        );
+        tabContent.replaceChildren(box);
+        return;
+      }
+
+      // Default tab: Files & context
+      const files = await rpc("LocalSessions", "listDirectoryAtCwd", [folder]);
+      const fragment = document.createDocumentFragment();
+      fragment.append(el("p", { class: "path" }, folder));
+      if (project()?.instructions) {
+        fragment.append(el("details", {}, el("summary", {}, "Project instructions"), el("pre", {}, project().instructions)));
+      }
+      for (const f of files || []) {
+        fragment.append(
+          button(
+            [icon(f.isDir || f.isDirectory ? "folder" : "file", 14), f.name],
+            async () => {
+              if (f.isDir || f.isDirectory) {
+                const items = await rpc("LocalSessions", "listDirectoryAtCwd", [f.path]);
+                dialog(f.name, (items || []).map((x) => el("p", { class: "path" }, x.path)));
+                return;
+              }
+              const r = await api("/api/quixi/workspace/read", { path: f.path });
+              dialog(
+                f.name,
+                el(
+                  "pre",
+                  { class: "code-preview" },
+                  ...(r.contents || "")
+                    .split("\n")
+                    .map((line) => el("span", { class: "code-line" }, line || " ")),
+                ),
+                { wide: true },
+              );
+            },
+            "file-button",
+          ),
+        );
+      }
+      if (!files?.length) {
+        fragment.append(el("p", { class: "muted" }, "This folder has no visible entries."));
+      }
+      tabContent.replaceChildren(fragment);
+    }
+
     host.append(drawer);
+    await renderDockTab();
   }
   const refreshTimers = new Map();
   let streamFrame = null;
@@ -3520,6 +4461,14 @@
       return;
     const id = payload.sessionId;
     if (!id) return;
+    if (payload.type === "session_collab_updated" && payload.collab) {
+      state.collab.set(id, payload.collab);
+      if (state.id === id && state.page === "chat") {
+        renderTranscript();
+        updateSendButton();
+      }
+      return;
+    }
     const message = payload.message;
     if (message?.type === "stream_event") {
       let stream = state.streams.get(id);
@@ -3636,5 +4585,24 @@
   const workspaceUI=window.QuixiWorkspace.create(workflowContext);
   const capabilityUI=window.QuixiCapabilityWorkflows.create({...workflowContext,plainBody,openExternal,getToolsData:()=>toolsData,reloadTools:()=>loadTools(),updateMcpConnections,advancedMcpEditor:()=>mcpEditor(),
     startSkill:async(skill,files)=>{saveDraft();navigate("new");state.attachments.push(...files.map(f=>({name:f.name||f.path||"SKILL.md",text:f.content||f.contents||""})));const input=document.getElementById("prompt");input.value=`Use the attached ${skill.name||skill.id} instructions to help me with: `+(input.value.trim()?"\n\n"+input.value:"");saveDraft();renderChips();input.focus();}});
+  window.__quixi_confirm_quit_active_work__ = (summary) => {
+    const parts = [];
+    if (summary?.runningSessions) parts.push(`${summary.runningSessions} running conversation(s)`);
+    if (summary?.pendingApprovals) parts.push(`${summary.pendingApprovals} pending approval(s)`);
+    if (summary?.activeJobs) parts.push(`${summary.activeJobs} background job(s)`);
+    if (summary?.armedSchedules) parts.push(`${summary.armedSchedules} scheduled task(s)`);
+    confirmDialog(
+      "Quit QuixiDesk?",
+      `Active work will be interrupted (${parts.join(", ") || "in-progress work"}). Scheduled tasks also pause while QuixiDesk is closed.`,
+      async () => {
+        await fetch("/__eipc__/window-action", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "force_close" }),
+        });
+      },
+      "Quit anyway",
+    );
+  };
   boot();
 })();

@@ -92,6 +92,8 @@ pub struct ProvidersStateFile {
     pub active_model: String,
     pub subagent_provider: String,
     pub subagent_model: String,
+    #[serde(default)]
+    pub subagent_model_user_selected: bool,
     pub providers: Vec<ProviderEntry>,
 }
 
@@ -839,6 +841,7 @@ impl ProviderManager {
             active_model: "anthropic/claude-sonnet-4.6".to_string(),
             subagent_provider: String::new(),
             subagent_model: String::new(),
+            subagent_model_user_selected: false,
             providers,
         }
     }
@@ -872,11 +875,27 @@ impl ProviderManager {
                 catalog.active_model = am.to_string();
             }
         }
-        if let Some(sp) = obj.get("subagentProvider").and_then(|v| v.as_str()) {
-            catalog.subagent_provider = sp.to_string();
-        }
-        if let Some(sm) = obj.get("subagentModel").and_then(|v| v.as_str()) {
-            catalog.subagent_model = sm.to_string();
+        if obj
+            .get("subagentModelUserSelected")
+            .and_then(|v| v.as_bool())
+            == Some(true)
+        {
+            if let Some(sp) = obj.get("subagentProvider").and_then(|v| v.as_str()) {
+                catalog.subagent_provider = sp.trim().to_string();
+            }
+            if let Some(sm) = obj.get("subagentModel").and_then(|v| v.as_str()) {
+                catalog.subagent_model = sm.trim().to_string();
+            }
+            catalog.subagent_model_user_selected =
+                !catalog.subagent_provider.is_empty() && !catalog.subagent_model.is_empty();
+            if !catalog.subagent_model_user_selected {
+                catalog.subagent_provider.clear();
+                catalog.subagent_model.clear();
+            }
+        } else {
+            catalog.subagent_provider.clear();
+            catalog.subagent_model.clear();
+            catalog.subagent_model_user_selected = false;
         }
 
         if let Some(saved_list) = obj.get("providers").and_then(|v| v.as_array()) {
@@ -1028,6 +1047,7 @@ impl ProviderManager {
             "activeModel": st.active_model,
             "subagentProvider": st.subagent_provider,
             "subagentModel": st.subagent_model,
+            "subagentModelUserSelected": st.subagent_model_user_selected,
             "providers": providers_disk,
         });
         let result=crate::credentials::seal(&self.config_path,disk_json).and_then(|document| {
@@ -1051,6 +1071,11 @@ impl ProviderManager {
         } else {
             String::new()
         };
+        let (subagent_provider, subagent_model) = if st.subagent_model_user_selected {
+            (st.subagent_provider.clone(), st.subagent_model.clone())
+        } else {
+            (String::new(), String::new())
+        };
         json!({
             "credentialStorageError": self.credential_error.read().clone(),
             "onboardingCompleted": st.onboarding_completed && configured_count > 0,
@@ -1058,8 +1083,9 @@ impl ProviderManager {
             "configuredCount": configured_count,
             "activeProvider": active_provider,
             "activeModel": active_model,
-            "subagentProvider": st.subagent_provider,
-            "subagentModel": st.subagent_model,
+            "subagentProvider": subagent_provider,
+            "subagentModel": subagent_model,
+            "subagentModelUserSelected": st.subagent_model_user_selected,
             "providers": st.providers,
         })
     }
@@ -1083,16 +1109,18 @@ impl ProviderManager {
                 }
             }
         }
+        if matches!(provider_id, "custom" | "deepseek") && body.get("apiFormat").is_some() {
+            let format = body.get("apiFormat").and_then(Value::as_str).unwrap_or(&existing.api_format);
+            if !matches!(format, "openai" | "anthropic") {
+                return json!({"error":"Select a supported API format."});
+            }
+        }
         if provider_id == "custom" {
             let url = body.get("baseUrl").and_then(Value::as_str).unwrap_or(&existing.base_url).trim();
             let valid_url = reqwest::Url::parse(url).ok().is_some_and(|u|
                 matches!(u.scheme(), "http" | "https") && u.host_str().is_some()
                 && u.username().is_empty() && u.password().is_none());
             if !valid_url { return json!({"error":"Enter a valid HTTP or HTTPS endpoint URL."}); }
-            let format = body.get("apiFormat").and_then(Value::as_str).unwrap_or(&existing.api_format);
-            if !matches!(format, "openai" | "anthropic") {
-                return json!({"error":"Select a supported API format."});
-            }
             if !existing.configured && ["baseUrl", "apiFormat"].iter().any(|key| body.get(*key).is_none()) {
                 return json!({"error":"Configure the endpoint before adding models."});
             }
@@ -1210,6 +1238,11 @@ impl ProviderManager {
             entry.oauth_expires_ms = None;
             entry.last_tested_ok = None;
         }
+        if st.subagent_provider == provider_id {
+            st.subagent_provider.clear();
+            st.subagent_model.clear();
+            st.subagent_model_user_selected = false;
+        }
         let remaining_first = st
             .providers
             .iter()
@@ -1240,14 +1273,57 @@ impl ProviderManager {
                 st.active_model = am.to_string();
             }
         }
-        if let Some(sp) = body.get("subagentProvider").and_then(|v| v.as_str()) {
-            if !sp.is_empty() {
-                st.subagent_provider = sp.to_string();
-            }
-        }
-        if let Some(sm) = body.get("subagentModel").and_then(|v| v.as_str()) {
-            if !sm.is_empty() {
+        if body.get("subagentModel").is_some() || body.get("subagentProvider").is_some() {
+            let sm = body
+                .get("subagentModel")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
+            let sp = body
+                .get("subagentProvider")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
+            if sm.is_empty() {
+                st.subagent_provider.clear();
+                st.subagent_model.clear();
+                st.subagent_model_user_selected = false;
+            } else {
+                if sm.chars().any(char::is_control) {
+                    return json!({"error":"Enter a valid subagent model ID."});
+                }
+                let matched_provider = if !sp.is_empty() {
+                    st.providers
+                        .iter()
+                        .find(|p| {
+                            p.id == sp
+                                && p.configured
+                                && Self::supports_subagent_tools(p)
+                                && (p.selected_model == sm
+                                    || p.models.iter().any(|m| {
+                                        m.id == sm && Self::is_model_available_for_provider(p, m)
+                                    }))
+                        })
+                        .map(|p| p.id.clone())
+                } else {
+                    st.providers
+                        .iter()
+                        .find(|p| {
+                            p.configured
+                                && Self::supports_subagent_tools(p)
+                                && (p.selected_model == sm
+                                    || p.models.iter().any(|m| {
+                                        m.id == sm && Self::is_model_available_for_provider(p, m)
+                                    }))
+                        })
+                        .map(|p| p.id.clone())
+                };
+                let Some(pid) = matched_provider else {
+                    return json!({"error":"Choose a tool-capable model from a configured provider."});
+                };
+                st.subagent_provider = pid;
                 st.subagent_model = sm.to_string();
+                st.subagent_model_user_selected = true;
             }
         }
         let any_configured = st.providers.iter().any(|p| p.configured);
@@ -1346,6 +1422,7 @@ impl ProviderManager {
                         let status = resp.status();
                         let catalog = resp.json::<Value>().ok();
                         let advertised = catalog.as_ref().and_then(|j| j.get("data")).and_then(Value::as_array);
+                        let models_map = catalog.as_ref().and_then(|j| j.get("models")).and_then(Value::as_object);
                         if status.is_success() {
                             if let Some(arr) = advertised {
                                 for item in arr {
@@ -1354,8 +1431,14 @@ impl ProviderManager {
                                         if !discovered_models.iter().any(|known| known == id) { discovered_models.push(id.to_string()); }
                                     }
                                 }
+                            } else if let Some(map) = models_map {
+                                for (key, val) in map {
+                                    if val.is_object() && !key.trim().is_empty() && !key.chars().any(char::is_control) {
+                                        if !discovered_models.iter().any(|known| known == key) { discovered_models.push(key.clone()); }
+                                    }
+                                }
                             }
-                            ok = advertised.is_some();
+                            ok = advertised.is_some() || models_map.is_some();
                             message = if !ok {
                                 "The endpoint did not return a valid model catalog (expected a data array).".into()
                             } else if discovered_models.is_empty() {
@@ -2910,12 +2993,23 @@ impl ProviderManager {
     }
 }
 
+/// Disjoint per-request token accounting (uncached input, output, cache hits/writes, reasoning).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProviderTokenUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
+    pub reasoning_tokens: u64,
+}
+
 /// One tool call requested by the model.
 #[derive(Debug, Clone)]
 pub struct ProviderToolCall {
     pub id: String,
     pub name: String,
     pub arguments: String,
+    pub extra_content: Option<Value>,
 }
 
 /// The full result of one assistant turn that was allowed to call tools.
@@ -2924,10 +3018,12 @@ pub struct ProviderToolTurn {
     pub response_items: Vec<Value>,
     pub text: String,
     pub thinking: String,
+    pub reasoning_details: Option<Value>,
     pub tool_calls: Vec<ProviderToolCall>,
     pub provider_name: String,
     pub model_id: String,
     pub stream_error: Option<String>,
+    pub usage: Option<ProviderTokenUsage>,
 }
 
 impl ProviderManager {
@@ -2943,7 +3039,14 @@ impl ProviderManager {
     where
         F: FnMut(StreamChunk),
     {
-        self.complete_turn_with_tools_for_provider(messages, tools, model_override, None, &mut on_chunk)
+        self.complete_turn_with_tools_for_provider_and_effort(
+            messages,
+            tools,
+            model_override,
+            None,
+            None,
+            &mut on_chunk,
+        )
     }
 
     /// Application budgets are conservative envelopes, not promises about an arbitrary gateway.
@@ -2959,25 +3062,137 @@ impl ProviderManager {
         budget
     }
 
+    fn supports_subagent_tools(p: &ProviderEntry) -> bool {
+        p.api_format == "openai"
+            || p.api_format == "anthropic"
+            || (p.id == "openai" && p.auth_mode == "oauth")
+    }
+
+    pub(crate) fn find_subagent_model_provider(&self, model: &str) -> Option<(String, String)> {
+        let trimmed = model.trim();
+        if trimmed.is_empty() || trimmed.chars().any(char::is_control) {
+            return None;
+        }
+        let st = self.state.read();
+        // Prefer the active provider if it owns the model, then any configured tool-capable provider.
+        for candidate in st
+            .providers
+            .iter()
+            .filter(|p| p.id == st.active_provider)
+            .chain(st.providers.iter().filter(|p| p.id != st.active_provider))
+        {
+            if candidate.configured
+                && Self::supports_subagent_tools(candidate)
+                && (candidate.selected_model == trimmed
+                    || candidate.models.iter().any(|m| {
+                        m.id == trimmed && Self::is_model_available_for_provider(candidate, m)
+                    }))
+            {
+                return Some((trimmed.to_string(), candidate.id.clone()));
+            }
+        }
+        None
+    }
+
+    pub(crate) fn available_subagent_models(&self) -> Vec<Value> {
+        let st = self.state.read();
+        let mut out = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for p in st
+            .providers
+            .iter()
+            .filter(|p| p.configured && Self::supports_subagent_tools(p))
+        {
+            for m in &p.models {
+                if Self::is_model_available_for_provider(p, m)
+                    && seen.insert((p.id.clone(), m.id.clone()))
+                {
+                    out.push(json!({
+                        "providerId": p.id,
+                        "providerName": p.name,
+                        "model": m.id,
+                        "label": if m.label.is_empty() { m.id.clone() } else { m.label.clone() },
+                    }));
+                }
+            }
+            if !p.selected_model.is_empty()
+                && seen.insert((p.id.clone(), p.selected_model.clone()))
+            {
+                out.push(json!({
+                    "providerId": p.id,
+                    "providerName": p.name,
+                    "model": p.selected_model,
+                    "label": p.selected_model,
+                }));
+            }
+        }
+        out
+    }
+
+    pub(crate) fn save_subagent_selection(&self, provider_id: &str, model_id: &str) -> Result<(), String> {
+        let res = self.complete_onboarding(&json!({
+            "subagentProvider": provider_id,
+            "subagentModel": model_id,
+        }));
+        if let Some(err) = res.get("error").and_then(Value::as_str) {
+            return Err(err.to_string());
+        }
+        Ok(())
+    }
+
     pub(crate) fn subagent_selection(&self, parent_model: &str) -> (String, Option<String>) {
         let st = self.state.read();
-        if let Some(p) = st.providers.iter().find(|p| p.id == st.subagent_provider && p.configured && (p.api_format == "openai" || p.api_format == "anthropic" || (p.id == "openai" && p.auth_mode == "oauth"))) {
-            if !st.subagent_model.is_empty() && (p.selected_model == st.subagent_model || p.models.iter().any(|m|m.id == st.subagent_model && Self::is_model_available_for_provider(p,m))) {
-                return (st.subagent_model.clone(), Some(p.id.clone()));
+        if st.subagent_model_user_selected {
+            if let Some(p) = st.providers.iter().find(|p| {
+                p.id == st.subagent_provider
+                    && p.configured
+                    && Self::supports_subagent_tools(p)
+            }) {
+                if !st.subagent_model.is_empty()
+                    && (p.selected_model == st.subagent_model
+                        || p.models.iter().any(|m| {
+                            m.id == st.subagent_model
+                                && Self::is_model_available_for_provider(p, m)
+                        }))
+                {
+                    return (st.subagent_model.clone(), Some(p.id.clone()));
+                }
             }
         }
         (parent_model.into(), None)
     }
 
     pub(crate) fn complete_turn_with_tools_for_provider<F>(
-        &self, messages: &[Value], tools: &Value, model_override: Option<&str>, provider_override: Option<&str>, mut on_chunk: F,
+        &self, messages: &[Value], tools: &Value, model_override: Option<&str>, provider_override: Option<&str>, on_chunk: F,
     ) -> Option<ProviderToolTurn> where F: FnMut(StreamChunk) {
+        self.complete_turn_with_tools_for_provider_and_effort(
+            messages,
+            tools,
+            model_override,
+            provider_override,
+            None,
+            on_chunk,
+        )
+    }
+
+    pub(crate) fn complete_turn_with_tools_for_provider_and_effort<F>(
+        &self,
+        messages: &[Value],
+        tools: &Value,
+        model_override: Option<&str>,
+        provider_override: Option<&str>,
+        effort_override: Option<&str>,
+        mut on_chunk: F,
+    ) -> Option<ProviderToolTurn>
+    where
+        F: FnMut(StreamChunk),
+    {
         use std::io::BufReader;
 
         let prepared = crate::tool_media::provider_messages(messages);
         let messages = prepared.as_slice();
         let resolved_model = self.resolve_connected_model(model_override);
-        let (provider_id, provider_name, model_id, base_url, api_format, auth_mode, credential) = {
+        let (provider_id, provider_name, model_id, base_url, api_format, auth_mode, credential, supports_thinking) = {
             let st = self.state.read();
             let entry = if let Some(id) = provider_override {
                 st.providers.iter().find(|p|p.configured && p.id == id)?
@@ -3010,6 +3225,12 @@ impl ProviderManager {
             } else {
                 entry.selected_model.clone()
             };
+            let model_thinks = entry
+                .models
+                .iter()
+                .find(|m| m.id == chosen_model)
+                .map(|m| m.supports_thinking)
+                .unwrap_or_else(|| chosen_model.contains("deepseek-flash") || chosen_model.contains("deepseek-v4") || chosen_model.contains("reasoner"));
             (
                 entry.id.clone(),
                 entry.name.clone(),
@@ -3018,14 +3239,15 @@ impl ProviderManager {
                 entry.api_format.clone(),
                 entry.auth_mode.clone(),
                 cred,
+                model_thinks,
             )
         };
 
         if provider_id == "openai" && auth_mode == "oauth" {
-            return Some(self.complete_codex_tool_turn(messages, tools, &model_id, &credential, &mut on_chunk));
+            return Some(self.complete_codex_tool_turn_with_effort(messages, tools, &model_id, &credential, effort_override, &mut on_chunk));
         }
         if api_format == "anthropic" && !base_url.is_empty() {
-            return Some(self.complete_anthropic_tool_turn(messages,tools,&model_id,&base_url,&credential,&provider_name,&mut on_chunk));
+            return Some(self.complete_anthropic_tool_turn_with_effort(messages,tools,&model_id,&base_url,&credential,&provider_name,effort_override,&mut on_chunk));
         }
         if api_format != "openai" {
             return Some(tool_failure(format!("Tool calling is not supported for provider format {api_format}"), &provider_name, &model_id));
@@ -3039,7 +3261,7 @@ impl ProviderManager {
 
         let http = reqwest::blocking::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(15))
-            .timeout(std::time::Duration::from_secs(300))
+            .timeout(std::time::Duration::from_secs(600))
             .build()
             .ok()?;
 
@@ -3050,39 +3272,104 @@ impl ProviderManager {
             "agent tools: streaming tool-calling turn"
         );
         let url = format!("{}/chat/completions", base_url);
-        let mut req = http
-            .post(&url)
-            .header("content-type", "application/json")
-            .header("accept", "text/event-stream");
-        if !credential.is_empty() {
-            req = req.header("Authorization", format!("Bearer {}", credential));
-        }
-        if provider_id == "openrouter" {
-            req = req
-                .header("HTTP-Referer", "https://quixidesk.local")
-                .header("X-Title", "QuixiDesk");
-        }
 
-        // Internal replay/error metadata belongs to adapters, never the Chat Completions wire format.
+        let is_deepseek = provider_id == "deepseek" || model_id.contains("deepseek");
+        let is_gemini = provider_id == "gemini" || model_id.contains("gemini");
+        let is_openrouter = provider_id == "openrouter";
+        let effort_norm = effort_override
+            .map(|e| e.trim().to_ascii_lowercase())
+            .filter(|e| !e.is_empty() && e != "default" && e != "auto");
+        let thinking_disabled = effort_norm.as_deref() == Some("off") || model_id == "deepseek-chat";
+
+        // Internal replay/error metadata belongs to adapters, never the Chat Completions wire format,
+        // while provider-required reasoning fields (`reasoning_content`, `reasoning_details`, Gemini
+        // `extra_content.google.thought_signature`) are preserved when continuing on compatible routes.
         let wire_messages: Vec<Value> = messages.iter().cloned().map(|mut message| {
             if let Some(object) = message.as_object_mut() {
                 object.remove("is_error");
                 object.remove("_responses_output");
+                if object.get("role").and_then(Value::as_str) == Some("assistant") {
+                    if is_deepseek && supports_thinking && !thinking_disabled {
+                        if object.get("tool_calls").is_some() && !object.contains_key("reasoning_content") {
+                            object.insert("reasoning_content".to_string(), json!(""));
+                        }
+                    } else if !is_deepseek {
+                        object.remove("reasoning_content");
+                    }
+                    if !is_openrouter {
+                        object.remove("reasoning_details");
+                    }
+                    if !is_gemini {
+                        if let Some(calls) = object.get_mut("tool_calls").and_then(Value::as_array_mut) {
+                            for tc in calls {
+                                if let Some(tc_obj) = tc.as_object_mut() {
+                                    tc_obj.remove("extra_content");
+                                }
+                            }
+                        }
+                    }
+                }
             }
             message
         }).collect();
-        let resp = match req
-            .json(&json!({
-                "model": model_id,
-                "messages": wire_messages,
-                "tools": tools,
-                "tool_choice": "auto",
-                "stream": true
-            }))
-            .send()
-        {
-            Ok(resp) => resp,
-            Err(err) => return Some(tool_failure(format!("{provider_name} unreachable: {err}"), &provider_name, &model_id)),
+
+        let mut payload = json!({
+            "model": model_id,
+            "messages": wire_messages,
+            "tools": tools,
+            "tool_choice": "auto",
+            "stream": true
+        });
+        if is_deepseek && thinking_disabled {
+            payload["thinking"] = json!({ "type": "disabled" });
+        } else if let Some(ref eff) = effort_norm {
+            if supports_thinking && matches!(eff.as_str(), "low" | "medium" | "high" | "max") {
+                if provider_id == "openai" || provider_id == "xai" || provider_id == "openrouter" {
+                    payload["reasoning_effort"] = json!(if eff == "max" { "high" } else { eff.as_str() });
+                }
+            }
+        }
+
+        let mut attempt = 0usize;
+        let resp = loop {
+            let mut req = http
+                .post(&url)
+                .header("User-Agent", concat!("quixi-desk/", env!("CARGO_PKG_VERSION")))
+                .header("content-type", "application/json")
+                .header("accept", "text/event-stream");
+            if !credential.is_empty() {
+                req = req.header("Authorization", format!("Bearer {}", credential));
+            }
+            if provider_id == "openrouter" {
+                req = req
+                    .header("HTTP-Referer", "https://quixidesk.local")
+                    .header("X-Title", "QuixiDesk");
+            }
+            match req.json(&payload).send() {
+                Ok(resp) => {
+                    let code = resp.status().as_u16();
+                    if (code == 429 || code == 529) && attempt < 2 {
+                        let wait_ms = resp
+                            .headers()
+                            .get("retry-after")
+                            .and_then(|v| v.to_str().ok())
+                            .and_then(|s| s.trim().parse::<u64>().ok())
+                            .map(|secs| (secs * 1000).min(5_000))
+                            .unwrap_or(400 * (attempt as u64 + 1));
+                        attempt += 1;
+                        std::thread::sleep(std::time::Duration::from_millis(wait_ms));
+                        continue;
+                    }
+                    break resp;
+                }
+                Err(err) => {
+                    return Some(tool_failure(
+                        format!("{provider_name} unreachable: {err}"),
+                        &provider_name,
+                        &model_id,
+                    ))
+                }
+            }
         };
 
         if !resp.status().is_success() {
@@ -3091,18 +3378,20 @@ impl ProviderManager {
             return Some(tool_failure(format!("{provider_name} returned HTTP {} for model `{model_id}`: {}", status.as_u16(), body.chars().take(400).collect::<String>()), &provider_name, &model_id));
         }
 
-        let (text, thinking, tool_calls) = match parse_tool_stream(BufReader::new(resp), &mut on_chunk) {
+        let (text, thinking, reasoning_details, tool_calls, usage) = match parse_tool_stream(BufReader::new(resp), &mut on_chunk) {
             Ok(turn) => turn,
             Err(error) => {
                 let fallback_text = format!("Provider turn failed: {error}");
                 return Some(ProviderToolTurn {
                     text: if text_or_empty(&fallback_text) { fallback_text } else { String::new() },
                     thinking: String::new(),
+                    reasoning_details: None,
                     tool_calls: Vec::new(),
                     response_items: Vec::new(),
                     provider_name,
                     model_id,
                     stream_error: Some(error),
+                    usage: None,
                 });
             }
         };
@@ -3117,10 +3406,12 @@ impl ProviderManager {
             response_items: Vec::new(),
             text,
             thinking,
+            reasoning_details,
             tool_calls,
             provider_name,
             model_id,
             stream_error: None,
+            usage,
         })
     }
 }
@@ -3130,11 +3421,13 @@ fn text_or_empty(s: &str) -> bool {
 }
 
 fn parse_tool_stream<R: std::io::BufRead, F: FnMut(StreamChunk)>(reader: R, mut on_chunk: F)
-    -> Result<(String, String, Vec<ProviderToolCall>), String> {
+    -> Result<(String, String, Option<Value>, Vec<ProviderToolCall>, Option<ProviderTokenUsage>), String> {
         let mut text = String::new();
         let mut thinking = String::new();
+        let mut reasoning_details: Vec<Value> = Vec::new();
         let mut calls: Vec<ProviderToolCall> = Vec::new();
         let mut finish_reason = None;
+        let mut usage: Option<ProviderTokenUsage> = None;
         for line in reader.lines() {
             let line = line.map_err(|error| format!("Interrupted provider stream: {error}"))?;
             let trimmed = line.trim();
@@ -3148,6 +3441,31 @@ fn parse_tool_stream<R: std::io::BufRead, F: FnMut(StreamChunk)>(reader: R, mut 
             let ev: Value = serde_json::from_str(data_str)
                 .map_err(|error| format!("Invalid provider event: {error}"))?;
             if ev.get("error").is_some() { return Err(format!("Provider stream error: {}", ev["error"])); }
+            if let Some(u) = ev.get("usage").and_then(Value::as_object) {
+                let prompt_total = u.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(0);
+                let completion = u.get("completion_tokens").and_then(Value::as_u64).unwrap_or(0);
+                let cache_hit = u
+                    .get("prompt_cache_hit_tokens")
+                    .and_then(Value::as_u64)
+                    .or_else(|| {
+                        u.get("prompt_tokens_details")
+                            .and_then(|d| d.get("cached_tokens"))
+                            .and_then(Value::as_u64)
+                    })
+                    .unwrap_or(0);
+                let reasoning_tok = u
+                    .get("completion_tokens_details")
+                    .and_then(|d| d.get("reasoning_tokens"))
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                usage = Some(ProviderTokenUsage {
+                    input_tokens: prompt_total.saturating_sub(cache_hit),
+                    output_tokens: completion,
+                    cache_read_tokens: cache_hit,
+                    cache_write_tokens: 0,
+                    reasoning_tokens: reasoning_tok,
+                });
+            }
             if let Some(reason) = ev.pointer("/choices/0/finish_reason").and_then(Value::as_str) {
                 finish_reason = Some(reason.to_string());
             }
@@ -3160,6 +3478,12 @@ fn parse_tool_stream<R: std::io::BufRead, F: FnMut(StreamChunk)>(reader: R, mut 
             {
                 thinking.push_str(th);
                 on_chunk(StreamChunk::Thinking(th.to_string()));
+            }
+            if let Some(details) = delta
+                .and_then(|d| d.get("reasoning_details"))
+                .and_then(Value::as_array)
+            {
+                reasoning_details.extend(details.iter().cloned());
             }
             if let Some(t) = delta
                 .and_then(|d| d.get("content"))
@@ -3180,6 +3504,7 @@ fn parse_tool_stream<R: std::io::BufRead, F: FnMut(StreamChunk)>(reader: R, mut 
                             id: String::new(),
                             name: String::new(),
                             arguments: String::new(),
+                            extra_content: None,
                         });
                     }
                     let slot = &mut calls[index];
@@ -3195,6 +3520,11 @@ fn parse_tool_stream<R: std::io::BufRead, F: FnMut(StreamChunk)>(reader: R, mut 
                     }
                     if let Some(args) = tc.pointer("/function/arguments").and_then(|v| v.as_str()) {
                         slot.arguments.push_str(args);
+                    }
+                    if let Some(extra) = tc.get("extra_content") {
+                        if !extra.is_null() {
+                            slot.extra_content = Some(extra.clone());
+                        }
                     }
                 }
             }
@@ -3224,8 +3554,9 @@ fn parse_tool_stream<R: std::io::BufRead, F: FnMut(StreamChunk)>(reader: R, mut 
             .into_iter()
             .filter(|c| !c.name.is_empty())
             .collect();
+        let details_opt = (!reasoning_details.is_empty()).then_some(Value::Array(reasoning_details));
 
-        Ok((text, thinking, tool_calls))
+        Ok((text, thinking, details_opt, tool_calls, usage))
 }
 
 #[cfg(test)]
@@ -3452,7 +3783,7 @@ mod tool_stream_regression_tests {
     }
     #[test]
     fn complete_stream_returns_valid_calls() {
-        let (_, _, calls) = parse_tool_stream(Cursor::new(stream(r#"{"command":"pwd"}"#, Some("tool_calls"))), |_| {}).unwrap();
+        let (_, _, _, calls, _) = parse_tool_stream(Cursor::new(stream(r#"{"command":"pwd"}"#, Some("tool_calls"))), |_| {}).unwrap();
         assert_eq!(calls.len(), 1);
     }
     #[test]

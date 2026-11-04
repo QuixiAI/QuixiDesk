@@ -31,6 +31,9 @@ async function fixture({
   pickedFolder = null,
   folderPaths = {},
   sendGate = null,
+  collabState = null,
+  jobs = [],
+  workspaceFiles = [],
 } = {}) {
   const dom = new JSDOM(
     '<!doctype html><div id="app"></div><div id="toasts"></div>',
@@ -74,6 +77,9 @@ async function fixture({
     hasConfiguredProvider: true,
     activeProvider: providerId,
     activeModel: "fixture-model",
+    subagentProvider: "",
+    subagentModel: "",
+    subagentModelUserSelected: false,
     providers: [
       {
         id: providerId,
@@ -82,7 +88,10 @@ async function fixture({
         selectedModel: "fixture-model",
         baseUrl: "http://127.0.0.1:18775/v1",
         apiFormat: "openai",
-        models: [{ id: "fixture-model", label: "Fixture model" }],
+        models: [
+          { id: "fixture-model", label: "Fixture model" },
+          { id: "smaller-fixture-model", label: "Smaller fixture model" },
+        ],
       },
     ],
   };
@@ -127,6 +136,41 @@ async function fixture({
     }
     if (member === "listSubagents") return structuredClone(subagents.map(({messages,prompt,...row}) => row));
     if (member === "getSubagent") return structuredClone(subagents.find(c=>c.agentId===args[1]));
+    if (member === "getCollabState") return collabState ? structuredClone(collabState) : null;
+    if (member === "setPlanMode") {
+      collabState ||= { todos: [], planMode: { active: false }, questions: [], deliverables: [], team: { enabled: false, tasks: [] }, contextMeter: {} };
+      collabState.planMode.active = Boolean(args[1]);
+      return structuredClone(collabState);
+    }
+    if (member === "compactSession") {
+      return { compacted: true, shadowedMessages: 4, tokensBefore: 9000, tokensAfter: 2200, savedTokens: 6800 };
+    }
+    if (member === "manageGoal") {
+      collabState ||= { todos: [], planMode: { active: false }, questions: [], deliverables: [], team: { enabled: false, tasks: [] }, contextMeter: {} };
+      if (args[1] === "pause" && collabState.goal) { collabState.goal.phase = "paused"; collabState.goal.activation = "disarmed"; }
+      if (args[1] === "resume" && collabState.goal) { collabState.goal.phase = "active"; collabState.goal.activation = "armed"; }
+      if (args[1] === "clear") collabState.goal = null;
+      return structuredClone(collabState.goal || { cleared: true });
+    }
+    if (member === "setTeamMode") {
+      collabState ||= { todos: [], planMode: { active: false }, questions: [], deliverables: [], team: { enabled: false, tasks: [] }, contextMeter: {} };
+      collabState.team = { enabled: Boolean(args[1]), tasks: collabState.team?.tasks || [] };
+      return structuredClone(collabState.team);
+    }
+    if (member === "answerUserQuestion") {
+      const q = (collabState?.questions || []).find(x => x.callId === args[1]);
+      if (q) { q.state = "settled"; q.answers = args[2]; }
+      return { dispatched: true };
+    }
+    if (member === "listJobs") return structuredClone(jobs);
+    if (member === "readJobOutput") return { text: "job stdout line 1\n", next: 18, lossy: false };
+    if (member === "killJob") return { status: "requested" };
+    if (member === "searchWorkspaceFiles") return structuredClone(workspaceFiles);
+    if (member === "startShellPty") return { ok: true, id: args[0], motd: "$ " };
+    if (member === "readShellPty") return { id: args[0], text: "$ pwd\n/workspace\n$ ", nextOffset: 19 };
+    if (member === "writeShellPty" || member === "stopShellPty") return null;
+    if (member === "getWorkingTreeStatus") return { files: [{ path: "src/lib.rs", status: "modified", additions: 5, deletions: 2 }], additions: 5, deletions: 2 };
+    if (member === "exportSessionMarkdown") return { sessionId: args[0], title: "Existing conversation", markdown: "# Existing conversation\n\n## You\n\nHello" };
     if (member === "getToolPermissions") return structuredClone(permissions);
     if (member === "resolveToolPermission") {
       const index = permissions.findIndex((p) => p.requestId === args[1]);
@@ -238,7 +282,14 @@ async function fixture({
     calls.push({ route, body });
     if (route === "/__eipc__/open-external") return {ok:true};
     if (route === "/api/quixi/providers") return providers;
-    if (route === "/api/quixi/providers/complete-onboarding") return providers;
+    if (route === "/api/quixi/providers/complete-onboarding") {
+      if (body && typeof body.subagentModel === "string") {
+        providers.subagentModel = body.subagentModel;
+        providers.subagentProvider = body.subagentModel ? (body.subagentProvider || providers.activeProvider) : "";
+        providers.subagentModelUserSelected = Boolean(body.subagentModel);
+      }
+      return structuredClone(providers);
+    }
     if (route === "/api/quixi/providers/test") return { ok: true, message: `Connected (${catalogModels.length} models available)`, discoveredModels: catalogModels };
     if (route === "/api/quixi/browser")
       return {
@@ -1605,4 +1656,249 @@ test("ordinary clipboard text retains native paste behavior", async () => {
   f.w.document.querySelector("#prompt").dispatchEvent(event);
   assert.equal(event.defaultPrevented, false);
  } finally { f.close(); }
+});
+
+test("subagent model approval card lets user pick a smaller model or keep active model", async () => {
+  const f = await fixture({
+    permissions: [
+      {
+        requestId: "subagent-model-req-1",
+        toolName: "Task",
+        kind: "subagent_model",
+        title: "Summarize crate layout",
+        parentModel: "google/gemini-4-carbon-eap",
+        requestedModel: "google/gemini-flash-lite",
+        requestedProvider: "openrouter",
+        summary: "Task \"Summarize crate layout\" wants to run on google/gemini-flash-lite instead of google/gemini-4-carbon-eap",
+        availableModels: [
+          { providerId: "openrouter", providerName: "OpenRouter", model: "google/gemini-flash-lite", label: "Gemini Flash Lite" },
+          { providerId: "openrouter", providerName: "OpenRouter", model: "openai/gpt-mini", label: "GPT Mini" },
+        ],
+      },
+    ],
+  });
+  try {
+    f.sessions[0].isRunning = true;
+    await f.click("Existing conversation");
+    const card = f.w.document.querySelector(".permission-card");
+    assert.ok(card);
+    assert.match(card.textContent, /Choose model for subagent\?/);
+    assert.match(card.textContent, /google\/gemini-4-carbon-eap/);
+    const select = card.querySelector('select[aria-label="Subagent model"]');
+    assert.ok(select);
+    select.value = "openrouter:openai/gpt-mini";
+    select.dispatchEvent(new f.w.Event("change", { bubbles: true }));
+    await f.click("Always use for subagents");
+    const resolved = f.calls.find((c) => c.member === "resolveToolPermission");
+    assert.ok(resolved);
+    assert.deepEqual([...resolved.args], [
+      "fixture-one",
+      "subagent-model-req-1",
+      "select_always:openrouter:openai/gpt-mini",
+    ]);
+  } finally {
+    f.close();
+  }
+});
+
+test("settings providers tab lets user view and reset subagent model preference", async () => {
+  const f = await fixture();
+  try {
+    await f.click("Settings");
+    await f.click("Providers");
+    const select = f.w.document.querySelector('select[aria-label="Subagent model preference"]');
+    assert.ok(select);
+    assert.equal(select.value, "");
+    select.value = "custom:smaller-fixture-model";
+    select.dispatchEvent(new f.w.Event("change", { bubbles: true }));
+    await wait();
+    const saveCall = f.calls.find(
+      (c) => c.route === "/api/quixi/providers/complete-onboarding" && c.body?.subagentModel === "smaller-fixture-model",
+    );
+    assert.ok(saveCall);
+    const updatedSelect = f.w.document.querySelector('select[aria-label="Subagent model preference"]');
+    assert.equal(updatedSelect.value, "custom:smaller-fixture-model");
+    updatedSelect.value = "";
+    updatedSelect.dispatchEvent(new f.w.Event("change", { bubbles: true }));
+    await wait();
+    const resetCall = f.calls.find(
+      (c) => c.route === "/api/quixi/providers/complete-onboarding" && c.body?.subagentModel === "",
+    );
+    assert.ok(resetCall);
+  } finally {
+    f.close();
+  }
+});
+
+test("plan review card, timed continued question, context meter, and deliverables card work end-to-end", async () => {
+  const f = await fixture({
+    permissions: [
+      {
+        requestId: "plan-req-1",
+        toolName: "ExitPlanMode",
+        kind: "plan_review",
+        plan: "# Refactor Plan\n- Update engine\n- Add replay tests",
+      },
+    ],
+    collabState: {
+      todos: [
+        { content: "Inspect engine", status: "completed" },
+        { content: "Wire collaboration UI", status: "in_progress" },
+      ],
+      planMode: { active: true },
+      goal: {
+        id: "goal-1",
+        revision: 2,
+        objective: "Ship DeepSeek Harness upgrades",
+        phase: "active",
+        activation: "armed",
+        roundsStarted: 1,
+        maxGoalRounds: 10,
+      },
+      questions: [
+        {
+          callId: "q-continued-1",
+          state: "continued",
+          questions: [
+            {
+              id: "storage",
+              header: "Storage",
+              question: "Which backend should we use?",
+              options: [{ label: "SQLite" }, { label: "JSONL" }],
+            },
+          ],
+        },
+      ],
+      deliverables: [
+        {
+          turnIndex: 1,
+          assistantUuid: "asst-deliv-1",
+          presentedFiles: [{ path: "crates/quixi-engine/src/spill.rs", description: "Spill policy" }],
+          workspaceChanges: {
+            turnId: "t1",
+            cwd: "/workspace",
+            totalFiles: 1,
+            added: 12,
+            deleted: 3,
+            files: [
+              {
+                path: "crates/quixi-engine/src/spill.rs",
+                display: "crates/quixi-engine/src/spill.rs",
+                status: "added",
+                added: 12,
+                deleted: 3,
+                hunks: [{ oldStart: 1, oldLines: 1, newStart: 1, newLines: 2, lines: ["-old", "+new1", "+new2"] }],
+              },
+            ],
+          },
+        },
+      ],
+      team: { enabled: false, tasks: [] },
+      contextMeter: {
+        inputTokens: 4000,
+        cacheReadTokens: 16000,
+        outputTokens: 1200,
+        projectedTokens: 21200,
+        contextWindow: 1048576,
+        compactions: 1,
+      },
+    },
+    workspaceFiles: [{ path: "/workspace/Cargo.toml", relativePath: "Cargo.toml", name: "Cargo.toml", isDir: false }],
+  });
+  try {
+    f.sessions[0].bufferedMessages = [
+      { type: "user", uuid: "u-sec-1", message: { content: [{ type: "text", text: "Check token sk-secret1234567890abcdefXYZ" }] } },
+      { type: "assistant", uuid: "asst-deliv-1", message: { content: [{ type: "text", text: "Implemented the spill store." }] } },
+      { type: "user", uuid: "u-2", message: { content: [{ type: "text", text: "Second turn request" }] } },
+    ];
+    await f.click("Existing conversation");
+
+    // 1. Secret masking hides raw sk-... token in display while offering Reveal secret:
+    const convoText = f.w.document.getElementById("conversation").textContent;
+    assert.ok(!convoText.includes("sk-secret1234567890abcdefXYZ"));
+    assert.match(convoText, /sk-se••••••••XYZ/);
+    await f.click("Reveal secret");
+    assert.ok(f.w.document.getElementById("conversation").textContent.includes("sk-secret1234567890abcdefXYZ"));
+
+    // 2. Turn outline rail & deliverables card rendered:
+    assert.ok(f.w.document.querySelector(".turn-outline-rail"));
+    const deliv = f.w.document.querySelector(".deliverables-card");
+    assert.ok(deliv);
+    assert.match(deliv.textContent, /1 changed file/);
+    assert.match(deliv.textContent, /\+12/);
+    assert.match(deliv.textContent, /Spill policy/);
+
+    // 3. GoalBar, TodoBar, and Context Meter pill rendered:
+    assert.match(f.w.document.querySelector(".goal-bar").textContent, /Round 1\/10/);
+    assert.match(f.w.document.querySelector(".todo-bar").textContent, /Tasks 1\/2/);
+    const meter = f.w.document.querySelector(".context-meter-pill");
+    assert.ok(meter);
+    assert.match(meter.textContent, /80% cached/);
+
+    // 4. Quote button inserts assistant snippet into composer:
+    await f.click("Quote");
+    assert.match(f.w.document.getElementById("prompt").value, /^> Implemented the spill store\./);
+
+    // 5. Plan Review card approves plan:
+    const planCard = f.w.document.querySelector(".plan-review-card");
+    assert.ok(planCard);
+    assert.match(planCard.textContent, /Refactor Plan/);
+    await f.click("Approve & implement");
+    assert.ok(f.calls.some(c => c.member === "resolveToolPermission" && c.args[2] === "approve"));
+
+    // 6. Continued timed question accepts late reply:
+    const contCard = f.w.document.querySelector(".ask-user-card.continued");
+    assert.ok(contCard);
+    const radio = contCard.querySelector('input[type="radio"]');
+    radio.checked = true;
+    radio.dispatchEvent(new f.w.Event("change", { bubbles: true }));
+    await f.click("Submit answer");
+    const ansCall = f.calls.find(c => c.member === "answerUserQuestion");
+    assert.ok(ansCall);
+    assert.equal(ansCall.args[1], "q-continued-1");
+    assert.deepEqual([...ansCall.args[2][0].selected], ["SQLite"]);
+
+    // 7. Workspace Dock switches across Files, Changes, Terminal, and Tasks tabs:
+    await f.click("Files & context");
+    assert.ok(f.w.document.querySelector(".workspace-dock"));
+    await f.click("Changes");
+    assert.match(f.w.document.querySelector(".dock-body").textContent, /src\/lib\.rs/);
+    await f.click("Terminal");
+    assert.match(f.w.document.querySelector(".dock-terminal-screen").textContent, /\/workspace/);
+    await f.click("Tasks");
+    assert.match(f.w.document.querySelector(".dock-body").textContent, /Agent Team task board/);
+  } finally {
+    f.close();
+  }
+});
+
+test("Smart Auto safety note, Markdown conversation export, and DeepSeek Messages API selector work", async () => {
+  const f = await fixture({
+    providerId: "deepseek",
+    permissions: [
+      {
+        requestId: "smart-req-1",
+        toolName: "Bash",
+        input: { command: "git push origin main" },
+        aiReviewNote: "Pushes local commits to a remote repository.",
+      },
+    ],
+  });
+  try {
+    await f.click("Existing conversation");
+    const modeSelect = f.w.document.querySelector('select[aria-label="Tool permission mode"]');
+    assert.ok([...modeSelect.options].some(o => o.value === "smartAuto"));
+
+    const card = f.w.document.querySelector(".permission-card");
+    assert.ok(card);
+    assert.match(card.textContent, /Smart Auto safety note: Pushes local commits/);
+
+    await f.click("Task actions");
+    await f.click("Export Markdown");
+    assert.match(f.w.document.body.textContent, /# Existing conversation/);
+    await f.click("Copy Markdown");
+    assert.ok(f.calls.some(c => c.clipboard && c.clipboard.includes("# Existing conversation")));
+  } finally {
+    f.close();
+  }
 });

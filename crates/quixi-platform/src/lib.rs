@@ -1,5 +1,6 @@
 #[cfg(target_os = "linux")]
 pub mod linux;
+pub mod sandbox;
 
 use anyhow::{bail, Context, Result};
 use base64::Engine;
@@ -70,6 +71,27 @@ impl SafeFs {
             );
         }
         Ok(cur)
+    }
+
+    /// Resolves either a relative or an already-rooted path strictly beneath `root`,
+    /// rejecting symlinks inside `root` or parent traversals that escape `root`.
+    pub fn resolve_target_beneath(root: &Path, raw_path: &Path) -> Result<PathBuf> {
+        let canonical_root = fs::canonicalize(root)
+            .with_context(|| format!("SafeFs root cannot be canonicalized: {}", root.display()))?;
+        if raw_path.is_absolute() {
+            if let Ok(rel) = raw_path.strip_prefix(&canonical_root) {
+                return Self::resolve_beneath(&canonical_root, rel);
+            }
+            if let Ok(rel) = raw_path.strip_prefix(root) {
+                return Self::resolve_beneath(&canonical_root, rel);
+            }
+            bail!(
+                "SafeFs containment violation: {} is outside {}",
+                raw_path.display(),
+                canonical_root.display()
+            );
+        }
+        Self::resolve_beneath(&canonical_root, raw_path)
     }
 
     pub fn read_file_beneath(root: &Path, rel_path: &Path) -> Result<Vec<u8>> {
@@ -503,10 +525,14 @@ impl ComputerUse {
         let _ = stream.set_write_timeout(Some(Duration::from_millis(1000)));
 
         let body_slice = body.unwrap_or(&[]);
+        let token_hdr = quixi_proto::paths::automation_token()
+            .map(|t| format!("X-Quixi-Automation-Token: {t}\r\n"))
+            .unwrap_or_default();
         let req = format!(
-            "{} {} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            "{} {} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             method,
             path,
+            token_hdr,
             body_slice.len()
         );
         stream.write_all(req.as_bytes()).ok()?;
@@ -534,6 +560,39 @@ impl ComputerUse {
         let body = serde_json::to_vec(payload).ok()?;
         let bytes = Self::fetch_quixi_bridge_bytes("POST", "/action", Some(&body))?;
         serde_json::from_slice(&bytes).ok()
+    }
+
+    /// Captures the OS desktop first (rather than QuixiDesk's own WebView), falling back
+    /// to the WebView bridge only in headless environments without screen capture access.
+    pub fn capture_desktop_screenshot_base64() -> Result<String> {
+        #[cfg(target_os = "linux")]
+        if let Ok(bytes) = crate::linux::screenshot_png() {
+            return Ok(base64::engine::general_purpose::STANDARD.encode(&bytes));
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let tmp = std::env::temp_dir().join(format!(
+                "quixi-desktop-screen-{}-{}.png",
+                std::process::id(),
+                uuid::Uuid::new_v4()
+            ));
+            if !Self::is_headless_test_env() && unsafe { CGPreflightScreenCaptureAccess() } {
+                let status = Command::new("/usr/sbin/screencapture")
+                    .args(["-x", "-t", "png"])
+                    .arg(&tmp)
+                    .status();
+                if let Ok(st) = status {
+                    if st.success() && tmp.exists() {
+                        let bytes = fs::read(&tmp)?;
+                        let _ = fs::remove_file(&tmp);
+                        if bytes.len() > 100 {
+                            return Ok(base64::engine::general_purpose::STANDARD.encode(&bytes));
+                        }
+                    }
+                }
+            }
+        }
+        Self::capture_screenshot_base64()
     }
 
     /// Captures a screenshot as a base64 PNG string using the live QuixiDesk WKWebView bridge or OS-native screen capture.
@@ -2042,10 +2101,16 @@ impl BrowserUse {
             lines.push(line);
         }
         let tree = lines.join("\n");
-        if tree.len() > max_chars {
+        let char_count = tree.chars().count();
+        if char_count > max_chars {
+            let cut = tree
+                .char_indices()
+                .nth(max_chars)
+                .map(|(idx, _)| idx)
+                .unwrap_or(tree.len());
             format!(
                 "{}\n... [truncated to {} chars]",
-                &tree[..max_chars],
+                &tree[..cut],
                 max_chars
             )
         } else {

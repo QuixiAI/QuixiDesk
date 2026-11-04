@@ -20,7 +20,26 @@ struct Attachment {
 }
 
 pub(crate) fn needs_workspace(name: &str) -> bool {
-    matches!(name, "Read" | "Write" | "Edit" | "Grep" | "ListDirectory" | "Bash")
+    matches!(
+        name,
+        "Read"
+            | "Write"
+            | "Edit"
+            | "Grep"
+            | "ListDirectory"
+            | "Bash"
+            | "Glob"
+            | "ApplyPatch"
+            | "Lsp"
+            | "CreateWorktree"
+            | "TerminalOpen"
+            | "TerminalSend"
+            | "TerminalRead"
+            | "TerminalSignal"
+            | "TerminalClose"
+            | "WorkingDirectory"
+            | "Present"
+    )
 }
 
 fn image_signature(bytes: &[u8], mime: &str) -> bool {

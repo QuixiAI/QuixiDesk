@@ -10,11 +10,11 @@ The bridge exposes application APIs and the `quixi.web` RPC namespace. Backgroun
 
 ## Workspace engine
 
-`quixi-engine` owns conversation state, projects, local artifacts, provider selection, turn cancellation, and storage status. `quixi-ipc` adapts interface requests to engine operations. `quixi-proto` defines the serialized session and project records.
+`quixi-engine` owns conversation state, projects, local artifacts, provider selection, turn cancellation, context compaction, output spill storage, background jobs, collaboration state (`PlanMode`, `TodoWrite`, persistent `Goal` objectives, timed `AskUserQuestion` flows, `Team` task boards, and turn deliverables), subagent/Ralph/Workflow delegation, and storage status. `quixi-ipc` adapts interface requests to engine operations. `quixi-proto` defines the serialized session and project records.
 
-`quixi-workspace` provides file discovery, Git inspection, shell execution, and transcript search. `quixi-platform` implements OS services and browser snapshots. `quixi-mcp` exposes built-in tools and configured external stdio tools. `quixi-netstack` manages network policy and provider credentials.
+`quixi-workspace` provides file discovery, shadow-index per-turn Git snapshots and unified diffs, Git worktree management, OS-confined shell execution, persistent `openpty` terminal sessions, and transcript search. `quixi-platform` implements OS services, `SafeFs` symlink-safe containment, Seatbelt/Bubblewrap process confinement, and browser snapshots. `quixi-mcp` exposes built-in tools and configured external stdio/HTTP/SSE tools. `quixi-netstack` manages network policy and provider credentials.
 
-The interface renders stored messages and incremental streaming events. Tool results keep their failure state visible. Manual mode blocks shell execution and mutations; broader modes are selected explicitly.
+The interface renders stored messages, reasoning disclosures, turn outlines, per-turn changed-file/deliverable cards, context occupancy meters, and incremental streaming events. Tool results keep their failure state visible, while oversized outputs spill verbatim to session-scoped files with head/tail inline previews. Manual mode blocks shell execution and mutations; Allow file edits permits workspace edits; Smart Auto runs a fail-closed model safety check on routine commands; Auto is selected explicitly.
 
 ## Local persistence
 
